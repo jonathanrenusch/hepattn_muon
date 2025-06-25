@@ -2,18 +2,9 @@ seed_everything: 42
 name: HC-v3
 
 data:
-  # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/training_test
-  # val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/training_test
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/training_test
-  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/train_data
-  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/val_data
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/test_data
-  # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/zenodo_data/train_data
-  # val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/zenodo_data/val_data
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/zenodo_data/test_data
-  # train_dir: /share/rcifdata/maxhart/data/trackml/prepped/train/
-  # val_dir: /share/rcifdata/maxhart/data/trackml/prepped/val/
-  # test_dir: /share/rcifdata/maxhart/data/trackml/prepped/test/
+  train_dir: /share/rcifdata/maxhart/data/trackml/prepped/train/
+  val_dir: /share/rcifdata/maxhart/data/trackml/prepped/val/
+  test_dir: /share/rcifdata/maxhart/data/trackml/prepped/test/
 
   num_workers: 10
   num_train: -1

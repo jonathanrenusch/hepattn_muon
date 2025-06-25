@@ -1,5 +1,5 @@
 seed_everything: 42
-name: TRK-v0-dice-focal-noce
+name: TRK-v0-full
 
 data:
   train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/train_data
@@ -71,6 +71,12 @@ trainer:
   default_root_dir: logs
   gradient_clip_val: 0.1
   enable_progress_bar: true
+
+  #profiler:
+  #  class_path: lightning.pytorch.profilers.PyTorchProfiler
+  #  init_args:
+  #    dirpath: ./profile_logs/
+  #    filename: profile.json
 
   # Specify loggers here
   logger:
@@ -171,6 +177,7 @@ model:
           norm: RMSNorm
 
       num_decoder_layers: 4
+      intermediate_losses: true
       decoder_layer_config:
         dim: *dim
         norm: RMSNorm
@@ -187,9 +194,9 @@ model:
                 output_object: track
                 target_object: particle
                 losses:
-                  object_ce: 1.0
+                  object_bce: 1.0
                 costs:
-                  object_ce: 1.0
+                  object_bce: 1.0
                 dim: *dim
                 null_weight: 1.0
             - class_path: hepattn.models.task.ObjectHitMaskTask
@@ -200,12 +207,12 @@ model:
                 output_object: track
                 target_object: particle
                 losses:
-                  #mask_ce: 100.0
-                  mask_dice: 2.0
+                  mask_bce: 100.0
+                  #mask_dice: 2.0
                   mask_focal: 50.0
                 costs:
-                  #mask_ce: 100.0
-                  mask_dice: 2.0
+                  mask_bce: 100.0
+                  #mask_dice: 2.0
                   mask_focal: 50.0
                 dim: *dim
                 null_weight: 1.0
@@ -215,4 +222,3 @@ model:
         init_args:
           default_solver: scipy
           adaptive_solver: true
-          adaptive_check_interval: 1000
