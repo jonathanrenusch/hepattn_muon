@@ -5,9 +5,9 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 
 class Checkpoint(ModelCheckpoint):
-    def __init__(self, monitor: str = "val/loss", **kwargs) -> None:
+    def __init__(self, monitor: str = "val/loss", save_top_k: int = 1, **kwargs) -> None:
         filename = "epoch={epoch:03d}-" + monitor.replace("/", "_") + "={" + monitor + ":.5f}"
-        super().__init__(save_top_k=-1, monitor=monitor, filename=filename, auto_insert_metric_name=False, **kwargs)
+        super().__init__(save_top_k=save_top_k, monitor=monitor, filename=filename, auto_insert_metric_name=False, **kwargs)
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer=trainer, pl_module=pl_module, stage=stage)

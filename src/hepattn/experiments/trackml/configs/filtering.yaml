@@ -2,9 +2,18 @@ seed_everything: 42
 name: HC-v3
 
 data:
-  train_dir: /share/rcifdata/maxhart/data/trackml/prepped/train/
-  val_dir: /share/rcifdata/maxhart/data/trackml/prepped/val/
-  test_dir: /share/rcifdata/maxhart/data/trackml/prepped/test/
+  # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/training_test
+  # val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/training_test
+  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/training_test
+  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/train_data
+  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/val_data
+  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/test_data
+  # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/zenodo_data/train_data
+  # val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/zenodo_data/val_data
+  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/zenodo_data/test_data
+  # train_dir: /share/rcifdata/maxhart/data/trackml/prepped/train/
+  # val_dir: /share/rcifdata/maxhart/data/trackml/prepped/val/
+  # test_dir: /share/rcifdata/maxhart/data/trackml/prepped/test/
 
   num_workers: 10
   num_train: -1
@@ -57,11 +66,11 @@ data:
 
 trainer:
   # Training stuff here
-  max_epochs: 30
+  max_epochs: 50
   accelerator: gpu
-  devices: 1
+  devices: [0, 1]
   precision: bf16-mixed
-  log_every_n_steps: 50
+  log_every_n_steps: 1000
   default_root_dir: logs
   gradient_clip_val: 0.1
   enable_progress_bar: True
@@ -70,7 +79,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: trackml_filtering
+      project: trackml_filtering
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -78,7 +87,9 @@ trainer:
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
       init_args:
-        monitor: val/loss
+        monitor: val/acc
+        mode: max
+        save_top_k: 1
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
@@ -90,6 +101,14 @@ trainer:
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
         refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/acc
+        patience: 15 
+        min_delta: 0.0
+        mode: max
+        verbose: True 
+
 
 model:
   optimizer: Lion

@@ -25,6 +25,13 @@ def preprocess(in_dir: str, out_dir: str, overwrite: bool):
     overwrite : bool
         Whether to overwrite existing output files or not, by default false
     """
+    # Create the output directory if it does not exist
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Created output directory {out_dir}")
+    else:
+        print(f"Using existing output directory {out_dir}")
 
     # Load in the detector geometry config file
     detector_config_path = Path(in_dir).parent / "detectors.csv"

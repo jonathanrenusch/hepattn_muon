@@ -27,6 +27,7 @@ def load_detector(detector_path: Path) -> tuple[pd.DataFrame, dict]:
     except FileNotFoundError:
         detector = preprocess_detector(detector_orig)
         try:
+            print(f"Preprocessing detector {detector_path} to {detector_preproc}")
             with detector_preproc.open("xb") as f:
                 pickle.dump(detector, f)
         except FileExistsError:
