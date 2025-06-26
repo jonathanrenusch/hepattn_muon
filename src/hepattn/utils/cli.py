@@ -95,6 +95,16 @@ class CLI(LightningCLI):
     def after_instantiate_classes(self) -> None:
         """After instantiating classes, set the checkpoint path if not provided."""
         if self.subcommand == "test" and not self.trainer.ckpt_path:
-            config = self.config[self.subcommand]["config"]
-            assert len(config) == 1
-            self.trainer.ckpt_path = get_best_epoch(Path(config[0].rel_path))
+            # First try to get checkpoint path from config if explicitly provided
+            if hasattr(self.config.test, 'ckpt_path') and self.config.test.ckpt_path:
+                ckpt_path = Path(self.config.test.ckpt_path)
+                self.trainer.ckpt_path = str(ckpt_path)
+                print(f"Using checkpoint from config: {self.trainer.ckpt_path}")
+            # Otherwise try to find the best epoch from the config directory
+            elif "config" in self.config[self.subcommand] and len(self.config[self.subcommand]["config"]) >= 1:
+                config_path = Path(self.config[self.subcommand]["config"][0].rel_path)
+                best_epoch_path = get_best_epoch(config_path)
+                self.trainer.ckpt_path = str(best_epoch_path)
+                print(f"Using best epoch checkpoint: {self.trainer.ckpt_path}")
+            else:
+                raise ValueError("No checkpoint path found. Please provide --ckpt_path when running test.")

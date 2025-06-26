@@ -6,10 +6,9 @@ data:
   val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/val_data
   test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/test_data
 
-  hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn/logs/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694.ckpt
-  hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn/logs/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694.ckpt
-  hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn/logs/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694.ckpt
-
+  hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_train_data_eval.h5
+  hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_val_data_eval.h5
+  hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   num_workers: 10
   num_train: -1
   num_test: 10
@@ -63,9 +62,9 @@ data:
 
 trainer:
   # Training stuff here
-  max_epochs: 100
+  max_epochs: 30
   accelerator: gpu
-  devices: [1]
+  devices: 1
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
