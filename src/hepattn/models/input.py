@@ -37,7 +37,6 @@ class InputNet(nn.Module):
         self.net = net
         self.fields = fields
         self.posenc = posenc
-
     def forward(self, inputs: dict[str, Tensor]) -> Tensor:
         """Embed the set of input features into an embedding.
 
@@ -54,7 +53,10 @@ class InputNet(nn.Module):
         # Some input fields will be a vector, i.e. have shape (batch, keys, D) where D > 1
         # But must will be scalars, i.e. (batch, keys), so for these we reshape them to (batch, keys, 1)
         # After this we can then concatenate everything together
-
+        # print(f"Concatenating inputs for {self.input_name} with fields: {self.fields}")
+        # print("Inputs keys:", inputs.keys())
+        # print("Inputs:", inputs)
+        # print("Inputs shapes:", {field: inputs[f"{self.input_name}_{field}"].shape for field in self.fields})
         x = self.net(concat_tensors([inputs[f"{self.input_name}_{field}"] for field in self.fields]))
 
         # Perform an optional positional encoding using the positonal encoding fields

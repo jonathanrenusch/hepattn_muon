@@ -83,37 +83,73 @@ class TrackMLDataset(Dataset):
         # Load the event
         hits, particles = self.load_event(idx)
         num_particles = len(particles)
+        print("This is number of particles:", num_particles)
 
         # Build the input hits
         for feature, fields in self.inputs.items():
+            print("This is feature:", feature)
+            print("This is length of hits:", len(hits))
             inputs[f"{feature}_valid"] = torch.full((len(hits),), True).unsqueeze(0)
             targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
 
             for field in fields:
                 inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field].values).unsqueeze(0).half()
+        # print("Inputs:", inputs) # Inputs: {'hit_valid': tensor([[True, True, True,  ..., True, True, True]]), 'hit_x': tensor([[-0.9937, -0.7490, -0.6821,  ..., -1.5156, -1.3838, -1.4102]],
+    #    dtype=torch.float16), 'hit_y': tensor([[-0.0850, -0.0156, -0.0550,  ...,  0.1144,  0.0817,  0.0264]],
+    #    dtype=torch.float16), 'hit_z': tensor([[-15.0234, -15.0234, -15.0234,  ...,  14.9766,  14.9766,  14.9766]],
+    #    dtype=torch.float16), 'hit_r': tensor([[0.9971, 0.7495, 0.6846,  ..., 1.5195, 1.3857, 1.4102]],
+    #    dtype=torch.float16), 'hit_s': tensor([[15.0547, 15.0469, 15.0391,  ..., 15.0547, 15.0469, 15.0469]],
+    #    dtype=torch.float16), 'hit_eta': tensor([[-3.4062, -3.6914, -3.7832,  ...,  2.9844,  3.0762,  3.0586]],
+    #    dtype=torch.float16), 'hit_phi': tensor([[-3.0566, -3.1211, -3.0605,  ...,  3.0664,  3.0820,  3.1230]],
+    #    dtype=torch.float16), 'hit_u': tensor([[-0.9990, -1.3340, -1.4561,  ..., -0.6562, -0.7202, -0.7090]],
+    #    dtype=torch.float16), 'hit_v': tensor([[-0.0854, -0.0277, -0.1173,  ...,  0.0495,  0.0425,  0.0133]],
+    #    dtype=torch.float16), 'hit_charge_frac': tensor([[0.2773, 0.2861, 0.3020,  ..., 0.2908, 0.1534, 0.1146]],
+    #    dtype=torch.float16), 'hit_leta': tensor([[2.0918, 2.0918, 2.0918,  ..., 2.0918, 1.6230, 1.3027]],
+    #    dtype=torch.float16), 'hit_lphi': tensor([[0.8442, 0.8442, 0.8442,  ..., 0.8442, 1.1523, 1.2832]],
+    #    dtype=torch.float16), 'hit_lx': tensor([[0.0500, 0.0500, 0.0500,  ..., 0.0500, 0.0500, 0.0500]],
+    #    dtype=torch.float16), 'hit_ly': tensor([[0.0562, 0.0562, 0.0562,  ..., 0.0562, 0.1125, 0.1687]],
+    #    dtype=torch.float16), 'hit_lz': tensor([[0.3000, 0.3000, 0.3000,  ..., 0.3000, 0.3000, 0.3000]],
+    #    dtype=torch.float16), 'hit_geta': tensor([[-2.0918, -2.0918, -2.0918,  ...,  2.0918,  1.6230,  1.3027]],
+    #    dtype=torch.float16), 'hit_gphi': tensor([[-2.3359, -2.3359, -2.3359,  ...,  2.3691,  2.6777,  2.8066]],
+    #    dtype=torch.float16)}
+        # print("Targets:", targets) # Targets: {'hit_valid': tensor([[True, True, True,  ..., True, True, True]])}
 
         # Build the targets for whether a particle slot is used or not
         targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
         targets["particle_valid"][:num_particles] = True
         targets["particle_valid"] = targets["particle_valid"].unsqueeze(0)
+        # print("Targets particle_valid:", targets["particle_valid"])
+        # print("Targets particle_valid:", targets["particle_valid"].shape)
+        # Targets particle_valid: tensor([[ True,  True,  True,  ..., False, False, False]])
+# Targets particle_valid: torch.Size([1, 3000])
+
         message = f"Event {idx} has {num_particles}, but limit is {self.event_max_num_particles}"
         assert num_particles <= self.event_max_num_particles, message
 
         # Build the particle regression targets
         particle_ids = torch.from_numpy(particles["particle_id"].values)
 
+
         # Fill in empty slots with -1s and get the IDs of the particle on each hit
         particle_ids = torch.cat([particle_ids, -999 * torch.ones(self.event_max_num_particles - len(particle_ids))])
         hit_particle_ids = torch.from_numpy(hits["particle_id"].values)
 
         # Create the mask targets
+        # print("particle_ids:", particle_ids.unsqueeze(-1).shape)
+        # print("particle_ids:", particle_ids.unsqueeze(-1))
+        # print("hit_particle_ids:", hit_particle_ids.unsqueeze(-2).shape)
+        # print("hit_particle_ids:", hit_particle_ids.unsqueeze(-2))
         targets["particle_hit_valid"] = (particle_ids.unsqueeze(-1) == hit_particle_ids.unsqueeze(-2)).unsqueeze(0)
-
+        # print("Targets particle_hit_valid:", targets["particle_hit_valid"].shape)
+        # print("Targets particle_hit_valid:", targets["particle_hit_valid"])
         # Create the hit filter targets
         targets["hit_on_valid_particle"] = torch.from_numpy(hits["on_valid_particle"].to_numpy()).unsqueeze(0)
-
+        # print("Targets hit_on_valid_particle:", targets["hit_on_valid_particle"].shape)
+        # print("Targets hit_on_valid_particle:", targets["hit_on_valid_particle"])
         # Add sample ID
         targets["sample_id"] = torch.tensor([self.sample_ids[idx]], dtype=torch.int32)
+        # print("Targets sample_id:", targets["sample_id"].shape)
+        # Targets hit_on_valid_particle: torch.Size([1, 10000])
 
         # Build the regression targets
         if "particle" in self.targets:
@@ -121,6 +157,7 @@ class TrackMLDataset(Dataset):
                 # Null target/particle slots are filled with nans
                 # This acts as a sanity check that we correctly mask out null slots in the loss
                 x = torch.full((self.event_max_num_particles,), torch.nan)
+
                 x[:num_particles] = torch.from_numpy(particles[field].to_numpy()[: self.event_max_num_particles])
                 targets[f"particle_{field}"] = x.unsqueeze(0)
 
@@ -194,7 +231,8 @@ class TrackMLDataset(Dataset):
         # if two values are equal, which could cause subtle bugs
         # msg = f"Only {hits['phi'].nunique()} of the {len(hits)} have unique phi"
         # assert hits["phi"].nunique() == len(hits), msg
-
+        # print("This is type of hits:", type(hits))
+        # print("This is len of hits:", len(hits))
         return hits, particles
 
 

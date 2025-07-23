@@ -1,0 +1,431 @@
+from pathlib import Path
+import os
+import yaml
+import numpy as np
+import pandas as pd
+import torch
+from lightning import LightningDataModule
+from torch.utils.data import DataLoader, Dataset
+
+
+def is_valid_file(path):
+    path = Path(path)
+    return path.is_file() and path.stat().st_size > 0
+
+
+class AtlasMuonDataset(Dataset):
+    def __init__(
+        self,
+        dataset_dir: str,
+        inputs: dict,
+        targets: dict,
+        num_events: int = -1,
+        particle_min_pt: float = 5.0,
+        particle_max_abs_eta: float = 2.7,
+        particle_min_num_hits: int = 3,
+        event_max_num_particles: int = 10,  # Typically fewer particles per event in muon data
+    ):
+        super().__init__()
+
+        # Set the global random sampling seed
+        self.sampling_seed = 42
+        np.random.seed(self.sampling_seed)
+
+        self.dataset_dir = Path(dataset_dir)
+        self.inputs = inputs
+        self.targets = targets
+        
+        # Load metadata
+        with open(self.dataset_dir / 'metadata.yaml', 'r') as f:
+            self.metadata = yaml.safe_load(f)
+        
+        # Load efficient index arrays
+        self.global_event_ids = np.load(self.dataset_dir / 'event_global_ids.npy')
+        self.file_indices = np.load(self.dataset_dir / 'event_file_indices.npy')
+        self.row_indices = np.load(self.dataset_dir / 'event_row_indices.npy')
+        self.num_hits_per_event = np.load(self.dataset_dir / 'event_num_hits.npy')
+        self.num_tracks_per_event = np.load(self.dataset_dir / 'event_num_tracks.npy')
+        self.chunk_info = np.load(self.dataset_dir / 'chunk_info.npy', allow_pickle=True)
+        
+        # Calculate number of events to use
+        num_events_available = len(self.global_event_ids)
+        
+        if num_events > num_events_available:
+            msg = f"Requested {num_events} events, but only {num_events_available} are available."
+            raise ValueError(msg)
+        
+        if num_events < 0:
+            num_events = num_events_available
+            
+        if num_events == 0:
+            raise ValueError("num_events must be greater than 0")
+        
+        self.num_events = num_events
+        
+        # Selection criteria
+        self.particle_min_pt = particle_min_pt
+        self.particle_max_abs_eta = particle_max_abs_eta
+        self.particle_min_num_hits = particle_min_num_hits
+        self.event_max_num_particles = event_max_num_particles
+        
+        print(f"Created ATLAS muon dataset with {self.num_events:,} events")
+        print(f"Dataset parameters: pt>{particle_min_pt}, |eta|<{particle_max_abs_eta}, min_hits>{particle_min_num_hits}")
+
+    def __len__(self):
+        return self.num_events
+
+    def __getitem__(self, idx):
+        inputs = {}
+        targets = {}
+
+        # Load the event
+        hits, particles = self.load_event(idx)
+        num_particles = len(particles)
+
+        # Build the input hits - using same structure as TrackML
+        for feature, fields in self.inputs.items():
+            inputs[f"{feature}_valid"] = torch.full((len(hits),), True).unsqueeze(0)
+            targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
+
+            for field in fields:
+                if field in hits.columns:
+                    inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field].values).unsqueeze(0).float()
+                else:
+                    # Handle missing fields gracefully
+                    inputs[f"{feature}_{field}"] = torch.zeros((1, len(hits))).float()
+
+        # Build the targets for whether a particle slot is used or not
+        targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
+        targets["particle_valid"][:num_particles] = True
+        targets["particle_valid"] = targets["particle_valid"].unsqueeze(0)
+        
+        message = f"Event {idx} has {num_particles} particles, but limit is {self.event_max_num_particles}"
+        assert num_particles <= self.event_max_num_particles, message
+
+        # Build the particle regression targets
+        particle_ids = torch.from_numpy(particles["particle_id"].values)
+
+        # Fill in empty slots with -999s and get the IDs of the particle on each hit
+        particle_ids = torch.cat([particle_ids, -999 * torch.ones(self.event_max_num_particles - len(particle_ids))])
+        hit_particle_ids = torch.from_numpy(hits["particle_id"].values)
+
+        # Create the mask targets
+        targets["particle_hit_valid"] = (particle_ids.unsqueeze(-1) == hit_particle_ids.unsqueeze(-2)).unsqueeze(0)
+
+        # Create the hit filter targets (all hits are valid for now)
+        targets["hit_on_valid_particle"] = torch.from_numpy(hits["on_valid_particle"].values).unsqueeze(0)
+
+        # Add sample ID
+        targets["sample_id"] = torch.tensor([self.global_event_ids[idx]], dtype=torch.int32)
+
+        # Build the regression targets
+        if "particle" in self.targets:
+            for field in self.targets["particle"]:
+                # Null target/particle slots are filled with nans
+                x = torch.full((self.event_max_num_particles,), torch.nan)
+                if field in particles.columns:
+                    x[:num_particles] = torch.from_numpy(particles[field].values[:self.event_max_num_particles])
+                targets[f"particle_{field}"] = x.unsqueeze(0)
+
+        return inputs, targets
+
+    def load_event(self, idx):
+        # Get file and row info using efficient indexing
+        file_idx = self.file_indices[idx]
+        row_idx = self.row_indices[idx]
+        
+        # Get chunk info
+        chunk = self.chunk_info[file_idx]
+        
+        # Load hits and tracks from parquet files
+        hits_file_path = self.dataset_dir / chunk['hits_file']
+        tracks_file_path = self.dataset_dir / chunk['tracks_file']
+        
+        # Load specific row from parquet files
+        hits_df = pd.read_parquet(hits_file_path)
+        tracks_df = pd.read_parquet(tracks_file_path)
+        
+        # Get the specific event (row)
+        hits_row = hits_df.iloc[row_idx]
+        tracks_row = tracks_df.iloc[row_idx]
+        
+        # Convert from list format back to individual hit records
+        hits_data = {}
+        for col in hits_row.index:
+            hits_data[col] = hits_row[col]
+        
+        # Convert from list format back to individual track records
+        tracks_data = {}
+        for col in tracks_row.index:
+            tracks_data[col] = tracks_row[col]
+        
+        # Create hits DataFrame
+        num_hits = len(hits_data['spacePoint_PositionX'])
+        hits = pd.DataFrame({
+            'x': hits_data['spacePoint_PositionX'],
+            'y': hits_data['spacePoint_PositionY'],
+            'z': hits_data['spacePoint_PositionZ'],
+            'particle_id': hits_data['spacePoint_truthLink'],
+            # Add covariance information
+            'cov_xx': hits_data['spacePoint_covXX'],
+            'cov_xy': hits_data['spacePoint_covXY'],
+            'cov_yy': hits_data['spacePoint_covYY'],
+            # Add detector information
+            'channel': hits_data['spacePoint_channel'],
+            'drift_r': hits_data['spacePoint_driftR'],
+            'layer': hits_data['spacePoint_layer'],
+            'station_phi': hits_data['spacePoint_stationPhi'],
+            'station_eta': hits_data['spacePoint_stationEta'],
+            'technology': hits_data['spacePoint_technology'],
+        })
+        
+        # Create particles DataFrame
+        num_particles = len(tracks_data['truthMuon_pt'])
+        particles = pd.DataFrame({
+            'particle_id': range(num_particles),  # Sequential IDs
+            'pt': tracks_data['truthMuon_pt'],
+            'eta': tracks_data['truthMuon_eta'],
+            'phi': tracks_data['truthMuon_phi'],
+            'q': tracks_data['truthMuon_q'],
+        })
+        
+        # Convert coordinates to meters (if they're in mm)
+        scale_factor = 0.001  # mm to m
+        for coord in ['x', 'y', 'z']:
+            hits[coord] *= scale_factor
+        
+        # Add derived hit fields (similar to TrackML)
+        hits["r"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2)
+        hits["s"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2 + hits["z"] ** 2)
+        
+        # Avoid division by zero
+        hits["theta"] = np.arccos(np.clip(hits["z"] / hits["s"], -1, 1))
+        hits["phi"] = np.arctan2(hits["y"], hits["x"])
+        hits["eta"] = -np.log(np.tan(hits["theta"] / 2))
+        
+        # Avoid division by zero for u, v
+        r_squared = hits["x"] ** 2 + hits["y"] ** 2
+        hits["u"] = np.where(r_squared > 0, hits["x"] / r_squared, 0)
+        hits["v"] = np.where(r_squared > 0, hits["y"] / r_squared, 0)
+        
+        # Add derived particle fields
+        particles["px"] = particles["pt"] * np.cos(particles["phi"])
+        particles["py"] = particles["pt"] * np.sin(particles["phi"])
+        particles["pz"] = particles["pt"] * np.sinh(particles["eta"])
+        particles["p"] = particles["pt"] * np.cosh(particles["eta"])
+        particles["qopt"] = particles["q"] / particles["pt"]
+        particles["theta"] = 2 * np.arctan(np.exp(-particles["eta"]))
+        particles["costheta"] = np.cos(particles["theta"])
+        particles["sintheta"] = np.sin(particles["theta"])
+        particles["cosphi"] = np.cos(particles["phi"])
+        particles["sinphi"] = np.sin(particles["phi"])
+        
+        # Apply selection cuts (already applied during preprocessing, but double-check)
+        valid_particles = particles[
+            (particles["pt"] >= self.particle_min_pt) & 
+            (particles["eta"].abs() <= self.particle_max_abs_eta)
+        ]
+        
+        # Count hits per particle and apply minimum hits requirement
+        hit_counts = hits[hits["particle_id"] >= 0]["particle_id"].value_counts()
+        valid_particle_ids = hit_counts[hit_counts >= self.particle_min_num_hits].index
+        valid_particles = valid_particles[valid_particles["particle_id"].isin(valid_particle_ids)]
+        
+        # Mark which hits are on valid particles
+        hits["on_valid_particle"] = hits["particle_id"].isin(valid_particles["particle_id"])
+        # Handle noise hits (particle_id == -1)
+        hits.loc[hits["particle_id"] == -1, "on_valid_particle"] = False
+        
+        # Sanity checks
+        assert len(valid_particles) > 0, "No particles remaining after cuts!"
+        assert len(hits) > 0, "No hits remaining!"
+        
+        return hits, valid_particles
+            particles = tree.arrays(library="pd", entry_start=local_event_idx, entry_stop=local_event_idx + 1, filter_name="particles")
+
+        # ...rest of implementation...
+    def inspect_root_files(self):
+        """Inspect the structure of ROOT files to understand their contents."""
+        for file_path in self.files[:1]:  # Just inspect the first file
+            print(f"Inspecting file: {file_path}")
+            with uproot.open(file_path) as root_file:
+                print(f"File keys: {list(root_file.keys())}")
+                
+                for key in root_file.keys():
+                    if ';' in key:
+                        tree_name = key.split(';')[0]
+                        tree = root_file[tree_name]
+                        print(f"\nTree: {tree_name}")
+                        print(f"Number of entries: {tree.num_entries}")
+                        print(f"Number of branches: {len(tree.keys())}")
+                        
+                        print("Branches:")
+                        for branch_name in sorted(tree.keys()):
+                            branch = tree[branch_name]
+                            print(f"  {branch_name:<30} {branch.typename:<20} {branch.title}")
+                        
+                        # Show a sample of data for first few branches
+                        print("\nSample data (first 3 entries):")
+                        sample_branches = list(tree.keys())[:5]  # First 5 branches
+                        sample_data = tree.arrays(sample_branches, library="np", entry_start=0, entry_stop=3)
+                        for branch in sample_branches:
+                            print(f"  {branch}: {sample_data[branch]}")
+            break  # Only inspect first file
+
+    def __getitem__(self, idx):
+        inputs = {}
+        targets = {}
+
+        # Load the event
+        hits, particles = self.load_event(idx)
+        num_particles = len(particles)
+
+        # Build the input hits
+        for feature, fields in self.inputs.items():
+            inputs[f"{feature}_valid"] = torch.full((len(hits),), True).unsqueeze(0)
+            targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
+
+            for field in fields:
+                inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field].values).unsqueeze(0).half()
+
+        # Build the targets for whether a particle slot is used or not
+        targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
+        targets["particle_valid"][:num_particles] = True
+        targets["particle_valid"] = targets["particle_valid"].unsqueeze(0)
+        message = f"Event {idx} has {num_particles}, but limit is {self.event_max_num_particles}"
+        assert num_particles <= self.event_max_num_particles, message
+
+        # Build the particle regression targets
+        particle_ids = torch.from_numpy(particles["particle_id"].values)
+
+        # Fill in empty slots with -1s and get the IDs of the particle on each hit
+        particle_ids = torch.cat([particle_ids, -999 * torch.ones(self.event_max_num_particles - len(particle_ids))])
+        hit_particle_ids = torch.from_numpy(hits["particle_id"].values)
+
+        # Create the mask targets
+        targets["particle_hit_valid"] = (particle_ids.unsqueeze(-1) == hit_particle_ids.unsqueeze(-2)).unsqueeze(0)
+
+        # Create the hit filter targets
+        targets["hit_on_valid_particle"] = torch.from_numpy(hits["on_valid_particle"].to_numpy()).unsqueeze(0)
+
+        # Add sample ID
+        targets["sample_id"] = torch.tensor([self.sample_ids[idx]], dtype=torch.int32)
+
+        # Build the regression targets
+        if "particle" in self.targets:
+            for field in self.targets["particle"]:
+                # Null target/particle slots are filled with nans
+                # This acts as a sanity check that we correctly mask out null slots in the loss
+                x = torch.full((self.event_max_num_particles,), torch.nan)
+                x[:num_particles] = torch.from_numpy(particles[field].to_numpy()[: self.event_max_num_particles])
+                targets[f"particle_{field}"] = x.unsqueeze(0)
+
+        return inputs, targets
+    
+    def load_event(self, idx):
+        event_name = self.event_names[idx]
+
+        particles = pd.read_parquet(self.dirpath / Path(event_name + "-parts.parquet"))
+        hits = pd.read_parquet(self.dirpath / Path(event_name + "-hits.parquet"))
+
+        # Make the detector volume selection
+        if self.hit_volume_ids:
+            hits = hits[hits["volume_id"].isin(self.hit_volume_ids)]
+
+        # Scale the input coordinates to in meters so they are ~ 1
+        for coord in ["x", "y", "z"]:
+            hits[coord] *= 0.01
+
+        # Add extra hit fields
+        hits["r"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2)
+        hits["s"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2 + hits["z"] ** 2)
+        hits["theta"] = np.arccos(hits["z"] / hits["s"])
+        hits["phi"] = np.arctan2(hits["y"], hits["x"])
+        hits["eta"] = -np.log(np.tan(hits["theta"] / 2))
+        hits["u"] = hits["x"] / (hits["x"] ** 2 + hits["y"] ** 2)
+        hits["v"] = hits["y"] / (hits["x"] ** 2 + hits["y"] ** 2)
+
+        # Add extra particle fields
+        particles["p"] = np.sqrt(particles["px"] ** 2 + particles["py"] ** 2 + particles["pz"] ** 2)
+        particles["pt"] = np.sqrt(particles["px"] ** 2 + particles["py"] ** 2)
+        particles["qopt"] = particles["q"] / particles["pt"]
+        particles["eta"] = np.arctanh(particles["pz"] / particles["p"])
+        particles["theta"] = np.arccos(particles["pz"] / particles["p"])
+        particles["phi"] = np.arctan2(particles["py"], particles["px"])
+        particles["costheta"] = np.cos(particles["theta"])
+        particles["sintheta"] = np.sin(particles["theta"])
+        particles["cosphi"] = np.cos(particles["phi"])
+        particles["sinphi"] = np.sin(particles["phi"])
+
+        # Apply particle level cuts based on particle fields
+        particles = particles[particles["pt"] > self.particle_min_pt]
+        particles = particles[particles["eta"].abs() < self.particle_max_abs_eta]
+
+        # Apply particle cut based on hit content
+        counts = hits["particle_id"].value_counts()
+        keep_particle_ids = counts[counts >= self.particle_min_num_hits].index.to_numpy()
+        particles = particles[particles["particle_id"].isin(keep_particle_ids)]
+
+        # Mark which hits are on a valid / reconstructable particle, for the hit filter
+        hits["on_valid_particle"] = hits["particle_id"].isin(particles["particle_id"])
+
+        # If a hit eval file was specified, read in the predictions from it to use the hit filtering
+        if self.hit_eval_path:
+            with h5py.File(self.hit_eval_path, "r") as hit_eval_file:
+                assert str(self.sample_ids[idx]) in hit_eval_file, f"Key {self.sample_ids[idx]} not found in file {self.hit_eval_path}"
+
+                # The dataset has shape (1, num_hits)
+                hit_filter_pred = hit_eval_file[f"{self.sample_ids[idx]}/preds/final/hit_filter/hit_on_valid_particle"][0]
+                hits = hits[hit_filter_pred]
+
+        # TODO: Add back truth based hit filtering
+
+        # Sanity checks
+        assert len(particles) != 0, "No particles remaining - loosen selection!"
+        assert len(hits) != 0, "No hits remaining - loosen selection!"
+        assert particles["particle_id"].nunique() == len(particles), "Non-unique particle ids"
+
+        # Check that all hits have different phi
+        # This is necessary as the fast sorting algorithm used by pytorch can be non-stable
+        # if two values are equal, which could cause subtle bugs
+        # msg = f"Only {hits['phi'].nunique()} of the {len(hits)} have unique phi"
+        # assert hits["phi"].nunique() == len(hits), msg
+
+        return hits, particles
+    
+    # TODO: 
+    #    - mask for matching of hits to particles 
+    #    - mask for valid tracks 
+    #    - cut on number of hits per particle, eta possibly and pt
+    #    - enable to load only a subset of events in a ddp friendly way
+
+class MuonTrackingBase(Dataset):
+
+
+
+
+
+class MuonTrackingTripplets(MuonTracking):
+    def __init__(
+        self,
+        dirpath: str,
+        inputs: dict,
+        targets: dict,
+        num_events: int = -1,
+        hit_volume_ids: list | None = None,
+        particle_min_pt: float = 5.0,
+        particle_max_abs_eta: float = 2.7,
+        particle_min_num_hits=3,
+        event_max_num_particles=1000,
+        hit_eval_path: str | None = None,
+    ):
+        super().__init__(dirpath, inputs, 
+                         targets, num_events, 
+                         hit_volume_ids, 
+                         particle_min_pt, 
+                         particle_max_abs_eta, 
+                         particle_min_num_hits, 
+                         event_max_num_particles, 
+                         hit_eval_path)
+        
+    

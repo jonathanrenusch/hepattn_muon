@@ -33,6 +33,7 @@ class ModelWrapper(LightningModule):
             self.automatic_optimization = False
 
     def forward(self, inputs):
+        # print(f"Forwarding {self.name} with inputs: {inputs.keys()}")
         return self.model(inputs)
 
     def predict(self, outputs):

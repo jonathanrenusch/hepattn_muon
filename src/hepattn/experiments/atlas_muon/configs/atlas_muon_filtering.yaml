@@ -1,80 +1,71 @@
 seed_everything: 42
-name: HC-v3
-# ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694.ckpt
+name: ATLAS-Muon-v1
 
 data:
-  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/train_data
-  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/val_data
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/test_data
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/train_data
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/val_data
+  # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  num_workers: 10
-  num_train: -1
+  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
+  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
+  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
+
+  num_workers: 8
+  num_train: 100
   num_test: -1
-  num_val: -1
+  num_val: 100
+  batch_size: 1  # Start with batch_size=1 to avoid smart batching issues
+  use_smart_batching: false  # Disable smart batching as requested
 
-  # Select only hits from these detector volumes
-  # pix barrel: 8, pix endcap: 7, 9
-  # See: https://competitions.codalab.org/competitions/20112
-  hit_volume_ids: [7, 8, 9]
-
-  # Minimum pt for a particle to be deemed reconstructible
-  particle_min_pt: 0.9
-
-  # Maximum absolute eta for a particle to be deemed reconstructible
-  particle_max_abs_eta: 4.0
-
-  # Minimum number of true hits for a particle to be deemed reconstructible
-  particle_min_num_hits: 3
-
-  # Maximum number of reconstructable particles allowed in an event (not relevant for filtering)
-  event_max_num_particles: 3000
+  # ATLAS muon data parameters
+  event_max_num_particles: 6  # Typically fewer particles per event in muon data
 
   # Define which inputs will be available to the model
   inputs:
     hit:
-      # Global hit coords
+      # Global hit coordinates
       - x
       - y
       - z
       - r
       - s
-      - eta
       - phi
-      - u
-      - v
-      # Hit local charge information
-      - charge_frac
-      - leta
-      - lphi
-      - lx
-      - ly
-      - lz
-      - geta
-      - gphi
+      - theta
+      # Detector information
+      - channel
+      - drift_r
+      - layer
+      - station_phi
+      - station_eta
+      - technology
+      # Covariance information
+      - cov_xx
+      - cov_xy
+      - cov_yy
 
   targets:
     hit:
       - on_valid_particle
+    # particle:
+    #   - pt
+    #   - eta
+    #   - phi
+    #   - q
 
 trainer:
-  # Training stuff here
+  # Training configuration
   max_epochs: 50
   accelerator: gpu
   devices: 1
   precision: bf16-mixed
-  log_every_n_steps: 1000
+  log_every_n_steps: 50
   default_root_dir: logs
-  gradient_clip_val: 0.1
+  gradient_clip_val: 1.0
   enable_progress_bar: True
-  # ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694.ckpt
 
   # Specify loggers here
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project: trackml_filtering
+      project: atlas_muon_filtering
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -104,13 +95,12 @@ trainer:
         mode: max
         verbose: True 
 
-
 model:
   optimizer: Lion
 
   lrs_config:
     initial: 1e-5
-    max: 5e-5
+    max: 3e-5
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
@@ -127,26 +117,30 @@ model:
               init_args:
                 input_name: hit
                 fields:
-                  - x
-                  - y
-                  - z
-                  - r
-                  - eta
-                  - phi
-                  - u
-                  - v
-                  - charge_frac
-                  - leta
-                  - lphi
-                  - lx
-                  - ly
-                  - lz
-                  - geta
-                  - gphi
+                 # Global hit coordinates
+                - x
+                - y
+                - z
+                - r
+                - s
+                - phi
+                - theta
+                # Detector information
+                - channel
+                - drift_r
+                - layer
+                - station_phi
+                - station_eta
+                - technology
+                # Covariance information
+                - cov_xx
+                - cov_xy
+                - cov_yy
+                # TODO: Check whether you might want to add more here 
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 16
+                    input_size: 16  # Number of input features for ATLAS muon data
                     output_size: &dim 256
                     norm_input: true
                 posenc:
@@ -154,18 +148,17 @@ model:
                   init_args:
                     input_name: hit
                     fields:
-                      - r
-                      - eta
                       - phi
+                    # TODO: Check wether you might want to add more here
                     dim: *dim
                     scale: 0.1
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 10
+          num_layers: 5 # Slightly fewer layers for muon data
           dim: *dim
           attn_type: flash
-          window_size: 1024
+          window_size: 512  # Smaller window size for fewer hits per event
           window_wrap: true
           hybrid_norm: true
           norm: RMSNorm
@@ -180,5 +173,5 @@ model:
                 input_object: hit
                 target_field: on_valid_particle
                 dim: *dim
-                threshold: 0.1
+                threshold: 0.5
                 loss_fn: bce
