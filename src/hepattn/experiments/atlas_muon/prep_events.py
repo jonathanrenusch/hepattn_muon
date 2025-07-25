@@ -38,25 +38,34 @@ class rootFilter:
         self.valid_tracks_count = 0
         self.event_mapping = []  # List to track which events are in which files
         # Efficient index tracking for large datasets
-        self.global_event_ids = []
         self.file_indices = []
         self.row_indices = []
         self.num_hits_per_event = []
         self.num_tracks_per_event = []
         self.files = self._get_files()
-        self.hit_features = ["spacePoint_PositionX", 
-                         "spacePoint_PositionY", 
-                         "spacePoint_PositionZ",
+        self.hit_features = [
+                        #  "spacePoint_PositionX", 
+                        #  "spacePoint_PositionY", 
+                        #  "spacePoint_PositionZ",
+                         "spacePoint_globEdgeHighX",
+                         "spacePoint_globEdgeHighY",
+                         "spacePoint_globEdgeHighZ",
+                         "spacePoint_globEdgeLowX",
+                         "spacePoint_globEdgeLowY",
+                         "spacePoint_globEdgeLowZ",
+                         "spacePoint_time",
+                         "spacePoint_driftR",
+                         "spacePoint_readOutSide",
                          "spacePoint_covXX",
                          "spacePoint_covXY",
                          "spacePoint_covYX",
                          "spacePoint_covYY",
                          "spacePoint_channel",
-                         "spacePoint_driftR",
                          "spacePoint_layer",
                          "spacePoint_stationPhi",
                          "spacePoint_stationEta",
-                         "spacePoint_technology"
+                         "spacePoint_technology", 
+                         "spacePoint_truthLink"
                         ]
 
         self.track_features = ["truthMuon_pt", 
@@ -95,17 +104,6 @@ class rootFilter:
             for chunk_start in range(0, num_events, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, num_events)
 
-                # Load all required arrays for this chunk at once
-                truth_link_chunk = root_file[tree]['spacePoint_truthLink'].array(
-                    entry_start=chunk_start, entry_stop=chunk_end, library='np'
-                )
-                truth_pt_chunk = root_file[tree]['truthMuon_pt'].array(
-                    entry_start=chunk_start, entry_stop=chunk_end, library='np'
-                )
-                truth_eta_chunk = root_file[tree]['truthMuon_eta'].array(
-                    entry_start=chunk_start, entry_stop=chunk_end, library='np'
-                )
-                
                 # Load all hit features for this chunk
                 hit_features_chunk = {}
                 for feature in self.hit_features:
@@ -121,13 +119,9 @@ class rootFilter:
                     )
                 
                 # Process each event in the chunk
-                for event_idx_in_chunk in range(len(truth_link_chunk)):
-                    truth_link = truth_link_chunk[event_idx_in_chunk]
-                    truth_pt = truth_pt_chunk[event_idx_in_chunk]
-                    truth_eta = truth_eta_chunk[event_idx_in_chunk]
-                    
+                for event_idx_in_chunk in range(chunk_end - chunk_start):
                     # Running checks on event
-                    unique_tracks = np.unique(truth_link)
+                    unique_tracks = np.unique(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk])
                     # Remove -1 (no track) from the unique tracks
                     valid_tracks = unique_tracks[unique_tracks != -1]
                     
@@ -138,7 +132,8 @@ class rootFilter:
                     # running checks on the minimum pT, eta, and number of hits
                     exclude_tracks = []
                     for track_idx in valid_tracks:
-                        if truth_pt[track_idx] < self.pt_threshold or abs(truth_eta[track_idx]) > self.eta_threshold:
+                        if track_features_chunk['truthMuon_pt'][event_idx_in_chunk][track_idx] < self.pt_threshold or \
+                                abs(track_features_chunk['truthMuon_eta'][event_idx_in_chunk][track_idx]) > self.eta_threshold:
                             exclude_tracks.append(track_idx)
                             self.excluded_tracks_count += 1
                     
@@ -152,8 +147,8 @@ class rootFilter:
                     # save number of valid tracks
                     self.valid_tracks_count += len(remaining_tracks)
                     # Building event with remaining tracks
-                    hit2track_mask = np.isin(truth_link, remaining_tracks)
-                    modified_truth_link = truth_link.copy()
+                    hit2track_mask = np.isin(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk], remaining_tracks)
+                    modified_truth_link = hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk].copy()
                     modified_truth_link[~hit2track_mask] = -1
                     track_mask = np.isin(valid_tracks, remaining_tracks)
 
@@ -172,6 +167,8 @@ class rootFilter:
                     # Checking if chunk is full and saving to parquet
                     if len(self.hits_chunk) == self.num_events_per_file and len(self.tracks_chunk) == self.num_events_per_file:
                         # Save chunk to parquet files
+                        print("=" * 80)
+                        print(f"Saving chunk: {self.last_saved_event_count} to {self.valid_event_count}")
                         self._save_chunk_to_hdf5()
                         # self._save_chunk_to_parquet()
                         # Clear the chunks for the next set of events
@@ -181,92 +178,11 @@ class rootFilter:
 
         return self.hits_chunk, self.tracks_chunk
     
-    # def process_root_file(self, 
-    #                       root_file: str) -> List[Dict[str, Any]]:
-        
-    #     with uproot.open(root_file) as root_file:
-    #         # Using the first tree
-    #         tree_keys = [key for key in root_file.keys() if ';' in key]
-    #         if tree_keys:
-    #             tree = tree_keys[0].split(';')[0]
-    #             num_events = root_file[tree].num_entries
-    #         else:
-    #             num_events = 0
-    #         for event_idx in range(num_events):
-    #             truth_link = root_file[tree]['spacePoint_truthLink'].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0]
-    #             truth_pt = root_file[tree]['truthMuon_pt'].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0]
-    #             truth_eta = root_file[tree]['truthMuon_eta'].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0]
-    #             # Running checks on event
-    #             unique_tracks = np.unique(truth_link)
-    #             # Remove -1 (no track) from the unique tracks
-    #             valid_tracks = unique_tracks[unique_tracks != -1]
-                
-    #             if len(valid_tracks) == 0:
-    #                 self.excluded_events_count += 1
-    #                 continue # no tracks present in this event
-                
-    #             # running checks on the minimum pT, eta, and number of hits
-    #             exclude_tracks = []
-    #             for track_idx in valid_tracks:
-
-    #                 if truth_pt[track_idx] < self.pt_threshold or abs(truth_eta[track_idx]) > self.eta_threshold:
-    #                     exclude_tracks.append(track_idx)
-    #                     self.excluded_tracks_count += 1
-                
-    #             # Remove excluded tracks from valid tracks
-    #             remaining_tracks = np.setdiff1d(valid_tracks, exclude_tracks)
-                
-    #             # If all tracks are excluded, skip the event
-    #             if len(remaining_tracks) == 0:
-    #                 self.excluded_events_count += 1
-    #                 continue
-    #             # save number of valid tracks
-    #             self.valid_tracks_count += len(remaining_tracks)
-    #             # Building event with remaining tracks
-    #             hit2track_mask = np.isin(truth_link, remaining_tracks)
-    #             modified_truth_link = truth_link.copy()
-    #             modified_truth_link[~hit2track_mask] = -1
-    #             track_mask = np.isin(valid_tracks, remaining_tracks)
-
-    #             # Collecting hit and track information
-    #             hits = {branch: root_file[tree][branch].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0] for branch in self.hit_features}
-    #             hits["spacePoint_truthLink"] = modified_truth_link
-                
-    #             tracks = {branch: root_file[tree][branch].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0][track_mask] for branch in self.track_features}
-    #             self.hits_chunk.append(hits)
-    #             self.tracks_chunk.append(tracks)    
-
-    #             # Increment saved event count
-    #             self.valid_event_count += 1
-    #             print("Saved event count:", self.valid_event_count, end='\r')  # Print current event count on the same line
-
-    #             # Checking if chunk is full and saving to parquet
-    #             if len(self.hits_chunk) == self.num_events_per_file and len(self.tracks_chunk) == self.num_events_per_file:
-    #                 # Save chunk to parquet files
-    #                 self._save_chunk_to_hdf5()
-    #                 # self._save_chunk_to_parquet()
-    #                 # Clear the chunks for the next set of events
-    #                 self.hits_chunk.clear()
-    #                 self.tracks_chunk.clear()
-    #                 self.last_saved_event_count = self.valid_event_count
-
-        
-        
-        
-
-    #     return self.hits_chunk, self.tracks_chunk
-
-
-
     def _save_chunk_to_hdf5(self) -> None:
-        """Save the current chunk of hits and tracks to HDF5 files with each event as a separate group."""
-        print(f"Saving chunk: {self.last_saved_event_count} to {self.valid_event_count}", end='\r')
-
-        # Create data subdirectory
+        """Save chunk using compound datasets (flat structure) with count-based slicing."""
+        
         data_dir = os.path.join(self.output_dir, 'data')
         os.makedirs(data_dir, exist_ok=True)
-        
-        # Prepare file path in data subdirectory
         h5_file = os.path.join(data_dir, f'events_{self.last_saved_event_count}to{self.valid_event_count}.h5')
         
         # Record chunk info for lightweight metadata (relative paths)
@@ -281,202 +197,83 @@ class rootFilter:
         
         current_chunk_idx = len(self.event_mapping)
         
-        # Add efficient index tracking
+        # Add efficient index tracking (row_indices now refer to positions in compound arrays)
         for i in range(len(self.hits_chunk)):
             event_idx = self.last_saved_event_count + i
-            self.global_event_ids.append(event_idx)
             self.file_indices.append(current_chunk_idx)
-            self.row_indices.append(i)
+            self.row_indices.append(i)  # Position within this chunk's compound arrays
             self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_PositionX']))
             self.num_tracks_per_event.append(len(self.tracks_chunk[i]['truthMuon_pt']))
         
         self.event_mapping.append(chunk_info)
 
-        # Save to HDF5 with each event as a separate group
         with h5py.File(h5_file, 'w') as f:
-            # Set file-level attributes
-            f.attrs['chunk_start_event'] = self.last_saved_event_count
-            f.attrs['chunk_end_event'] = self.valid_event_count
-            f.attrs['chunk_event_count'] = len(self.hits_chunk)
+            # Calculate dimensions
+            num_events = len(self.hits_chunk)
+            max_hits = max(len(hits['spacePoint_PositionX']) for hits in self.hits_chunk)
+            max_tracks = max(len(tracks['truthMuon_pt']) for tracks in self.tracks_chunk)
+            num_hit_features = len(self.hit_features) + 1  # +1 for truthLink
+            num_track_features = len(self.track_features)
             
-            # Store feature names as attributes for reference
-            f.attrs['hit_feature_names'] = list(self.hit_features) + ['spacePoint_truthLink']
-            f.attrs['track_feature_names'] = list(self.track_features)
+            # Create padded hit arrays
+            hits_array = np.full((num_events, max_hits, num_hit_features), np.nan, dtype=np.float32)
             
-            # Save each event as a separate group
-            for event_idx in range(len(self.hits_chunk)):
-                event_group = f.create_group(f'event_{event_idx}')
+            # Fill hit data
+            hit_feature_names = self.hit_features + ['spacePoint_truthLink']
+            for event_idx, hits_dict in enumerate(self.hits_chunk):
+                num_hits = len(hits_dict['spacePoint_PositionX'])
                 
-                # Store event metadata
-                global_event_id = self.last_saved_event_count + event_idx
-                event_group.attrs['global_event_id'] = global_event_id
-                event_group.attrs['num_hits'] = len(self.hits_chunk[event_idx]['spacePoint_PositionX'])
-                event_group.attrs['num_tracks'] = len(self.tracks_chunk[event_idx]['truthMuon_pt'])
-                
-                # Store hits as 2D array: [num_hits, num_features]
-                hits_dict = self.hits_chunk[event_idx]
-                hit_feature_names = list(self.hit_features) + ['spacePoint_truthLink']
-                
-                hits_matrix = np.column_stack([
-                    np.array(hits_dict[feature], dtype=np.float32) 
-                    for feature in hit_feature_names
-                ])
-                
-                event_group.create_dataset(
-                    'hits',
-                    data=hits_matrix,
-                    compression='gzip',
-                    compression_opts=6,
-                    shuffle=True,
-                    fletcher32=True
-                )
-                
-                # Store tracks as 2D array: [num_tracks, num_features]
-                tracks_dict = self.tracks_chunk[event_idx]
-                
-                if len(tracks_dict['truthMuon_pt']) > 0:
-                    tracks_matrix = np.column_stack([
-                        np.array(tracks_dict[feature], dtype=np.float32)
-                        for feature in self.track_features
-                    ])
-                    
-                    event_group.create_dataset(
-                        'tracks',
-                        data=tracks_matrix,
-                        compression='gzip',
-                        compression_opts=6,
-                        shuffle=True,
-                        fletcher32=True
-                    )
-                else:
-                    # Empty array for no tracks
-                    event_group.create_dataset(
-                        'tracks', 
-                        data=np.empty((0, len(self.track_features)), dtype=np.float32)
-                    )
-                    
-    # def _save_chunk_to_parquet(self) -> None:
-    #     """Save the current chunk of hits and tracks to parquet files with one row group per file."""
-    #     print("Saving chunk...", end='\r')
-        
-    #     # Create data subdirectory
-    #     data_dir = os.path.join(self.output_dir, 'data')
-    #     os.makedirs(data_dir, exist_ok=True)
-        
-    #     # Prepare file paths in data subdirectory
-    #     hits_file = os.path.join(data_dir, f'hits{self.last_saved_event_count}to{self.valid_event_count}.parquet')
-    #     tracks_file = os.path.join(data_dir, f'tracks{self.last_saved_event_count}to{self.valid_event_count}.parquet')
-        
-    #     # Record chunk info for lightweight metadata (relative paths)
-    #     chunk_info = {
-    #         'hits_file': f'data/hits{self.last_saved_event_count}to{self.valid_event_count}.parquet',
-    #         'tracks_file': f'data/tracks{self.last_saved_event_count}to{self.valid_event_count}.parquet',
-    #         'event_range': {
-    #             'start': self.last_saved_event_count,
-    #             'end': self.valid_event_count,
-    #             'count': len(self.hits_chunk)
-    #         }
-    #     }
-        
-    #     current_chunk_idx = len(self.event_mapping)
-        
-    #     # Add efficient index tracking
-    #     for i in range(len(self.hits_chunk)):
-    #         event_idx = self.last_saved_event_count + i
-    #         self.global_event_ids.append(event_idx)
-    #         self.file_indices.append(current_chunk_idx)
-    #         self.row_indices.append(i)
-    #         self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_PositionX']))
-    #         self.num_tracks_per_event.append(len(self.tracks_chunk[i]['truthMuon_pt']))
-        
-    #     self.event_mapping.append(chunk_info)
+                for feat_idx, feature in enumerate(hit_feature_names):
+                    hits_array[event_idx, :num_hits, feat_idx] = hits_dict[feature]
+            
+            # Create padded track arrays
+            tracks_array = np.full((num_events, max_tracks, num_track_features), np.nan, dtype=np.float32)
+            
+            # Fill track data
+            for event_idx, tracks_dict in enumerate(self.tracks_chunk):
+                num_tracks = len(tracks_dict['truthMuon_pt'])
+                if num_tracks > 0:
+                    for feat_idx, feature in enumerate(self.track_features):
+                        tracks_array[event_idx, :num_tracks, feat_idx] = tracks_dict[feature]
+            
+            # Save compound datasets (NO GROUPS, NO BOOLEAN MASKS!)
+            f.create_dataset('hits', data=hits_array, 
+                            compression='gzip', compression_opts=6,
+                            shuffle=True, fletcher32=True)
+            f.create_dataset('tracks', data=tracks_array,
+                            compression='gzip', compression_opts=6,
+                            shuffle=True, fletcher32=True)
+            
+            # Store actual counts instead of boolean masks
+            event_num_hits = np.array([len(hits['spacePoint_PositionX']) for hits in self.hits_chunk], dtype=np.int16)
+            event_num_tracks = np.array([len(tracks['truthMuon_pt']) for tracks in self.tracks_chunk], dtype=np.int16)
+            
+            f.create_dataset('num_hits', data=event_num_hits, compression='gzip', compression_opts=6)
+            f.create_dataset('num_tracks', data=event_num_tracks, compression='gzip', compression_opts=6)
+            
+            # Store metadata as file attributes (remove redundant chunk start/end)
+            f.attrs['hit_feature_names'] = [s.encode() for s in hit_feature_names]
+            f.attrs['track_feature_names'] = [s.encode() for s in self.track_features]
+            f.attrs['num_events'] = num_events
 
-    #     # Process hits data - each event becomes a row with list of structs
-    #     hits_rows = []
-    #     for hits_dict in self.hits_chunk:
-    #         # Convert arrays to lists and create a single row with lists
-    #         hits_row = {}
-    #         for key, value in hits_dict.items():
-    #             hits_row[key] = value.tolist() if hasattr(value, 'tolist') else list(value)
-    #         hits_rows.append(hits_row)
-        
-    #     # Process tracks data - each event becomes a row with list of structs
-    #     tracks_rows = []
-    #     for tracks_dict in self.tracks_chunk:
-    #         # Convert arrays to lists and create a single row with lists
-    #         tracks_row = {}
-    #         for key, value in tracks_dict.items():
-    #             tracks_row[key] = value.tolist() if hasattr(value, 'tolist') else list(value)
-    #         tracks_rows.append(tracks_row)
-        
-    #     # Write hits parquet with one row group
-    #     if hits_rows:
-    #         hits_df = pd.DataFrame(hits_rows)
-    #         hits_table = pa.Table.from_pandas(hits_df)
-    #         pq.write_table(hits_table, hits_file, compression='snappy')
-        
-    #     # Write tracks parquet with one row group
-    #     if tracks_rows:
-    #         tracks_df = pd.DataFrame(tracks_rows)
-    #         tracks_table = pa.Table.from_pandas(tracks_df)
-    #         pq.write_table(tracks_table, tracks_file, compression='snappy')
+
+
 
     def _save_index_arrays(self) -> None:
         """Save event indices as compact numpy arrays for efficient dataset loading."""
         # Save metadata files at the top level (common practice)
-        np.save(os.path.join(self.output_dir, 'event_global_ids.npy'), 
-                np.array(self.global_event_ids, dtype=np.int32))
+        # np.save(os.path.join(self.output_dir, 'event_global_ids.npy'), 
+        #         np.array(self.global_event_ids, dtype=np.int32))
         np.save(os.path.join(self.output_dir, 'event_file_indices.npy'), 
                 np.array(self.file_indices, dtype=np.int16))
         np.save(os.path.join(self.output_dir, 'event_row_indices.npy'),
                 np.array(self.row_indices, dtype=np.int16))
-        np.save(os.path.join(self.output_dir, 'event_num_hits.npy'), 
-                np.array(self.num_hits_per_event, dtype=np.int16))
-        np.save(os.path.join(self.output_dir, 'event_num_tracks.npy'), 
-                np.array(self.num_tracks_per_event, dtype=np.int8))
-        
-        # Save chunk info separately (lightweight) - updated for HDF5
-        chunk_info = []
-        for chunk in self.event_mapping:
-            chunk_info.append({
-                'h5_file': chunk['h5_file'],
-                'start_event': chunk['event_range']['start'],
-                'end_event': chunk['event_range']['end'],
-                'count': chunk['event_range']['count']
-            })
-        
-        np.save(os.path.join(self.output_dir, 'chunk_info.npy'), chunk_info)
 
-    # def _save_index_arrays(self) -> None:
-    #     """Save event indices as compact numpy arrays for efficient dataset loading."""
-    #     # Save metadata files at the top level (common practice)
-    #     np.save(os.path.join(self.output_dir, 'event_global_ids.npy'), 
-    #             np.array(self.global_event_ids, dtype=np.int32))
-    #     np.save(os.path.join(self.output_dir, 'event_file_indices.npy'), 
-    #             np.array(self.file_indices, dtype=np.int16))
-    #     np.save(os.path.join(self.output_dir, 'event_row_indices.npy'),
-    #             np.array(self.row_indices, dtype=np.int16))
-    #     np.save(os.path.join(self.output_dir, 'event_num_hits.npy'), 
-    #             np.array(self.num_hits_per_event, dtype=np.int16))
-    #     np.save(os.path.join(self.output_dir, 'event_num_tracks.npy'), 
-    #             np.array(self.num_tracks_per_event, dtype=np.int8))
-        
-    #     # Save chunk info separately (lightweight)
-        #     chunk_info = []
-        #     for chunk in self.event_mapping:
-        #         chunk_info.append({
-        #             'hits_file': chunk['hits_file'],
-        #             'tracks_file': chunk['tracks_file'],
-        #             'start_event': chunk['event_range']['start'],
-        #             'end_event': chunk['event_range']['end'],
-        #             'count': chunk['event_range']['count']
-        #         })
-            
-        #     np.save(os.path.join(self.output_dir, 'chunk_info.npy'), chunk_info)
 
     def process_events(self):
         """Process all root files and yield events."""
-        for root_file in tqdm(self.files, desc="Processing ROOT files"):
+        # for root_file in tqdm(self.files, desc="Processing ROOT files"):
+        for root_file in self.files:
             print(f"Processing file: {root_file}")
             # try:
             self.process_root_file(root_file)
@@ -527,12 +324,8 @@ class rootFilter:
                 'total_events': self.valid_event_count,
                 'total_chunks': len(self.event_mapping),
                 'index_files': {
-                    'global_event_ids': 'event_global_ids.npy',
                     'file_indices': 'event_file_indices.npy',
                     'row_indices': 'event_row_indices.npy',
-                    'num_hits': 'event_num_hits.npy',
-                    'num_tracks': 'event_num_tracks.npy',
-                    'chunk_info': 'chunk_info.npy'
                 },
                 'chunk_summary': [
                     {
@@ -624,3 +417,374 @@ def main():
     filter.process_events()
 if __name__ == "__main__":
     main()
+
+
+
+
+
+    # def _save_chunk_to_hdf5(self) -> None:
+    #     """Save chunk using compound datasets (flat structure) with count-based slicing."""
+    #     print(f"Saving chunk: {self.last_saved_event_count} to {self.valid_event_count}")
+        
+    #     data_dir = os.path.join(self.output_dir, 'data')
+    #     os.makedirs(data_dir, exist_ok=True)
+    #     h5_file = os.path.join(data_dir, f'events_{self.last_saved_event_count}to{self.valid_event_count}.h5')
+        
+    #     # Record chunk info for lightweight metadata (relative paths)
+    #     chunk_info = {
+    #         'h5_file': f'data/events_{self.last_saved_event_count}to{self.valid_event_count}.h5',
+    #         'event_range': {
+    #             'start': self.last_saved_event_count,
+    #             'end': self.valid_event_count,
+    #             'count': len(self.hits_chunk)
+    #         }
+    #     }
+    #     self.event_mapping.append(chunk_info)
+        
+    #     current_chunk_idx = len(self.event_mapping)
+        
+    #     # Add efficient index tracking (row_indices now refer to positions in compound arrays)
+    #     for i in range(len(self.hits_chunk)):
+    #         event_idx = self.last_saved_event_count + i
+    #         self.file_indices.append(current_chunk_idx)
+    #         self.row_indices.append(i)  # Position within this chunk's compound arrays
+    #         self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_PositionX']))
+    #         self.num_tracks_per_event.append(len(self.tracks_chunk[i]['truthMuon_pt']))
+        
+        
+
+    #     with h5py.File(h5_file, 'w') as f:
+    #         # Calculate dimensions
+    #         num_events = len(self.hits_chunk)
+    #         max_hits = max(len(hits['spacePoint_PositionX']) for hits in self.hits_chunk)
+    #         max_tracks = max(len(tracks['truthMuon_pt']) for tracks in self.tracks_chunk)
+    #         num_hit_features = len(self.hit_features) + 1  # +1 for truthLink
+    #         num_track_features = len(self.track_features)
+            
+    #         # Create padded hit arrays
+    #         hits_array = np.full((num_events, max_hits, num_hit_features), np.nan, dtype=np.float32)
+            
+    #         # Fill hit data
+    #         hit_feature_names = self.hit_features + ['spacePoint_truthLink']
+    #         for event_idx, hits_dict in enumerate(self.hits_chunk):
+    #             num_hits = len(hits_dict['spacePoint_PositionX'])
+                
+    #             for feat_idx, feature in enumerate(hit_feature_names):
+    #                 hits_array[event_idx, :num_hits, feat_idx] = hits_dict[feature]
+            
+    #         # Create padded track arrays
+    #         tracks_array = np.full((num_events, max_tracks, num_track_features), np.nan, dtype=np.float32)
+            
+    #         # Fill track data
+    #         for event_idx, tracks_dict in enumerate(self.tracks_chunk):
+    #             num_tracks = len(tracks_dict['truthMuon_pt'])
+    #             if num_tracks > 0:
+    #                 for feat_idx, feature in enumerate(self.track_features):
+    #                     tracks_array[event_idx, :num_tracks, feat_idx] = tracks_dict[feature]
+            
+    #         # Save compound datasets (NO GROUPS, NO BOOLEAN MASKS!)
+    #         f.create_dataset('hits', data=hits_array, 
+    #                         compression='gzip', compression_opts=6,
+    #                         shuffle=True, fletcher32=True)
+    #         f.create_dataset('tracks', data=tracks_array,
+    #                         compression='gzip', compression_opts=6,
+    #                         shuffle=True, fletcher32=True)
+            
+    #         # Store actual counts instead of boolean masks
+    #         event_num_hits = np.array([len(hits['spacePoint_PositionX']) for hits in self.hits_chunk], dtype=np.int16)
+    #         event_num_tracks = np.array([len(tracks['truthMuon_pt']) for tracks in self.tracks_chunk], dtype=np.int16)
+            
+    #         f.create_dataset('num_hits', data=event_num_hits, compression='gzip', compression_opts=6)
+    #         f.create_dataset('num_tracks', data=event_num_tracks, compression='gzip', compression_opts=6)
+            
+    #         # Store metadata as file attributes (remove redundant chunk start/end)
+    #         f.attrs['hit_feature_names'] = [s.encode() for s in hit_feature_names]
+    #         f.attrs['track_feature_names'] = [s.encode() for s in self.track_features]
+    #         f.attrs['max_hits'] = max_hits
+    #         f.attrs['max_tracks'] = max_tracks
+    
+    # def process_root_file(self, 
+    #                       root_file: str) -> List[Dict[str, Any]]:
+        
+    #     with uproot.open(root_file) as root_file:
+    #         # Using the first tree
+    #         tree_keys = [key for key in root_file.keys() if ';' in key]
+    #         if tree_keys:
+    #             tree = tree_keys[0].split(';')[0]
+    #             num_events = root_file[tree].num_entries
+    #         else:
+    #             num_events = 0
+    #         for event_idx in range(num_events):
+    #             truth_link = root_file[tree]['spacePoint_truthLink'].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0]
+    #             truth_pt = root_file[tree]['truthMuon_pt'].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0]
+    #             truth_eta = root_file[tree]['truthMuon_eta'].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0]
+    #             # Running checks on event
+    #             unique_tracks = np.unique(truth_link)
+    #             # Remove -1 (no track) from the unique tracks
+    #             valid_tracks = unique_tracks[unique_tracks != -1]
+                
+    #             if len(valid_tracks) == 0:
+    #                 self.excluded_events_count += 1
+    #                 continue # no tracks present in this event
+                
+    #             # running checks on the minimum pT, eta, and number of hits
+    #             exclude_tracks = []
+    #             for track_idx in valid_tracks:
+
+    #                 if truth_pt[track_idx] < self.pt_threshold or abs(truth_eta[track_idx]) > self.eta_threshold:
+    #                     exclude_tracks.append(track_idx)
+    #                     self.excluded_tracks_count += 1
+                
+    #             # Remove excluded tracks from valid tracks
+    #             remaining_tracks = np.setdiff1d(valid_tracks, exclude_tracks)
+                
+    #             # If all tracks are excluded, skip the event
+    #             if len(remaining_tracks) == 0:
+    #                 self.excluded_events_count += 1
+    #                 continue
+    #             # save number of valid tracks
+    #             self.valid_tracks_count += len(remaining_tracks)
+    #             # Building event with remaining tracks
+    #             hit2track_mask = np.isin(truth_link, remaining_tracks)
+    #             modified_truth_link = truth_link.copy()
+    #             modified_truth_link[~hit2track_mask] = -1
+    #             track_mask = np.isin(valid_tracks, remaining_tracks)
+
+    #             # Collecting hit and track information
+    #             hits = {branch: root_file[tree][branch].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0] for branch in self.hit_features}
+    #             hits["spacePoint_truthLink"] = modified_truth_link
+                
+    #             tracks = {branch: root_file[tree][branch].array(entry_start=event_idx, entry_stop=event_idx+1, library='np')[0][track_mask] for branch in self.track_features}
+    #             self.hits_chunk.append(hits)
+    #             self.tracks_chunk.append(tracks)    
+
+    #             # Increment saved event count
+    #             self.valid_event_count += 1
+    #             print("Saved event count:", self.valid_event_count, end='\r')  # Print current event count on the same line
+
+    #             # Checking if chunk is full and saving to parquet
+    #             if len(self.hits_chunk) == self.num_events_per_file and len(self.tracks_chunk) == self.num_events_per_file:
+    #                 # Save chunk to parquet files
+    #                 self._save_chunk_to_hdf5()
+    #                 # self._save_chunk_to_parquet()
+    #                 # Clear the chunks for the next set of events
+    #                 self.hits_chunk.clear()
+    #                 self.tracks_chunk.clear()
+    #                 self.last_saved_event_count = self.valid_event_count
+
+        
+        
+        
+
+    #     return self.hits_chunk, self.tracks_chunk
+
+
+
+    # def _save_chunk_to_hdf5(self) -> None:
+    #     """Save the current chunk of hits and tracks to HDF5 files with each event as a separate group."""
+    #     print(f"Saving chunk: {self.last_saved_event_count} to {self.valid_event_count}", end='\r')
+
+    #     # Create data subdirectory
+    #     data_dir = os.path.join(self.output_dir, 'data')
+    #     os.makedirs(data_dir, exist_ok=True)
+        
+    #     # Prepare file path in data subdirectory
+    #     h5_file = os.path.join(data_dir, f'events_{self.last_saved_event_count}to{self.valid_event_count}.h5')
+        
+    #     # Record chunk info for lightweight metadata (relative paths)
+    #     chunk_info = {
+    #         'h5_file': f'data/events_{self.last_saved_event_count}to{self.valid_event_count}.h5',
+    #         'event_range': {
+    #             'start': self.last_saved_event_count,
+    #             'end': self.valid_event_count,
+    #             'count': len(self.hits_chunk)
+    #         }
+    #     }
+        
+    #     current_chunk_idx = len(self.event_mapping)
+        
+    #     # Add efficient index tracking
+    #     for i in range(len(self.hits_chunk)):
+    #         event_idx = self.last_saved_event_count + i
+    #         self.global_event_ids.append(event_idx)
+    #         self.file_indices.append(current_chunk_idx)
+    #         self.row_indices.append(i)
+    #         self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_PositionX']))
+    #         self.num_tracks_per_event.append(len(self.tracks_chunk[i]['truthMuon_pt']))
+        
+    #     self.event_mapping.append(chunk_info)
+
+    #     # Save to HDF5 with each event as a separate group
+    #     with h5py.File(h5_file, 'w') as f:
+    #         # Set file-level attributes
+    #         f.attrs['chunk_start_event'] = self.last_saved_event_count
+    #         f.attrs['chunk_end_event'] = self.valid_event_count
+    #         f.attrs['chunk_event_count'] = len(self.hits_chunk)
+            
+    #         # Store feature names as attributes for reference
+    #         f.attrs['hit_feature_names'] = list(self.hit_features) + ['spacePoint_truthLink']
+    #         f.attrs['track_feature_names'] = list(self.track_features)
+            
+    #         # Save each event as a separate group
+    #         for event_idx in range(len(self.hits_chunk)):
+    #             event_group = f.create_group(f'event_{event_idx}')
+                
+    #             # Store event metadata
+    #             global_event_id = self.last_saved_event_count + event_idx
+    #             event_group.attrs['global_event_id'] = global_event_id
+    #             event_group.attrs['num_hits'] = len(self.hits_chunk[event_idx]['spacePoint_PositionX'])
+    #             event_group.attrs['num_tracks'] = len(self.tracks_chunk[event_idx]['truthMuon_pt'])
+                
+    #             # Store hits as 2D array: [num_hits, num_features]
+    #             hits_dict = self.hits_chunk[event_idx]
+    #             hit_feature_names = list(self.hit_features) + ['spacePoint_truthLink']
+                
+    #             hits_matrix = np.column_stack([
+    #                 np.array(hits_dict[feature], dtype=np.float32) 
+    #                 for feature in hit_feature_names
+    #             ])
+                
+    #             event_group.create_dataset(
+    #                 'hits',
+    #                 data=hits_matrix,
+    #                 compression='gzip',
+    #                 compression_opts=6,
+    #                 shuffle=True,
+    #                 fletcher32=True
+    #             )
+                
+    #             # Store tracks as 2D array: [num_tracks, num_features]
+    #             tracks_dict = self.tracks_chunk[event_idx]
+                
+    #             if len(tracks_dict['truthMuon_pt']) > 0:
+    #                 tracks_matrix = np.column_stack([
+    #                     np.array(tracks_dict[feature], dtype=np.float32)
+    #                     for feature in self.track_features
+    #                 ])
+                    
+    #                 event_group.create_dataset(
+    #                     'tracks',
+    #                     data=tracks_matrix,
+    #                     compression='gzip',
+    #                     compression_opts=6,
+    #                     shuffle=True,
+    #                     fletcher32=True
+    #                 )
+    #             else:
+    #                 # Empty array for no tracks
+    #                 event_group.create_dataset(
+    #                     'tracks', 
+    #                     data=np.empty((0, len(self.track_features)), dtype=np.float32)
+    #                 )
+                    
+    # def _save_chunk_to_parquet(self) -> None:
+    #     """Save the current chunk of hits and tracks to parquet files with one row group per file."""
+    #     print("Saving chunk...", end='\r')
+        
+    #     # Create data subdirectory
+    #     data_dir = os.path.join(self.output_dir, 'data')
+    #     os.makedirs(data_dir, exist_ok=True)
+        
+    #     # Prepare file paths in data subdirectory
+    #     hits_file = os.path.join(data_dir, f'hits{self.last_saved_event_count}to{self.valid_event_count}.parquet')
+    #     tracks_file = os.path.join(data_dir, f'tracks{self.last_saved_event_count}to{self.valid_event_count}.parquet')
+        
+    #     # Record chunk info for lightweight metadata (relative paths)
+    #     chunk_info = {
+    #         'hits_file': f'data/hits{self.last_saved_event_count}to{self.valid_event_count}.parquet',
+    #         'tracks_file': f'data/tracks{self.last_saved_event_count}to{self.valid_event_count}.parquet',
+    #         'event_range': {
+    #             'start': self.last_saved_event_count,
+    #             'end': self.valid_event_count,
+    #             'count': len(self.hits_chunk)
+    #         }
+    #     }
+        
+    #     current_chunk_idx = len(self.event_mapping)
+        
+    #     # Add efficient index tracking
+    #     for i in range(len(self.hits_chunk)):
+    #         event_idx = self.last_saved_event_count + i
+    #         self.global_event_ids.append(event_idx)
+    #         self.file_indices.append(current_chunk_idx)
+    #         self.row_indices.append(i)
+    #         self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_PositionX']))
+    #         self.num_tracks_per_event.append(len(self.tracks_chunk[i]['truthMuon_pt']))
+        
+    #     self.event_mapping.append(chunk_info)
+
+    #     # Process hits data - each event becomes a row with list of structs
+    #     hits_rows = []
+    #     for hits_dict in self.hits_chunk:
+    #         # Convert arrays to lists and create a single row with lists
+    #         hits_row = {}
+    #         for key, value in hits_dict.items():
+    #             hits_row[key] = value.tolist() if hasattr(value, 'tolist') else list(value)
+    #         hits_rows.append(hits_row)
+        
+    #     # Process tracks data - each event becomes a row with list of structs
+    #     tracks_rows = []
+    #     for tracks_dict in self.tracks_chunk:
+    #         # Convert arrays to lists and create a single row with lists
+    #         tracks_row = {}
+    #         for key, value in tracks_dict.items():
+    #             tracks_row[key] = value.tolist() if hasattr(value, 'tolist') else list(value)
+    #         tracks_rows.append(tracks_row)
+        
+    #     # Write hits parquet with one row group
+    #     if hits_rows:
+    #         hits_df = pd.DataFrame(hits_rows)
+    #         hits_table = pa.Table.from_pandas(hits_df)
+    #         pq.write_table(hits_table, hits_file, compression='snappy')
+        
+    #     # Write tracks parquet with one row group
+    #     if tracks_rows:
+    #         tracks_df = pd.DataFrame(tracks_rows)
+    #         tracks_table = pa.Table.from_pandas(tracks_df)
+    #         pq.write_table(tracks_table, tracks_file, compression='snappy')
+
+
+
+            # np.save(os.path.join(self.output_dir, 'event_num_hits.npy'), 
+        #         np.array(self.num_hits_per_event, dtype=np.int16))
+        # np.save(os.path.join(self.output_dir, 'event_num_tracks.npy'), 
+        #         np.array(self.num_tracks_per_event, dtype=np.int8))
+        
+        # Save chunk info separately (lightweight) - updated for HDF5
+        # chunk_info = []
+        # for chunk in self.event_mapping:
+        #     chunk_info.append({
+        #         'h5_file': chunk['h5_file'],
+        #         'start_event': chunk['event_range']['start'],
+        #         'end_event': chunk['event_range']['end'],
+        #         'count': chunk['event_range']['count']
+        #     })
+        
+        # np.save(os.path.join(self.output_dir, 'chunk_info.npy'), chunk_info)
+
+    # def _save_index_arrays(self) -> None:
+    #     """Save event indices as compact numpy arrays for efficient dataset loading."""
+    #     # Save metadata files at the top level (common practice)
+    #     np.save(os.path.join(self.output_dir, 'event_global_ids.npy'), 
+    #             np.array(self.global_event_ids, dtype=np.int32))
+    #     np.save(os.path.join(self.output_dir, 'event_file_indices.npy'), 
+    #             np.array(self.file_indices, dtype=np.int16))
+    #     np.save(os.path.join(self.output_dir, 'event_row_indices.npy'),
+    #             np.array(self.row_indices, dtype=np.int16))
+    #     np.save(os.path.join(self.output_dir, 'event_num_hits.npy'), 
+    #             np.array(self.num_hits_per_event, dtype=np.int16))
+    #     np.save(os.path.join(self.output_dir, 'event_num_tracks.npy'), 
+    #             np.array(self.num_tracks_per_event, dtype=np.int8))
+        
+    #     # Save chunk info separately (lightweight)
+        #     chunk_info = []
+        #     for chunk in self.event_mapping:
+        #         chunk_info.append({
+        #             'hits_file': chunk['hits_file'],
+        #             'tracks_file': chunk['tracks_file'],
+        #             'start_event': chunk['event_range']['start'],
+        #             'end_event': chunk['event_range']['end'],
+        #             'count': chunk['event_range']['count']
+        #         })
+            
+        #     np.save(os.path.join(self.output_dir, 'chunk_info.npy'), chunk_info)

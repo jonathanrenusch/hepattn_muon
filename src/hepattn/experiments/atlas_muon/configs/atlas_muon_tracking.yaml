@@ -1,13 +1,16 @@
 seed_everything: 42
-name: ATLAS-Muon-v1
+name: TRK-v0-full
+# ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
-  # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
-
   train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
   val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
   test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
 
+  # hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_train_data_eval.h5
+  # hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_val_data_eval.h5
+  # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
+  
   num_workers: 8
   num_train: 100
   num_test: -1
@@ -16,7 +19,7 @@ data:
   use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: 6  # Typically fewer particles per event in muon data
+  event_max_num_particles: &num_objects 6  # Typically fewer particles per event in muon data
 
   # Define which inputs will be available to the model
   inputs:
@@ -42,30 +45,36 @@ data:
       - cov_yy
 
   targets:
-    hit:
-      - on_valid_particle
-    # particle:
-    #   - pt
-    #   - eta
-    #   - phi
-    #   - q
+    # hit:
+    #   - on_valid_particle
+    particle:
+      - pt
+      - eta
+      - phi
+      - q
 
 trainer:
-  # Training configuration
-  max_epochs: 50
+  # Training stuff here
+  max_epochs: 30
   accelerator: gpu
-  devices: 1
+  devices: [1]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
-  gradient_clip_val: 1.0
-  enable_progress_bar: True
+  gradient_clip_val: 0.1
+  enable_progress_bar: true
+
+  #profiler:
+  #  class_path: lightning.pytorch.profilers.PyTorchProfiler
+  #  init_args:
+  #    dirpath: ./profile_logs/
+  #    filename: profile.json
 
   # Specify loggers here
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project: atlas_muon_filtering
+      project: trackml_tracking
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -98,16 +107,23 @@ trainer:
 model:
   optimizer: Lion
 
+  # Learning rate scheduler config
   lrs_config:
     initial: 1e-5
-    max: 3e-5
-    end: 1e-6
+    max: 5e-5
+    end: 1e-5
     pct_start: 0.05
+    skip_scheduler: false
     weight_decay: 1e-5
 
+  # Whether to use multi task learning or not
+  mtl: false
+
   model:
-    class_path: hepattn.models.HitFilter
+    class_path: hepattn.models.MaskFormer
     init_args:
+      dim: &dim 128
+      num_queries: *num_objects
       input_sort_field: phi
       input_nets:
         class_path: torch.nn.ModuleList
@@ -140,38 +156,71 @@ model:
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 16  # Number of input features for ATLAS muon data
-                    output_size: &dim 256
-                    norm_input: true
+                    input_size: 16
+                    output_size: *dim
                 posenc:
                   class_path: hepattn.models.FourierPositionEncoder
                   init_args:
                     input_name: hit
                     fields:
                       - phi
-                    # TODO: Check wether you might want to add more here
                     dim: *dim
                     scale: 0.1
+
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 5 # Slightly fewer layers for muon data
+          num_layers: 5
           dim: *dim
           attn_type: flash
-          window_size: 512  # Smaller window size for fewer hits per event
+          window_size: 256
           window_wrap: true
           hybrid_norm: true
           norm: RMSNorm
+
+      num_decoder_layers: 4
+      # intermediate_losses: true
+      decoder_layer_config:
+        dim: *dim
+        norm: RMSNorm
+        mask_attention: true
 
       tasks:
         class_path: torch.nn.ModuleList
         init_args:
           modules:
-            - class_path: hepattn.models.task.HitFilterTask
+            - class_path: hepattn.models.task.ObjectValidTask
               init_args:
-                name: hit_filter
-                input_object: hit
-                target_field: on_valid_particle
+                name: track_valid
+                input_object: query
+                output_object: track
+                target_object: particle
+                losses:
+                  object_bce: 1.0
+                costs:
+                  object_bce: 1.0
                 dim: *dim
-                threshold: 0.1
-                loss_fn: bce
+                null_weight: 1.0
+            - class_path: hepattn.models.task.ObjectHitMaskTask
+              init_args:
+                name: track_hit_valid
+                input_hit: hit
+                input_object: query
+                output_object: track
+                target_object: particle
+                losses:
+                  mask_bce: 100.0
+                  #mask_dice: 2.0
+                  mask_focal: 50.0
+                costs:
+                  mask_bce: 100.0
+                  #mask_dice: 2.0
+                  mask_focal: 50.0
+                dim: *dim
+                null_weight: 1.0
+
+      matcher:
+        class_path: hepattn.models.matcher.Matcher
+        init_args:
+          default_solver: scipy
+          adaptive_solver: true

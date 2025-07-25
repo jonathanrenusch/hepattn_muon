@@ -71,10 +71,23 @@ class MaskFormer(nn.Module):
 
         x = {}
 
+        # Check input data for NaNs
+        for key, tensor in inputs.items():
+            print("key:", key, "shape:", tensor.shape)
+            if torch.is_tensor(tensor) and tensor.dtype.is_floating_point:
+                if torch.isnan(tensor).any():
+                    print(f"NaN found in input '{key}': shape={tensor.shape}, nan_count={torch.isnan(tensor).sum()}")
+    
         # Embed the input objects
         for input_net in self.input_nets:
             input_name = input_net.input_name
             x[input_name + "_embed"] = input_net(inputs)
+
+            # Add debugging here
+            embed = x[input_name + "_embed"]
+            print(f"After {input_name} InputNet: shape={embed.shape}, min={embed.min()}, max={embed.max()}, has_nan={torch.isnan(embed).any()}")
+            
+
             x[input_name + "_valid"] = inputs[input_name + "_valid"]
 
             # These slices can be used to pick out specific
@@ -105,13 +118,18 @@ class MaskFormer(nn.Module):
 
         # Pass merged input hits through the encoder
         if self.encoder is not None:
+            print(f"Before encoder: shape={x['key_embed'].shape}, min={x['key_embed'].min()}, max={x['key_embed'].max()}, has_nan={torch.isnan(x['key_embed']).any()}")
             # Note that a padded feature is a feature that is not valid!
             x["key_embed"] = self.encoder(x["key_embed"], x_sort_value=x.get(f"key_{self.input_sort_field}"), kv_mask=x.get("key_valid"))
-
+            print(f"After encoder: shape={x['key_embed'].shape}, min={x['key_embed'].min()}, max={x['key_embed'].max()}, has_nan={torch.isnan(x['key_embed']).any()}")
         # Unmerge the updated features back into the separate input types
         # These are just views into the tensor that old all the merged hits
         for input_name in input_names:
             x[input_name + "_embed"] = x["key_embed"][..., x[f"key_is_{input_name}"], :]
+
+            # Add debugging here too
+            embed = x[input_name + "_embed"]
+            print(f"After unmerging {input_name}: shape={embed.shape}, min={embed.min()}, max={embed.max()}, has_nan={torch.isnan(embed).any()}")
 
         # Generate the queries that represent objects
         x["query_embed"] = self.query_initial.expand(batch_size, -1, -1)
@@ -238,6 +256,10 @@ class MaskFormer(nn.Module):
         # Permute the outputs for each output in each layer
         for layer_name in costs:
             # Get the indicies that can permute the predictions to yield their optimal matching
+            print("Matching layer:", layer_name)
+            print("valid particles:", targets["particle_valid"])
+            print("costs[layer_name]:", costs[layer_name])
+
             pred_idxs = self.matcher(costs[layer_name], targets["particle_valid"])
 
             # Apply the permutation in place

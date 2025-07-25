@@ -102,13 +102,34 @@ class ObjectValidTask(Task):
         # Objects that have a predicted probability aove the threshold are marked as predicted to exist
         return {self.output_object + "_valid": outputs[self.output_object + "_logit"].detach().sigmoid() >= threshold}
 
+    # def cost(self, outputs, targets):
+    #     output = outputs[self.output_object + "_logit"].detach().to(torch.float32)
+    #     target = targets[self.target_object + "_valid"].to(torch.float32)
+    #     costs = {}
+    #     for cost_fn, cost_weight in self.costs.items():
+    #         costs[cost_fn] = cost_weight * cost_fns[cost_fn](output, target)
+    #     return costs
+
     def cost(self, outputs, targets):
         output = outputs[self.output_object + "_logit"].detach().to(torch.float32)
         target = targets[self.target_object + "_valid"].to(torch.float32)
         costs = {}
         for cost_fn, cost_weight in self.costs.items():
-            costs[cost_fn] = cost_weight * cost_fns[cost_fn](output, target)
+            cost_value = cost_weight * cost_fns[cost_fn](output, target)
+            
+            # Add debugging here
+            if torch.isnan(cost_value).any() or torch.isinf(cost_value).any():
+                print(f"Invalid cost in {self.name}.{cost_fn}:")
+                print(f"  NaN count: {torch.isnan(cost_value).sum()}")
+                print(f"  Inf count: {torch.isinf(cost_value).sum()}")
+                print(f"  Cost shape: {cost_value.shape}")
+                print(f"  Output shape: {output.shape}, min: {output.min()}, max: {output.max()}")
+                print(f"  Target shape: {target.shape}, min: {target.min()}, max: {target.max()}")
+                print(f"  Cost weight: {cost_weight}")
+            
+            costs[cost_fn] = cost_value
         return costs
+
 
     def loss(self, outputs, targets):
         losses = {}
@@ -227,16 +248,42 @@ class ObjectHitMaskTask(Task):
         self.hit_net = Dense(dim, dim)
         self.object_net = Dense(dim, dim)
 
+    # def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
+    #     # Produce new task-specific embeddings for the hits and objects
+    #     x_object = self.object_net(x[self.input_object + "_embed"])
+    #     x_hit = self.hit_net(x[self.input_hit + "_embed"])
+
+    #     # Object-hit probability is the dot product between the hit and object embedding
+    #     object_hit_logit = torch.einsum("bnc,bmc->bnm", x_object, x_hit)
+
+    #     # Zero out entries for any hit slots that are not valid
+    #     object_hit_logit[~x[self.input_hit + "_valid"].unsqueeze(-2).expand_as(object_hit_logit)] = torch.finfo(object_hit_logit.dtype).min
+
+    #     return {self.output_object_hit + "_logit": object_hit_logit}
+
     def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
         # Produce new task-specific embeddings for the hits and objects
         x_object = self.object_net(x[self.input_object + "_embed"])
         x_hit = self.hit_net(x[self.input_hit + "_embed"])
 
+        print(f"x_object stats: shape={x_object.shape}, min={x_object.min()}, max={x_object.max()}, has_nan={torch.isnan(x_object).any()}")
+        print(f"x_hit stats: shape={x_hit.shape}, min={x_hit.min()}, max={x_hit.max()}, has_nan={torch.isnan(x_hit).any()}")
+
         # Object-hit probability is the dot product between the hit and object embedding
         object_hit_logit = torch.einsum("bnc,bmc->bnm", x_object, x_hit)
+        
+        print(f"After einsum: shape={object_hit_logit.shape}, min={object_hit_logit.min()}, max={object_hit_logit.max()}, has_nan={torch.isnan(object_hit_logit).any()}")
 
         # Zero out entries for any hit slots that are not valid
-        object_hit_logit[~x[self.input_hit + "_valid"].unsqueeze(-2).expand_as(object_hit_logit)] = torch.finfo(object_hit_logit.dtype).min
+        mask_value = torch.finfo(object_hit_logit.dtype).min
+        print(f"Mask value: {mask_value}")
+        
+        mask = ~x[self.input_hit + "_valid"].unsqueeze(-2).expand_as(object_hit_logit)
+        print(f"Mask stats: shape={mask.shape}, true_count={mask.sum()}")
+        
+        object_hit_logit[mask] = mask_value
+        
+        print(f"After masking: shape={object_hit_logit.shape}, min={object_hit_logit.min()}, max={object_hit_logit.max()}, has_nan={torch.isnan(object_hit_logit).any()}")
 
         return {self.output_object_hit + "_logit": object_hit_logit}
 
@@ -256,13 +303,35 @@ class ObjectHitMaskTask(Task):
         # Object-hit pairs that have a predicted probability above the threshold are predicted as being associated to one-another
         return {self.output_object_hit + "_valid": outputs[self.output_object_hit + "_logit"].detach().sigmoid() >= threshold}
 
+    # def cost(self, outputs, targets):
+    #     output = outputs[self.output_object_hit + "_logit"].detach().to(torch.float32)
+    #     target = targets[self.target_object_hit + "_valid"].to(torch.float32)
+
+    #     costs = {}
+    #     for cost_fn, cost_weight in self.costs.items():
+    #         costs[cost_fn] = cost_weight * cost_fns[cost_fn](output, target)
+    #     return costs
+
     def cost(self, outputs, targets):
         output = outputs[self.output_object_hit + "_logit"].detach().to(torch.float32)
         target = targets[self.target_object_hit + "_valid"].to(torch.float32)
 
         costs = {}
         for cost_fn, cost_weight in self.costs.items():
-            costs[cost_fn] = cost_weight * cost_fns[cost_fn](output, target)
+            cost_value = cost_weight * cost_fns[cost_fn](output, target)
+            
+            # Add debugging here
+            if torch.isnan(cost_value).any() or torch.isinf(cost_value).any():
+                print(f"Invalid cost in {self.name}.{cost_fn}:")
+                print(f"  NaN count: {torch.isnan(cost_value).sum()}")
+                print(f"  Inf count: {torch.isinf(cost_value).sum()}")
+                print(f"  Cost shape: {cost_value.shape}")
+                print(f"  Output shape: {output.shape}, min: {output.min()}, max: {output.max()}")
+                print(f"  Target shape: {target.shape}, min: {target.min()}, max: {target.max()}")
+                print(f"  Cost weight: {cost_weight}")
+                print(f"  Raw cost (before weight): min: {(cost_fns[cost_fn](output, target)).min()}, max: {(cost_fns[cost_fn](output, target)).max()}")
+            
+            costs[cost_fn] = cost_value
         return costs
 
     def loss(self, outputs, targets):

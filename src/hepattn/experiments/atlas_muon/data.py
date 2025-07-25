@@ -172,12 +172,12 @@ class AtlasMuonDataset(Dataset):
             self.metadata = yaml.safe_load(f)
         
         # Load efficient index arrays
-        self.global_event_ids = np.load(self.dataset_dir / 'event_global_ids.npy')
+        # self.global_event_ids = np.load(self.dataset_dir / 'event_global_ids.npy')
         self.file_indices = np.load(self.dataset_dir / 'event_file_indices.npy')
         self.row_indices = np.load(self.dataset_dir / 'event_row_indices.npy')
-        self.num_hits_per_event = np.load(self.dataset_dir / 'event_num_hits.npy')
-        self.num_tracks_per_event = np.load(self.dataset_dir / 'event_num_tracks.npy')
-        self.chunk_info = np.load(self.dataset_dir / 'chunk_info.npy', allow_pickle=True)
+        # self.num_hits_per_event = np.load(self.dataset_dir / 'event_num_hits.npy')
+        # self.num_tracks_per_event = np.load(self.dataset_dir / 'event_num_tracks.npy')
+        # self.chunk_info = np.load(self.dataset_dir / 'chunk_info.npy', allow_pickle=True)
         
         # Calculate number of events to use
         num_events_available = len(self.global_event_ids)
@@ -207,9 +207,8 @@ class AtlasMuonDataset(Dataset):
         targets = {}
 
         # Load the event
-        hits, particles = self.load_event(idx)
-        num_particles = self.num_tracks_per_event[idx]
-        num_hits = len(hits["on_valid_particle"])
+        hits, particles, num_hits, num_tracks = self.load_event(idx)
+
 
         # Build the input hits - using same structure as TrackML
         for feature, fields in self.inputs.items():
@@ -222,15 +221,15 @@ class AtlasMuonDataset(Dataset):
                 # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).unsqueeze(0).half()
 
         # Build the targets for whether a particle slot is used or not
-        targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
-        targets["particle_valid"][:num_particles] = True
+        targets["particle_valid"] = torch.full((self.event_max_num_tracks,), False)
+        targets["particle_valid"][:num_tracks] = True
         targets["particle_valid"] = targets["particle_valid"].unsqueeze(0)
         # print("Particle valid shape:", targets["particle_valid"].shape)
         # print("Particle valid:", targets["particle_valid"])
         
         
-        message = f"Event {idx} has {num_particles} particles, but limit is {self.event_max_num_particles}"
-        assert num_particles <= self.event_max_num_particles, message
+        message = f"Event {idx} has {num_tracks} particles, but limit is {self.event_max_num_particles}"
+        assert num_tracks <= self.event_max_num_particles, message
 
         # Build the particle regression targets
         particle_ids = torch.from_numpy(particles["particle_id"])
@@ -258,47 +257,47 @@ class AtlasMuonDataset(Dataset):
                 # Null target/particle slots are filled with nans
                 x = torch.full((self.event_max_num_particles,), torch.nan)
                 if field in particles:
-                    x[:num_particles] = torch.from_numpy(particles[field][:self.event_max_num_particles])
+                    x[:num_tracks] = torch.from_numpy(particles[field][:self.event_max_num_particles])
                 targets[f"particle_{field}"] = x
                 # targets[f"particle_{field}"] = x.unsqueeze(0)
 
         return inputs, targets
     
     def load_event(self, idx):
-        """Load a single event from HDF5 files using the 2D array format - optimized with dictionaries."""
+        """Load a single event from compound HDF5 files using count-based slicing."""
         # Get file and row info using efficient indexing
         file_idx = self.file_indices[idx]
-        row_idx = self.row_indices[idx]
+        row_idx = self.row_indices[idx]  # This is the row within the compound arrays
         
         # Get chunk info
-        chunk = self.chunk_info[file_idx]
-        
-        # Load from HDF5 file (much faster than parquet for single events)
+        chunk = self.metadata['chunk_info'][file_idx]
+
+        # Load from HDF5 file
         h5_file_path = self.dataset_dir / chunk['h5_file']
         
         try:
             with h5py.File(h5_file_path, 'r') as f:
-                # Direct access to specific event group
-                event_group = f[f'event_{row_idx}']
-                
                 # Load feature names from file attributes
-                hit_feature_names = f.attrs['hit_feature_names']
-                track_feature_names = f.attrs['track_feature_names']
+                hit_feature_names = [name.decode() if isinstance(name, bytes) else name 
+                                for name in f.attrs['hit_feature_names']]
+                track_feature_names = [name.decode() if isinstance(name, bytes) else name 
+                                    for name in f.attrs['track_feature_names']]
                 
-                # Load hits as 2D array: [num_hits, num_features]
-                hits_matrix = event_group['hits'][:]
+                # Get actual counts for this event
+                num_hits = f['num_hits'][row_idx]
+                num_tracks = f['num_tracks'][row_idx]
                 
-                # Load tracks as 2D array: [num_tracks, num_features]  
-                tracks_matrix = event_group['tracks'][:]
+                # Load single event from compound arrays using count-based slicing
+                hits_array = f['hits'][row_idx, :num_hits]  # Shape: [num_actual_hits, num_features]
+                tracks_array = f['tracks'][row_idx, :num_tracks]  # Shape: [num_actual_tracks, num_features]
                 
         except Exception as e:
             raise RuntimeError(f"Failed to load event {idx} from HDF5 file {h5_file_path}: {e}")
         
-        # Convert hits matrix to dictionary (much faster than DataFrame)
-
+        # Convert hits array to dictionary
         hits_dict = {}
         for i, feature_name in enumerate(hit_feature_names):
-            hits_dict[feature_name] = hits_matrix[:, i]
+            hits_dict[feature_name] = hits_array[:, i]
         
         # Convert coordinates to meters (if they're in mm)
         scale_factor = 0.001  # mm to m
@@ -322,27 +321,108 @@ class AtlasMuonDataset(Dataset):
             'technology': hits_dict['spacePoint_technology'],
         }
         
-        # Add derived hit fields (vectorized numpy operations - much faster)
+        # Add derived hit fields (vectorized numpy operations)
         hits["r"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2)
         hits["s"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2 + hits["z"] ** 2)
         hits["theta"] = np.arccos(np.clip(hits["z"] / hits["s"], -1, 1))
         hits["phi"] = np.arctan2(hits["y"], hits["x"])
         hits["on_valid_particle"] = hits["particle_id"] >= 0
 
+        # Convert tracks array to dictionary
         tracks_dict = {}
         for i, feature_name in enumerate(track_feature_names):
-            tracks_dict[feature_name] = tracks_matrix[:, i]
+            tracks_dict[feature_name] = tracks_array[:, i]
         
         particles = {
-            'particle_id': np.arange(len(tracks_matrix)),  # Sequential IDs
+            'particle_id': np.arange(len(tracks_array)),  # Sequential IDs
             'pt': tracks_dict['truthMuon_pt'],
             'eta': tracks_dict['truthMuon_eta'],
             'phi': tracks_dict['truthMuon_phi'],
             'q': tracks_dict['truthMuon_q'],
         }
 
+        return hits, particles, num_hits, num_tracks
+
+
+    # def load_event(self, idx):
+    #     """Load a single event from HDF5 files using the 2D array format - optimized with dictionaries."""
+    #     # Get file and row info using efficient indexing
+    #     file_idx = self.file_indices[idx]
+    #     row_idx = self.row_indices[idx]
         
-        return hits, particles
+    #     # Get chunk info
+    #     chunk = self.chunk_info[file_idx]
+        
+    #     # Load from HDF5 file (much faster than parquet for single events)
+    #     h5_file_path = self.dataset_dir / chunk['h5_file']
+        
+    #     try:
+    #         with h5py.File(h5_file_path, 'r') as f:
+    #             # Direct access to specific event group
+    #             event_group = f[f'event_{row_idx}']
+                
+    #             # Load feature names from file attributes
+    #             hit_feature_names = f.attrs['hit_feature_names']
+    #             track_feature_names = f.attrs['track_feature_names']
+                
+    #             # Load hits as 2D array: [num_hits, num_features]
+    #             hits_matrix = event_group['hits'][:]
+                
+    #             # Load tracks as 2D array: [num_tracks, num_features]  
+    #             tracks_matrix = event_group['tracks'][:]
+                
+    #     except Exception as e:
+    #         raise RuntimeError(f"Failed to load event {idx} from HDF5 file {h5_file_path}: {e}")
+        
+    #     # Convert hits matrix to dictionary (much faster than DataFrame)
+
+    #     hits_dict = {}
+    #     for i, feature_name in enumerate(hit_feature_names):
+    #         hits_dict[feature_name] = hits_matrix[:, i]
+        
+    #     # Convert coordinates to meters (if they're in mm)
+    #     scale_factor = 0.001  # mm to m
+        
+    #     # Create hits dictionary with standard naming
+    #     hits = {
+    #         'x': hits_dict['spacePoint_PositionX'] * scale_factor,
+    #         'y': hits_dict['spacePoint_PositionY'] * scale_factor,
+    #         'z': hits_dict['spacePoint_PositionZ'] * scale_factor,
+    #         'particle_id': hits_dict['spacePoint_truthLink'].astype(int),
+    #         # Add covariance information
+    #         'cov_xx': hits_dict['spacePoint_covXX'],
+    #         'cov_xy': hits_dict['spacePoint_covXY'],
+    #         'cov_yy': hits_dict['spacePoint_covYY'],
+    #         # Add detector information
+    #         'channel': hits_dict['spacePoint_channel'],
+    #         'drift_r': hits_dict['spacePoint_driftR'],
+    #         'layer': hits_dict['spacePoint_layer'],
+    #         'station_phi': hits_dict['spacePoint_stationPhi'],
+    #         'station_eta': hits_dict['spacePoint_stationEta'],
+    #         'technology': hits_dict['spacePoint_technology'],
+    #     }
+        
+    #     # Add derived hit fields (vectorized numpy operations - much faster)
+    #     hits["r"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2)
+    #     hits["s"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2 + hits["z"] ** 2)
+    #     hits["theta"] = np.arccos(np.clip(hits["z"] / hits["s"], -1, 1))
+    #     hits["phi"] = np.arctan2(hits["y"], hits["x"])
+    #     hits["on_valid_particle"] = hits["particle_id"] >= 0
+
+    #     tracks_dict = {}
+    #     for i, feature_name in enumerate(track_feature_names):
+    #         tracks_dict[feature_name] = tracks_matrix[:, i]
+        
+    #     particles = {
+    #         'particle_id': np.arange(len(tracks_matrix)),  # Sequential IDs
+    #         'pt': tracks_dict['truthMuon_pt'],
+    #         'eta': tracks_dict['truthMuon_eta'],
+    #         'phi': tracks_dict['truthMuon_phi'],
+    #         'q': tracks_dict['truthMuon_q'],
+    #     }
+
+        
+    #     return hits, particles
 
     # def load_event(self, idx):
     #     # Get file and row info using efficient indexing
