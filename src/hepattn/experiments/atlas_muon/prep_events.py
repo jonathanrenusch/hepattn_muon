@@ -30,6 +30,7 @@ class rootFilter:
         self.num_hits_threshold = num_hits_threshold
         self.hits_chunk= []
         self.tracks_chunk = []
+        self.event_numbers_chunk = []
         self.valid_event_count = 0
         self.last_saved_event_count = 0
         self.excluded_tracks_count = 0
@@ -118,6 +119,9 @@ class rootFilter:
                         entry_start=chunk_start, entry_stop=chunk_end, library='np'
                     )
                 
+                event_numbers_array = root_file[tree]['eventNumber'].array(
+                    entry_start=chunk_start, entry_stop=chunk_end, library='np'
+                )
                 # Process each event in the chunk
                 for event_idx_in_chunk in range(chunk_end - chunk_start):
                     # Running checks on event
@@ -159,6 +163,7 @@ class rootFilter:
                     tracks = {branch: track_features_chunk[branch][event_idx_in_chunk][track_mask] for branch in self.track_features}
                     self.hits_chunk.append(hits)
                     self.tracks_chunk.append(tracks)    
+                    self.event_numbers_chunk.append(event_numbers_array[event_idx_in_chunk])
 
                     # Increment saved event count
                     self.valid_event_count += 1
@@ -174,6 +179,7 @@ class rootFilter:
                         # Clear the chunks for the next set of events
                         self.hits_chunk.clear()
                         self.tracks_chunk.clear()
+                        self.event_numbers_chunk.clear()
                         self.last_saved_event_count = self.valid_event_count
 
         return self.hits_chunk, self.tracks_chunk
@@ -202,7 +208,7 @@ class rootFilter:
             event_idx = self.last_saved_event_count + i
             self.file_indices.append(current_chunk_idx)
             self.row_indices.append(i)  # Position within this chunk's compound arrays
-            self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_PositionX']))
+            self.num_hits_per_event.append(len(self.hits_chunk[i]['spacePoint_time']))
             self.num_tracks_per_event.append(len(self.tracks_chunk[i]['truthMuon_pt']))
         
         self.event_mapping.append(chunk_info)
@@ -210,20 +216,33 @@ class rootFilter:
         with h5py.File(h5_file, 'w') as f:
             # Calculate dimensions
             num_events = len(self.hits_chunk)
-            max_hits = max(len(hits['spacePoint_PositionX']) for hits in self.hits_chunk)
+            max_hits = max(len(hits['spacePoint_time']) for hits in self.hits_chunk)
             max_tracks = max(len(tracks['truthMuon_pt']) for tracks in self.tracks_chunk)
             num_hit_features = len(self.hit_features) + 1  # +1 for truthLink
             num_track_features = len(self.track_features)
+            # Checking if 
             
             # Create padded hit arrays
             hits_array = np.full((num_events, max_hits, num_hit_features), np.nan, dtype=np.float32)
             
             # Fill hit data
-            hit_feature_names = self.hit_features + ['spacePoint_truthLink']
             for event_idx, hits_dict in enumerate(self.hits_chunk):
-                num_hits = len(hits_dict['spacePoint_PositionX'])
-                
-                for feat_idx, feature in enumerate(hit_feature_names):
+                num_hits = len(hits_dict['spacePoint_time'])
+
+                # check if any of the hit features contain nans or are empty and if they all match in length:
+                # # check if any of the hit features contain nans or are empty:
+                # Check for empty arrays, NaNs, and consistent lengths
+                for feature in self.hit_features:
+                    arr = hits_dict[feature]
+                    if len(arr) == 0:
+                        print(f"Warning: Event {event_idx} hit feature '{feature}' is empty!")
+                    if len(arr) != num_hits:
+                        print(f"Warning: Event {event_idx} hit feature '{feature}' length {len(arr)} != num_hits {num_hits}!")
+                    if np.any(pd.isna(arr)):
+                        print(f"Warning: Event {event_idx} hit feature '{feature}' contains NaNs!")
+
+                for feat_idx, feature in enumerate(self.hit_features):
+                    # running checks on the feature data
                     hits_array[event_idx, :num_hits, feat_idx] = hits_dict[feature]
             
             # Create padded track arrays
@@ -232,9 +251,16 @@ class rootFilter:
             # Fill track data
             for event_idx, tracks_dict in enumerate(self.tracks_chunk):
                 num_tracks = len(tracks_dict['truthMuon_pt'])
-                if num_tracks > 0:
-                    for feat_idx, feature in enumerate(self.track_features):
-                        tracks_array[event_idx, :num_tracks, feat_idx] = tracks_dict[feature]
+                for feature in self.track_features:
+                    arr = tracks_dict[feature]
+                    if len(arr) == 0:
+                        print(f"Warning: Event {event_idx} track feature '{feature}' is empty!")
+                    if len(arr) != num_tracks:
+                        print(f"Warning: Event {event_idx} track feature '{feature}' length {len(arr)} != num_tracks {num_tracks}!")
+                    if np.any(pd.isna(arr)):
+                        print(f"Warning: Event {event_idx} track feature '{feature}' contains NaNs!")
+                for feat_idx, feature in enumerate(self.track_features):
+                    tracks_array[event_idx, :num_tracks, feat_idx] = tracks_dict[feature]
             
             # Save compound datasets (NO GROUPS, NO BOOLEAN MASKS!)
             f.create_dataset('hits', data=hits_array, 
@@ -245,16 +271,17 @@ class rootFilter:
                             shuffle=True, fletcher32=True)
             
             # Store actual counts instead of boolean masks
-            event_num_hits = np.array([len(hits['spacePoint_PositionX']) for hits in self.hits_chunk], dtype=np.int16)
+            event_num_hits = np.array([len(hits['spacePoint_time']) for hits in self.hits_chunk], dtype=np.int16)
             event_num_tracks = np.array([len(tracks['truthMuon_pt']) for tracks in self.tracks_chunk], dtype=np.int16)
             
             f.create_dataset('num_hits', data=event_num_hits, compression='gzip', compression_opts=6)
             f.create_dataset('num_tracks', data=event_num_tracks, compression='gzip', compression_opts=6)
-            
+            f.create_dataset('event_numbers', data=np.array(self.event_numbers_chunk, dtype=np.int32), compression='gzip', compression_opts=6)
             # Store metadata as file attributes (remove redundant chunk start/end)
-            f.attrs['hit_feature_names'] = [s.encode() for s in hit_feature_names]
-            f.attrs['track_feature_names'] = [s.encode() for s in self.track_features]
+            # f.attrs['hit_feature_names'] = [s.encode() for s in self.hit_features]
+            # f.attrs['track_feature_names'] = [s.encode() for s in self.track_features]
             f.attrs['num_events'] = num_events
+
 
 
 
@@ -286,6 +313,7 @@ class rootFilter:
             # self._save_chunk_to_parquet()
             self.hits_chunk.clear()
             self.tracks_chunk.clear()
+            self.event_numbers_chunk.clear()
             self.last_saved_event_count = self.valid_event_count
             
         # Save summary information to YAML file at top level
@@ -300,6 +328,8 @@ class rootFilter:
         
         # Create structured data for YAML
         dataset_info = {
+            'hit_features': self.hit_features,
+            'track_features': self.track_features,
             'processing_summary': {
                 'total_excluded_tracks': self.excluded_tracks_count,
                 'total_tracks_processed': total_tracks,

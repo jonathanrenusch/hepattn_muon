@@ -4,57 +4,62 @@ name: ATLAS-Muon-v1
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
-  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/train_setPU200_proccessed_h5
+  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
+  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
+  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/test_PU200_processed
 
-  num_workers: 8
-  num_train: 100
+  num_workers: 10
+  num_train: -1
   num_test: -1
-  num_val: 100
+  num_val: -1
   batch_size: 1  # Start with batch_size=1 to avoid smart batching issues
   use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: 6  # Typically fewer particles per event in muon data
+  event_max_num_particles: 6  # Typically fewer tracks per event in muon data
 
   # Define which inputs will be available to the model
   inputs:
     hit:
       # Global hit coordinates
-      - x
-      - y
-      - z
-      - r
-      - s
-      - phi
-      - theta
-      # Detector information
-      - channel
-      - drift_r
-      - layer
-      - station_phi
-      - station_eta
-      - technology
-      # Covariance information
-      - cov_xx
-      - cov_xy
-      - cov_yy
-
+      - spacePoint_globEdgeHighX
+      - spacePoint_globEdgeHighY
+      - spacePoint_globEdgeHighZ
+      - spacePoint_globEdgeLowX
+      - spacePoint_globEdgeLowY
+      - spacePoint_globEdgeLowZ
+      - spacePoint_time
+      - spacePoint_driftR
+      # Add covariance information
+      - spacePoint_covXX
+      - spacePoint_covXY
+      - spacePoint_covYX
+      - spacePoint_covYY
+      # Add detector information
+      - spacePoint_channel
+      - spacePoint_layer
+      - spacePoint_stationPhi
+      - spacePoint_stationEta
+      - spacePoint_technology
+      # Add derived hit fields
+      - r  # Radial distance
+      - s  # 3D distance
+      - theta  # Polar angle
+      - phi  # Azimuthal angle
   targets:
     hit:
       - on_valid_particle
     # particle:
-    #   - pt
-    #   - eta
-    #   - phi
-    #   - q
+    #   - truthMuon_pt
+    #   - truthMuon_eta
+    #   - truthMuon_phi
+    #   - truthMuon_q
 
 trainer:
   # Training configuration
   max_epochs: 50
   accelerator: gpu
-  devices: 1
+  devices: [2]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -117,30 +122,35 @@ model:
               init_args:
                 input_name: hit
                 fields:
-                 # Global hit coordinates
-                - x
-                - y
-                - z
-                - r
-                - s
-                - phi
-                - theta
-                # Detector information
-                - channel
-                - drift_r
-                - layer
-                - station_phi
-                - station_eta
-                - technology
-                # Covariance information
-                - cov_xx
-                - cov_xy
-                - cov_yy
-                # TODO: Check whether you might want to add more here 
+                  # Global hit coordinates
+                  - spacePoint_globEdgeHighX
+                  - spacePoint_globEdgeHighY
+                  - spacePoint_globEdgeHighZ
+                  - spacePoint_globEdgeLowX
+                  - spacePoint_globEdgeLowY
+                  - spacePoint_globEdgeLowZ
+                  - spacePoint_time
+                  - spacePoint_driftR
+                  # Add covariance information
+                  - spacePoint_covXX
+                  - spacePoint_covXY
+                  - spacePoint_covYX
+                  - spacePoint_covYY
+                  # Add detector information
+                  - spacePoint_channel
+                  - spacePoint_layer
+                  - spacePoint_stationPhi
+                  - spacePoint_stationEta
+                  - spacePoint_technology
+                  # Add derived hit fields
+                  - r  # Radial distance
+                  - s  # 3D distance
+                  - theta  # Polar angle
+                  - phi  # Azimuthal angle
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 16  # Number of input features for ATLAS muon data
+                    input_size: 21  # Number of input features for ATLAS muon data
                     output_size: &dim 256
                     norm_input: true
                 posenc:
@@ -155,7 +165,7 @@ model:
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 5 # Slightly fewer layers for muon data
+          num_layers: 8 # Slightly fewer layers for muon data
           dim: *dim
           attn_type: flash
           window_size: 512  # Smaller window size for fewer hits per event

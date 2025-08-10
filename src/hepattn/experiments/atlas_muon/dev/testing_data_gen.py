@@ -1,4 +1,4 @@
-from hepattn.experiments.atlas_muon.data import MuonTracking
+from hepattn.experiments.atlas_muon.data_vis import MuonTracking
 
 
 

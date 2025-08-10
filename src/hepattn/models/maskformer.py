@@ -1,5 +1,6 @@
 import torch
 from torch import Tensor, nn
+import numpy as np 
 
 from hepattn.models.decoder import MaskFormerDecoderLayer
 from hepattn.models.task import ObjectHitMaskTask
@@ -72,11 +73,11 @@ class MaskFormer(nn.Module):
         x = {}
 
         # Check input data for NaNs
-        for key, tensor in inputs.items():
-            print("key:", key, "shape:", tensor.shape)
-            if torch.is_tensor(tensor) and tensor.dtype.is_floating_point:
-                if torch.isnan(tensor).any():
-                    print(f"NaN found in input '{key}': shape={tensor.shape}, nan_count={torch.isnan(tensor).sum()}")
+        # for key, tensor in inputs.items():
+        #     # print("key:", key, "shape:", tensor.shape)
+        #     if torch.is_tensor(tensor) and tensor.dtype.is_floating_point:
+        #         if torch.isnan(tensor).any():
+        #             print(f"NaN found in input '{key}': shape={tensor.shape}, nan_count={torch.isnan(tensor).sum()}")
     
         # Embed the input objects
         for input_net in self.input_nets:
@@ -85,7 +86,7 @@ class MaskFormer(nn.Module):
 
             # Add debugging here
             embed = x[input_name + "_embed"]
-            print(f"After {input_name} InputNet: shape={embed.shape}, min={embed.min()}, max={embed.max()}, has_nan={torch.isnan(embed).any()}")
+            # print(f"After {input_name} InputNet: shape={embed.shape}, min={embed.min()}, max={embed.max()}, has_nan={torch.isnan(embed).any()}")
             
 
             x[input_name + "_valid"] = inputs[input_name + "_valid"]
@@ -118,10 +119,10 @@ class MaskFormer(nn.Module):
 
         # Pass merged input hits through the encoder
         if self.encoder is not None:
-            print(f"Before encoder: shape={x['key_embed'].shape}, min={x['key_embed'].min()}, max={x['key_embed'].max()}, has_nan={torch.isnan(x['key_embed']).any()}")
+            # print(f"Before encoder: shape={x['key_embed'].shape}, min={x['key_embed'].min()}, max={x['key_embed'].max()}, has_nan={torch.isnan(x['key_embed']).any()}")
             # Note that a padded feature is a feature that is not valid!
             x["key_embed"] = self.encoder(x["key_embed"], x_sort_value=x.get(f"key_{self.input_sort_field}"), kv_mask=x.get("key_valid"))
-            print(f"After encoder: shape={x['key_embed'].shape}, min={x['key_embed'].min()}, max={x['key_embed'].max()}, has_nan={torch.isnan(x['key_embed']).any()}")
+            # print(f"After encoder: shape={x['key_embed'].shape}, min={x['key_embed'].min()}, max={x['key_embed'].max()}, has_nan={torch.isnan(x['key_embed']).any()}")
         # Unmerge the updated features back into the separate input types
         # These are just views into the tensor that old all the merged hits
         for input_name in input_names:
@@ -129,7 +130,7 @@ class MaskFormer(nn.Module):
 
             # Add debugging here too
             embed = x[input_name + "_embed"]
-            print(f"After unmerging {input_name}: shape={embed.shape}, min={embed.min()}, max={embed.max()}, has_nan={torch.isnan(embed).any()}")
+            # print(f"After unmerging {input_name}: shape={embed.shape}, min={embed.min()}, max={embed.max()}, has_nan={torch.isnan(embed).any()}")
 
         # Generate the queries that represent objects
         x["query_embed"] = self.query_initial.expand(batch_size, -1, -1)
@@ -256,15 +257,36 @@ class MaskFormer(nn.Module):
         # Permute the outputs for each output in each layer
         for layer_name in costs:
             # Get the indicies that can permute the predictions to yield their optimal matching
+            # print("Matching layer:", layer_name)
+            # print("valid particles:", targets["particle_valid"])
+            # print("costs[layer_name]:", costs[layer_name])
             print("Matching layer:", layer_name)
-            print("valid particles:", targets["particle_valid"])
-            print("costs[layer_name]:", costs[layer_name])
-
+            # print("valid particles:", targets["particle_valid"])
+            # print("valid particles shape:", targets["particle_valid"].shape)
+            # print("costs[layer_name]:", costs[layer_name])
+            # print("costs[layer_name] shape:", costs[layer_name].shape)
+            # ...existing code...
             pred_idxs = self.matcher(costs[layer_name], targets["particle_valid"])
 
+            # Ensure proper tensor conversion
+            if isinstance(pred_idxs, np.ndarray):
+                pred_idxs = torch.from_numpy(pred_idxs).long()
+            elif not isinstance(pred_idxs, torch.Tensor):
+                pred_idxs = torch.tensor(pred_idxs, dtype=torch.long)
+
+            # Ensure it's on the right device
+            pred_idxs = pred_idxs.to(outputs[layer_name][self.tasks[0].name][self.tasks[0].outputs[0]].device)
+            # ...existing code...
             # Apply the permutation in place
+            # print(outputs)
             for task in self.tasks:
                 for output_name in task.outputs:
+                    # print("output_name:", output_name)
+                    # print("layer_name:", layer_name)
+                    # print("outputs[layer_name][task.name][output_name]:", outputs[layer_name][task.name][output_name].shape)
+                    # print("batch_idxs:", batch_idxs.shape)
+                    # print("pred_idxs:", pred_idxs.shape)
+
                     outputs[layer_name][task.name][output_name] = outputs[layer_name][task.name][output_name][batch_idxs, pred_idxs]
 
         # Compute the losses for each task in each block

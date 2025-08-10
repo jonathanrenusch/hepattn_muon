@@ -155,7 +155,7 @@ class AtlasMuonDataset(Dataset):
         inputs: dict,
         targets: dict,
         num_events: int = -1,
-        event_max_num_particles: int = 6,  # Typically fewer particles per event in muon data
+        event_max_num_particles: int = 6,  # Typically fewer tracks per event in muon data
     ):
         super().__init__()
 
@@ -171,6 +171,9 @@ class AtlasMuonDataset(Dataset):
         with open(self.dataset_dir / 'metadata.yaml', 'r') as f:
             self.metadata = yaml.safe_load(f)
         
+        self.hit_features = self.metadata['hit_features']
+        self.track_features = self.metadata['track_features']
+        
         # Load efficient index arrays
         # self.global_event_ids = np.load(self.dataset_dir / 'event_global_ids.npy')
         self.file_indices = np.load(self.dataset_dir / 'event_file_indices.npy')
@@ -180,7 +183,7 @@ class AtlasMuonDataset(Dataset):
         # self.chunk_info = np.load(self.dataset_dir / 'chunk_info.npy', allow_pickle=True)
         
         # Calculate number of events to use
-        num_events_available = len(self.global_event_ids)
+        num_events_available = len(self.row_indices)
         
         if num_events > num_events_available:
             msg = f"Requested {num_events} events, but only {num_events_available} are available."
@@ -205,25 +208,25 @@ class AtlasMuonDataset(Dataset):
     def __getitem__(self, idx):
         inputs = {}
         targets = {}
-
+ 
         # Load the event
         hits, particles, num_hits, num_tracks = self.load_event(idx)
 
-
+        
         # Build the input hits - using same structure as TrackML
         for feature, fields in self.inputs.items():
             inputs[f"{feature}_valid"] = torch.full((num_hits,), True)
             # inputs[f"{feature}_valid"] = torch.full((num_hits,), True).unsqueeze(0)
             targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
-
             for field in fields:
-                inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).half()
-                # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).unsqueeze(0).half()
+                inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
+                # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).half()
+                inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
 
         # Build the targets for whether a particle slot is used or not
-        targets["particle_valid"] = torch.full((self.event_max_num_tracks,), False)
+        targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
         targets["particle_valid"][:num_tracks] = True
-        targets["particle_valid"] = targets["particle_valid"].unsqueeze(0)
+        targets["particle_valid"] = targets["particle_valid"]
         # print("Particle valid shape:", targets["particle_valid"].shape)
         # print("Particle valid:", targets["particle_valid"])
         
@@ -235,10 +238,16 @@ class AtlasMuonDataset(Dataset):
         particle_ids = torch.from_numpy(particles["particle_id"])
 
         # Fill in empty slots with -999s and get the IDs of the particle on each hit
-        particle_ids = torch.cat([particle_ids, -999 * torch.ones(self.event_max_num_particles - len(particle_ids))])
-        hit_particle_ids = torch.from_numpy(hits["particle_id"])
+        particle_ids = torch.cat([particle_ids, -999 * torch.ones(self.event_max_num_particles - len(particle_ids))]).type(torch.int32)
+        # print("Particle IDs:", particle_ids)
+        # print("Particle IDs:", particle_ids.shape)
+        hit_particle_ids = torch.from_numpy(hits["spacePoint_truthLink"])
 
         # Create the mask targets
+        # print("particle_ids.unsqueeze(-1):", particle_ids.unsqueeze(-1))
+        # print("particle_ids.unsqueeze(-1).shape:", particle_ids.unsqueeze(-1).shape)
+        # print("hit_particle_ids.unsqueeze(-2):", hit_particle_ids.unsqueeze(-2))
+        # print("hit_particle_ids.unsqueeze(-2).shape:", hit_particle_ids.unsqueeze(-2).shape)
         targets["particle_hit_valid"] = (particle_ids.unsqueeze(-1) == hit_particle_ids.unsqueeze(-2))
         # print("Targets particle_hit_valid:", targets["particle_hit_valid"].shape)
         # print("Targets particle_hit_valid:", targets["particle_hit_valid"])
@@ -249,7 +258,7 @@ class AtlasMuonDataset(Dataset):
         # print("Targets particle_hit_valid:", targets["hit_on_valid_particle"])
 
         # Add sample ID
-        targets["sample_id"] = torch.tensor([self.global_event_ids[idx]], dtype=torch.int32)
+        targets["sample_id"] = torch.tensor([idx], dtype=torch.int32)
 
         # Build the regression targets
         if "particle" in self.targets:
@@ -262,7 +271,7 @@ class AtlasMuonDataset(Dataset):
                 # targets[f"particle_{field}"] = x.unsqueeze(0)
 
         return inputs, targets
-    
+
     def load_event(self, idx):
         """Load a single event from compound HDF5 files using count-based slicing."""
         # Get file and row info using efficient indexing
@@ -270,7 +279,7 @@ class AtlasMuonDataset(Dataset):
         row_idx = self.row_indices[idx]  # This is the row within the compound arrays
         
         # Get chunk info
-        chunk = self.metadata['chunk_info'][file_idx]
+        chunk = self.metadata['event_mapping']['chunk_summary'][file_idx]
 
         # Load from HDF5 file
         h5_file_path = self.dataset_dir / chunk['h5_file']
@@ -278,10 +287,10 @@ class AtlasMuonDataset(Dataset):
         try:
             with h5py.File(h5_file_path, 'r') as f:
                 # Load feature names from file attributes
-                hit_feature_names = [name.decode() if isinstance(name, bytes) else name 
-                                for name in f.attrs['hit_feature_names']]
-                track_feature_names = [name.decode() if isinstance(name, bytes) else name 
-                                    for name in f.attrs['track_feature_names']]
+                # self.hit_features = [name.decode() if isinstance(name, bytes) else name 
+                #                 for name in f.attrs['self.hit_features']]
+                # self.track_features = [name.decode() if isinstance(name, bytes) else name 
+                #                     for name in f.attrs['self.track_features']]
                 
                 # Get actual counts for this event
                 num_hits = f['num_hits'][row_idx]
@@ -296,49 +305,96 @@ class AtlasMuonDataset(Dataset):
         
         # Convert hits array to dictionary
         hits_dict = {}
-        for i, feature_name in enumerate(hit_feature_names):
+        for i, feature_name in enumerate(self.hit_features):
             hits_dict[feature_name] = hits_array[:, i]
-        
-        # Convert coordinates to meters (if they're in mm)
-        scale_factor = 0.001  # mm to m
-        
-        # Create hits dictionary with standard naming
+            # check here for nans: 
+            # print("type of hits_dict[feature_name]:", type(hits_dict[feature_name]))
+            # print(hits_dict[feature_name])
+            # print(hits_dict[feature_name].shape)
+            if np.isnan(hits_dict[feature_name]).any():
+                print(f"WARNING: NaN values found in hits for feature '{feature_name}'")
+            if np.isinf(hits_dict[feature_name]).any():
+                print(f"WARNING: Inf values found in hits for feature '{feature_name}'")
+            if hits_dict[feature_name].size == 0:
+                print(f"WARNING: Empty hits array for feature '{feature_name}'")
+        # TODO: Put proper normalization here instead of scale factors
+        # Some scaling:
         hits = {
-            'x': hits_dict['spacePoint_PositionX'] * scale_factor,
-            'y': hits_dict['spacePoint_PositionY'] * scale_factor,
-            'z': hits_dict['spacePoint_PositionZ'] * scale_factor,
-            'particle_id': hits_dict['spacePoint_truthLink'].astype(int),
+            # 'spacePoint_globEdgeHighX': hits_dict['spacePoint_globEdgeHighX'],
+            # 'spacePoint_globEdgeHighY': hits_dict['spacePoint_globEdgeHighY'],
+            # 'spacePoint_globEdgeHighZ': hits_dict['spacePoint_globEdgeHighZ'],
+            # 'spacePoint_globEdgeLowX': hits_dict['spacePoint_globEdgeLowX'] ,
+            # 'spacePoint_globEdgeLowY': hits_dict['spacePoint_globEdgeLowY'] ,
+            # 'spacePoint_globEdgeLowZ': hits_dict['spacePoint_globEdgeLowZ'] ,
+            'spacePoint_globEdgeHighX': hits_dict['spacePoint_globEdgeHighX'] * 0.001,
+            'spacePoint_globEdgeHighY': hits_dict['spacePoint_globEdgeHighY'] * 0.001,
+            'spacePoint_globEdgeHighZ': hits_dict['spacePoint_globEdgeHighZ'] * 0.001,
+            'spacePoint_globEdgeLowX': hits_dict['spacePoint_globEdgeLowX'] * 0.001,
+            'spacePoint_globEdgeLowY': hits_dict['spacePoint_globEdgeLowY'] * 0.001,
+            'spacePoint_globEdgeLowZ': hits_dict['spacePoint_globEdgeLowZ'] * 0.001,
+            # 'spacePoint_time': hits_dict['spacePoint_time'] ,
+            'spacePoint_time': hits_dict['spacePoint_time'] * 0.00001,
+            'spacePoint_driftR': hits_dict['spacePoint_driftR'],
             # Add covariance information
-            'cov_xx': hits_dict['spacePoint_covXX'],
-            'cov_xy': hits_dict['spacePoint_covXY'],
-            'cov_yy': hits_dict['spacePoint_covYY'],
+            # 'spacePoint_covXX': hits_dict['spacePoint_covXX'] ,
+            # 'spacePoint_covXY': hits_dict['spacePoint_covXY'] ,
+            # 'spacePoint_covYX': hits_dict['spacePoint_covYX'] ,
+            # 'spacePoint_covYY': hits_dict['spacePoint_covYY'] ,
+            'spacePoint_covXX': hits_dict['spacePoint_covXX'] * 0.000001,
+            'spacePoint_covXY': hits_dict['spacePoint_covXY'] * 0.000001,
+            'spacePoint_covYX': hits_dict['spacePoint_covYX'] * 0.000001,
+            'spacePoint_covYY': hits_dict['spacePoint_covYY'] * 0.000001,
             # Add detector information
-            'channel': hits_dict['spacePoint_channel'],
-            'drift_r': hits_dict['spacePoint_driftR'],
-            'layer': hits_dict['spacePoint_layer'],
-            'station_phi': hits_dict['spacePoint_stationPhi'],
-            'station_eta': hits_dict['spacePoint_stationEta'],
-            'technology': hits_dict['spacePoint_technology'],
+            # 'spacePoint_channel': hits_dict['spacePoint_channel'],
+            'spacePoint_channel': hits_dict['spacePoint_channel']* 0.001,
+            'spacePoint_layer': hits_dict['spacePoint_layer'],
+            'spacePoint_stationPhi': hits_dict['spacePoint_stationPhi'],
+            'spacePoint_stationEta': hits_dict['spacePoint_stationEta'],
+            'spacePoint_technology': hits_dict['spacePoint_technology'],
+            # Add truth information
+            'spacePoint_truthLink': hits_dict['spacePoint_truthLink'],
         }
         
         # Add derived hit fields (vectorized numpy operations)
-        hits["r"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2)
-        hits["s"] = np.sqrt(hits["x"] ** 2 + hits["y"] ** 2 + hits["z"] ** 2)
-        hits["theta"] = np.arccos(np.clip(hits["z"] / hits["s"], -1, 1))
-        hits["phi"] = np.arctan2(hits["y"], hits["x"])
-        hits["on_valid_particle"] = hits["particle_id"] >= 0
+        hits["r"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2)
+        # Checking if r is empty:
+        # print()
+        # print(hits["r"].shape)
+        # print(hits["r"])
+        # if hits["r"].size == 0:
+        #     print(f"WARNING: Empty hits array for feature 'r'")
+        # # Checking if r has NaN or Inf values:
+        # if np.isnan(hits["r"]).any():
+        #     print("WARNING: NaN values found in hits['r']")
+        # if np.isinf(hits["r"]).any():
+        #     print("WARNING: Inf values found in hits['r']")
+        # print(hits["r"].shape)
+
+        hits["s"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2 + hits["spacePoint_globEdgeLowZ"] ** 2)
+        # Checking if s is empty:
+        # if hits["s"].size == 0:
+        #     print(f"WARNING: Empty hits array for feature 's'")
+        # # Checking if s has NaN or Inf values:
+        # if np.isnan(hits["s"]).any():
+        #     print("WARNING: NaN values found in hits['s']")
+        # if np.isinf(hits["s"]).any():
+        #     print("WARNING: Inf values found in hits['s']")
+        # hits["theta"] = np.arccos(np.clip(hits["spacePoint_globEdgeLowZ"] / hits["s"], -1, 1))
+        hits["theta"] = np.arccos(np.clip(hits["spacePoint_globEdgeLowZ"] / hits["s"], -1, 1))
+        hits["phi"] = np.arctan2(hits["spacePoint_globEdgeLowY"], hits["spacePoint_globEdgeLowX"])
+        hits["on_valid_particle"] = hits["spacePoint_truthLink"] >= 0
 
         # Convert tracks array to dictionary
         tracks_dict = {}
-        for i, feature_name in enumerate(track_feature_names):
+        for i, feature_name in enumerate(self.track_features):
             tracks_dict[feature_name] = tracks_array[:, i]
         
         particles = {
-            'particle_id': np.arange(len(tracks_array)),  # Sequential IDs
-            'pt': tracks_dict['truthMuon_pt'],
-            'eta': tracks_dict['truthMuon_eta'],
-            'phi': tracks_dict['truthMuon_phi'],
-            'q': tracks_dict['truthMuon_q'],
+            'particle_id': np.unique(hits["spacePoint_truthLink"][hits["on_valid_particle"]]),  # Sequential IDs
+            'truthMuon_pt': tracks_dict['truthMuon_pt'],
+            'truthMuon_eta': tracks_dict['truthMuon_eta'],
+            'truthMuon_phi': tracks_dict['truthMuon_phi'],
+            'truthMuon_q': tracks_dict['truthMuon_q'],
         }
 
         return hits, particles, num_hits, num_tracks
@@ -362,8 +418,8 @@ class AtlasMuonDataset(Dataset):
     #             event_group = f[f'event_{row_idx}']
                 
     #             # Load feature names from file attributes
-    #             hit_feature_names = f.attrs['hit_feature_names']
-    #             track_feature_names = f.attrs['track_feature_names']
+    #             self.hit_features = f.attrs['self.hit_features']
+    #             self.track_features = f.attrs['self.track_features']
                 
     #             # Load hits as 2D array: [num_hits, num_features]
     #             hits_matrix = event_group['hits'][:]
@@ -377,7 +433,7 @@ class AtlasMuonDataset(Dataset):
     #     # Convert hits matrix to dictionary (much faster than DataFrame)
 
     #     hits_dict = {}
-    #     for i, feature_name in enumerate(hit_feature_names):
+    #     for i, feature_name in enumerate(self.hit_features):
     #         hits_dict[feature_name] = hits_matrix[:, i]
         
     #     # Convert coordinates to meters (if they're in mm)
@@ -410,7 +466,7 @@ class AtlasMuonDataset(Dataset):
     #     hits["on_valid_particle"] = hits["particle_id"] >= 0
 
     #     tracks_dict = {}
-    #     for i, feature_name in enumerate(track_feature_names):
+    #     for i, feature_name in enumerate(self.track_features):
     #         tracks_dict[feature_name] = tracks_matrix[:, i]
         
     #     particles = {
@@ -531,8 +587,8 @@ class AtlasMuonDataset(Dataset):
     #             event_group = f[f'event_{row_idx}']
     #             # print("Loading event group:", event_group)
     #             # Load feature names from file attributes
-    #             hit_feature_names = f.attrs['hit_feature_names']
-    #             track_feature_names = f.attrs['track_feature_names']
+    #             self.hit_features = f.attrs['self.hit_features']
+    #             self.track_features = f.attrs['self.track_features']
                 
     #             # Load hits as 2D array: [num_hits, num_features]
     #             hits_matrix = event_group['hits'][:]
@@ -545,7 +601,7 @@ class AtlasMuonDataset(Dataset):
     #     # Convert hits matrix to dictionary (much faster than DataFrame)
 
     #     hits_dict = {}
-    #     for i, feature_name in enumerate(hit_feature_names):
+    #     for i, feature_name in enumerate(self.hit_features):
     #         hits_dict[feature_name] = hits_matrix[:, i]
         
     #     # Convert coordinates to meters (if they're in mm)
@@ -581,7 +637,7 @@ class AtlasMuonDataset(Dataset):
     #     # Convert tracks matrix to dictionary
 
     #     tracks_dict = {}
-    #     for i, feature_name in enumerate(track_feature_names):
+    #     for i, feature_name in enumerate(self.track_features):
     #         tracks_dict[feature_name] = tracks_matrix[:, i]
         
     #     particles = {
