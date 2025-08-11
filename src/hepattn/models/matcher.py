@@ -1,233 +1,168 @@
 import time
+import warnings
+from multiprocessing.pool import ThreadPool as Pool
 
+import numpy as np
 import scipy
 import torch
 from torch import nn
-import numpy as np 
-import lap1015
 
+from hepattn.utils.import_utils import check_import_safe
 
-import lap
-
-def solve_lap(cost):
-    # cost must be float64 and C-contiguous for lap.lapjv
-    cost = np.ascontiguousarray(cost, dtype=np.float64)
-    _, col_idx, _ = lap.lapjv(cost)
-    return col_idx
 
 def solve_scipy(cost):
     _, col_idx = scipy.optimize.linear_sum_assignment(cost)
     return col_idx
 
 
-def solve_1015_early(cost):
-    return lap1015.lap_early(cost)
-
-
-def solve_1015_late(cost):
-    return lap1015.lap_late(cost)
-
-
 SOLVERS = {
     "scipy": solve_scipy,
-    # "1015_early": solve_1015_early,
-    "1015_late": solve_1015_late,
 }
+
+# Some compiled extension can cause SIGKILL errors if compiled for the wrong arch
+# So we have to check they won't kill everything when we import them
+if check_import_safe("lap1015"):
+    import lap1015
+
+    def solve_1015_early(cost):
+        return lap1015.lap_early(cost)
+
+    def solve_1015_late(cost):
+        return lap1015.lap_late(cost)
+
+    SOLVERS["lap1015_late"] = solve_1015_late
+    # SOLVERS["lap1015_early"] = lap1015_early
+else:
+    warnings.warn(
+        """Failed to import lap1015 solver. This could be because it is not installed,
+    or because it was built targeting a different architecture than supported on the current machine.
+    Rebuilding the package on the current machine may fix this.""",
+        ImportWarning,
+        stacklevel=2,
+    )
+
+
+def match_individual(solver_fn, cost: np.ndarray, default_idx: np.ndarray) -> np.ndarray:
+    pred_idx = solver_fn(cost)
+    if solver_fn == SOLVERS["scipy"]:
+        pred_idx = np.concatenate([pred_idx, default_idx[~np.isin(default_idx, pred_idx)]])
+    return pred_idx
+
+
+def match_parallel(solver_fn, costs: np.ndarray, batch_obj_lengths: torch.Tensor, n_jobs: int = 8) -> torch.Tensor:
+    batch_size = len(costs)
+    chunk_size = (batch_size + n_jobs - 1) // n_jobs
+    default_idx = np.arange(costs.shape[2], dtype=np.int32)
+    lengths_np = batch_obj_lengths.squeeze(-1).cpu().numpy().astype(np.int32)
+
+    args = [(solver_fn, costs[i][:, : lengths_np[i]].T, default_idx) for i in range(batch_size)]
+    with Pool(processes=n_jobs) as pool:
+        results = pool.starmap(match_individual, args, chunksize=chunk_size)
+
+    return torch.from_numpy(np.stack(results))
 
 
 class Matcher(nn.Module):
     def __init__(
         self,
-        # default_solver: str = "scipy",
-        default_solver: str = "1015_late",
+        default_solver: str = "scipy",
         adaptive_solver: bool = True,
         adaptive_check_interval: int = 1000,
+        parallel_solver: bool = False,
+        n_jobs: int = 8,
+        verbose: bool = False,
     ):
         super().__init__()
         """ Used to match predictions to targets based on a given cost matrix.
 
         Parameters
         ----------
-        default_solver: str
+        default_solver : str
             The default solving algorithm to use.
-        adaptive_solver: bool
+        adaptive_solver : bool
             If true, then after every adaptive_check_interval calls of the solver,
             each solver algorithm is timed and used to determine the fastest solver, which
             is then set as the current solver.
-        adaptive_check_interval: bool
+        adaptive_check_interval : bool
             Interval for checking which solver is the fastest.
+        parallel_solver : bool
+            If true, then the solver will use a parallel implementation to speed up the matching.
+        n_jobs: int
+            Number of jobs to use for parallel matching. Only used if parallel_solver is True.
+        verbose : bool
+            If true, extra information on solver timing is printed.
         """
         if default_solver not in SOLVERS:
             raise ValueError(f"Unknown solver: {default_solver}. Available solvers: {list(SOLVERS.keys())}")
-        self.solver = SOLVERS[default_solver]
+        self.solver = default_solver
         self.adaptive_solver = adaptive_solver
         self.adaptive_check_interval = adaptive_check_interval
+        self.parallel_solver = parallel_solver
+        self.n_jobs = n_jobs
         self.step = 0
+        self.verbose = verbose
 
+    def compute_matching(self, costs, object_valid_mask=None):
+        if object_valid_mask is None:
+            object_valid_mask = torch.ones((costs.shape[0], costs.shape[1]), dtype=bool)
+
+        object_valid_mask = object_valid_mask.detach().bool()
+        batch_obj_lengths = torch.sum(object_valid_mask, dim=1).cpu().numpy().astype(np.int32)
+        idxs = []
+
+        for batch_idx in range(costs.shape[0]):
+            n = batch_obj_lengths[batch_idx]
+            # print("n", n)
+            cost = costs[batch_idx][:, :n].T  # shape: [n, num_preds]
+            num_preds = cost.shape[1]
+            # print("num_preds", num_preds)
+            pred_idx = []
+            # print("cost.shape", cost.shape)
+            for row in cost:
+                sorted_indices = np.argsort(row)
+                # print("sorted_indices", sorted_indices)
+                for idx in sorted_indices:
+                    if idx not in pred_idx:
+                        pred_idx.append(idx.item())
+                        break
+
+            # Fill up the rest with unused indices in increasing order
+            unused = [j for j in range(num_preds) if j not in pred_idx]
+            pred_idx += unused
+            # print("pred_idx", pred_idx)
+            idxs.append(np.array(pred_idx, dtype=np.int32))
+
+        return torch.from_numpy(np.stack(idxs))
     # def compute_matching(self, costs, object_valid_mask=None):
-    #     # costs: numpy array [batch, pred, true]
-    #     if object_valid_mask is None:
-    #         object_valid_mask = np.ones((costs.shape[0], costs.shape[1]), dtype=bool)
-    #     else:
-    #         # Ensure torch tensors are moved to CPU before converting to numpy
-    #         if isinstance(object_valid_mask, torch.Tensor):
-    #             object_valid_mask = object_valid_mask.detach().cpu().numpy().astype(bool)
-    #         else:
-    #             object_valid_mask = np.asarray(object_valid_mask, dtype=bool)
-
-    #     batch_obj_lengths = np.sum(object_valid_mask, axis=1).reshape(-1, 1)
-    #     print("batch_obj_lengths:", batch_obj_lengths)
-    #     idxs = []
-    #     default_idx = np.arange(costs.shape[2])
-
-    #     for k in range(len(costs)):
-    #         num_valid = int(batch_obj_lengths[k][0])
-    #         cost = costs[k][:, :num_valid].T
-    #         if num_valid == 1:
-    #             min_idx = np.argmin(cost, axis=1)
-    #             pred_idx = np.full((cost.shape[1],), -1, dtype=np.int64)
-    #             pred_idx[min_idx] = 0
-    #         else:
-    #             pred_idx = self.solver(cost)
-    #             if self.solver == SOLVERS["scipy"]:
-    #                 pred_idx = np.concatenate([pred_idx, default_idx[~np.isin(default_idx, pred_idx)]])
-    #         print("This is prediction index:", pred_idx)
-    #         idxs.append(pred_idx)
-
-    #     pred_idxs = np.stack(idxs)
-    #     pred_idxs = torch.from_numpy(pred_idxs)
-    #     return pred_idxs
-    
-    # def compute_matching(self, costs, object_valid_mask=None):
+    #     # print(object_valid_mask)
+    #     # print(costs.shape)
     #     if object_valid_mask is None:
     #         object_valid_mask = torch.ones((costs.shape[0], costs.shape[1]), dtype=bool)
 
     #     object_valid_mask = object_valid_mask.detach().bool()
     #     batch_obj_lengths = torch.sum(object_valid_mask, dim=1).unsqueeze(-1)
-    #     # print("batch_obj_lengths:", batch_obj_lengths)
+    #     print(batch_obj_lengths)
+
+    #     if self.parallel_solver:
+    #         # If we are using a parallel solver, we can use it to speed up the matching
+    #         return match_parallel(SOLVERS[self.solver], costs, batch_obj_lengths, n_jobs=self.n_jobs)
+
+    #     # Do the matching sequentially for each example in the batch
     #     idxs = []
     #     default_idx = torch.arange(costs.shape[2])
 
-    #     # Do the matching sequentially for each example in the batch
     #     for k in range(len(costs)):
     #         # remove invalid targets for efficiency
     #         cost = costs[k][:, : batch_obj_lengths[k]].T
-    #         pred_idx = torch.as_tensor(self.solver(cost), device=cost.device)
-    #         # print("num of valid:", num_valid)
-    #         # print("pred_idx:", pred_idx)
-
-    #         # scipy returns incomplete assignments, handle that here
-    #         if self.solver == SOLVERS["scipy"]:
-    #             pred_idx = torch.concatenate([pred_idx, default_idx[~torch.isin(default_idx, pred_idx)]])
-    #         print("Concatenated pred idx:", pred_idx)
+    #         # cost = costs[k][:, : batch_obj_lengths[k]]
+    #         # Solve the matching problem using the current solver
+    #         pred_idx = match_individual(SOLVERS[self.solver], cost, default_idx)
     #         # These indicies can be used to permute the predictions so they now match the truth objects
     #         idxs.append(pred_idx)
 
-    #     pred_idxs = torch.stack(idxs)
-    #     return pred_idxs
-    def compute_matching(self, costs, object_valid_mask=None):
-        if object_valid_mask is None:
-            object_valid_mask = np.ones((costs.shape[0], costs.shape[1]), dtype=bool)
-        else:
-            # Ensure torch tensors are moved to CPU before converting to numpy
-            print("We have got a mask!")
-            if isinstance(object_valid_mask, torch.Tensor):
-                object_valid_mask = object_valid_mask.detach().cpu().numpy().astype(bool)
-            else:
-                object_valid_mask = np.asarray(object_valid_mask, dtype=bool)
+    #     return torch.from_numpy(np.stack(idxs))
 
-        batch_obj_lengths = np.sum(object_valid_mask, axis=1)
-        print("batch_obj_lengths:", batch_obj_lengths)  
-        idxs = []
-        default_idx = np.arange(costs.shape[2])
-        print("These are the costs:", costs)
-        # Do the matching sequentially for each example in the batch
-        for k in range(len(costs)):
-            # Get the number of valid objects as a scalar
-            num_valid = int(batch_obj_lengths[k])
-            
-            if num_valid == 1:
-                # Special case: only one valid target
-                # Find which prediction has the lowest cost for the single target
-                cost_for_target = costs[k][:, 0]  # costs for the single valid target
-                best_pred_idx = np.argmin(cost_for_target)
-                
-                # Create assignment: put the best prediction at index 0, others fill remaining slots
-                pred_idx = np.arange(costs.shape[2])  # [0, 1, 2, 3, 4, 5]
-                # Move the best prediction to position 0
-                pred_idx[0] = best_pred_idx
-                pred_idx[best_pred_idx] = 0
-                
-            else:
-                # remove invalid targets for efficiency
-                cost = costs[k][:, :num_valid].T
-                cost = costs[k][:, :num_valid].T
-
-                # Check cost matrix validity before passing to solver
-                if cost.ndim != 2:
-                    print(f"ERROR: Cost matrix is not 2D! Shape: {cost.shape}")
-                    raise ValueError("Cost matrix must be 2D for assignment solver.")
-
-                if np.isnan(cost).any():
-                    print(f"ERROR: Cost matrix contains NaNs! Shape: {cost.shape}")
-                    raise ValueError("Cost matrix contains NaNs.")
-
-                if np.isinf(cost).any():
-                    print(f"ERROR: Cost matrix contains infs! Shape: {cost.shape}")
-                    raise ValueError("Cost matrix contains infs.")
-
-                if cost.shape[0] == 0 or cost.shape[1] == 0:
-                    print(f"ERROR: Cost matrix has zero dimension! Shape: {cost.shape}")
-                    raise ValueError("Cost matrix must have nonzero dimensions.")
-
-                if cost.shape[0] < cost.shape[1]:
-                    print(f"WARNING: More targets than predictions! Shape: {cost.shape}")
-
-                # Optionally, check for extreme values
-                if np.abs(cost).max() > 1e8:
-                    print(f"WARNING: Cost matrix has very large values! Max: {np.abs(cost).max()}")
-
-                # ...existing code...
-                pred_idx = self.solver(cost)
-                print("This is pred_idx:", pred_idx)
-                # scipy returns incomplete assignments, handle that here
-                if self.solver == SOLVERS["scipy"]:
-                    pred_idx = np.concatenate([pred_idx, default_idx[~np.isin(default_idx, pred_idx)]])
-            print("Concatenated pred idx:", pred_idx)
-            # These indices can be used to permute the predictions so they now match the truth objects
-            idxs.append(pred_idx)
-
-        pred_idxs = np.stack(idxs)
-        # Convert to torch tensor at the end
-        pred_idxs = torch.from_numpy(pred_idxs)
-        return pred_idxs
-    
-    # def compute_matching(self, costs, object_valid_mask=None):
-    #     if object_valid_mask is None:
-    #         object_valid_mask = torch.ones((costs.shape[0], costs.shape[1]), dtype=bool)
-
-    #     object_valid_mask = object_valid_mask.detach().bool()
-    #     batch_obj_lengths = torch.sum(object_valid_mask, dim=1).unsqueeze(-1)
-    #     idxs = []
-    #     default_idx = torch.arange(costs.shape[2])
-
-    #     # Do the matching sequentially for each example in the batch
-    #     for k in range(len(costs)):
-    #         num_valid = batch_obj_lengths[k].item()
-    #         # remove invalid targets for efficiency
-    #         cost = costs[k][:, :num_valid].T
-    #         pred_idx = torch.as_tensor(self.solver(cost), device=cost.device)
-
-    #         # scipy returns incomplete assignments, handle that here
-    #         if self.solver == SOLVERS["scipy"]:
-    #             pred_idx = torch.concatenate([pred_idx, default_idx[~torch.isin(default_idx, pred_idx)]])
-            
-    #         # These indices can be used to permute the predictions so they now match the truth objects
-    #         idxs.append(pred_idx)
-
-    #     pred_idxs = torch.stack(idxs)
-    #     return pred_idxs
-
+    # def compute_matching(cost)
     @torch.no_grad()
     def forward(self, costs, object_valid_mask=None):
         # Cost matrix dimensions are batch, pred, true
@@ -238,27 +173,39 @@ class Matcher(nn.Module):
         # solver is the fastest, and set that to be the new solver
         if self.adaptive_solver and self.step % self.adaptive_check_interval == 0:
             self.adapt_solver(costs)
-        print(type(costs), "costs type")
+
         pred_idxs = self.compute_matching(costs, object_valid_mask)
         self.step += 1
-        print(torch.sum(pred_idxs < 0), "negative indices in pred_idxs")
-        print(torch.sum(pred_idxs >= 0), "positive indices in pred_idxs")
+
         assert torch.all(pred_idxs >= 0), "Matcher error!"
         return pred_idxs
 
     def adapt_solver(self, costs):
         solver_times = {}
 
+        if self.verbose:
+            print("\nAdaptive LAP Solver: Starting solver check...")
+
         # For each solver, compute the time to match the entire batch
-        for solver_name, solver in SOLVERS.items():
+        for solver in SOLVERS:
             # Switch to the solver we are testing
             self.solver = solver
             start_time = time.time()
             self.compute_matching(costs)
-            solver_times[solver_name] = time.time() - start_time
+
+            solver_times[solver] = time.time() - start_time
+
+            if self.verbose:
+                print(f"Adaptive LAP Solver: Evaluated {solver}, took {solver_times[solver]:.2f}s")
 
         # Get the solver that was the fastest
         fastest_solver = min(solver_times, key=solver_times.get)
 
+        if self.verbose:
+            if fastest_solver != self.solver:
+                print(f"Adaptive LAP Solver: Switching from {self.solver} solver to {fastest_solver} solver\n")
+            else:
+                print(f"Adaptive LAP Solver: Sticking with {self.solver} solver\n")
+
         # Set the new solver to be the solver with the fastest time for the cost batch
-        self.solver = SOLVERS[fastest_solver]
+        self.solver = fastest_solver

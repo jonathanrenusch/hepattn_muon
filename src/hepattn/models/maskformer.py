@@ -260,7 +260,7 @@ class MaskFormer(nn.Module):
             # print("Matching layer:", layer_name)
             # print("valid particles:", targets["particle_valid"])
             # print("costs[layer_name]:", costs[layer_name])
-            print("Matching layer:", layer_name)
+            # print("Matching layer:", layer_name)
             # print("valid particles:", targets["particle_valid"])
             # print("valid particles shape:", targets["particle_valid"].shape)
             # print("costs[layer_name]:", costs[layer_name])

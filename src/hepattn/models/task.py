@@ -316,11 +316,11 @@ class ObjectHitMaskTask(Task):
         output = outputs[self.output_object_hit + "_logit"].detach().to(torch.float32)
         
         target = targets[self.target_object_hit + "_valid"].to(torch.float32)
-        print("This is output from cost function:", output)
-        print("This is target from cost function!", target)
-        print("This is output from cost function:", output.shape)
-        print("This is target from cost function!", target.shape)
-        print("Quick gut check:", torch.sum(target, dim=-1))
+        # print("This is output from cost function:", output)
+        # print("This is target from cost function!", target)
+        # print("This is output from cost function:", output.shape)
+        # print("This is target from cost function!", target.shape)
+        # print("Quick gut check:", torch.sum(target, dim=-1))
 
         costs = {}
         for cost_fn, cost_weight in self.costs.items():
@@ -338,6 +338,7 @@ class ObjectHitMaskTask(Task):
             #     print(f"  Raw cost (before weight): min: {(cost_fns[cost_fn](output, target)).min()}, max: {(cost_fns[cost_fn](output, target)).max()}")
             
             costs[cost_fn] = cost_value
+        
         return costs
 
     def loss(self, outputs, targets):

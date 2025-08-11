@@ -133,6 +133,8 @@ def mask_bce_loss(pred_logits, true, mask=None, weight=None):
 
 
 def mask_bce_costs(pred_logits, true):
+    # print("pred_logits", pred_logits.shape)
+    # print("true", true.shape)
     pred_logits = torch.clamp(pred_logits, -100, 100)
 
     pos = F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred_logits), reduction="none")
@@ -141,7 +143,10 @@ def mask_bce_costs(pred_logits, true):
     # Context manager necessary to overwride global autocast to ensure float32 cost is returned
     with torch.autocast(device_type="cuda", enabled=False):
         costs = torch.einsum("bnc,bmc->bnm", pos, true) + torch.einsum("bnc,bmc->bnm", neg, (1 - true))
-
+    # print("mask_bce_costs", costs.shape)
+    # This is added for debugging purposes: 
+    # Add cost normalization
+    # costs = torch.clamp(costs, 0, 1e4)  # Reasonable upper bound
     return costs
 
 

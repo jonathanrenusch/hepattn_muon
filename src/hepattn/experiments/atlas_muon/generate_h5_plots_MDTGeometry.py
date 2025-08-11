@@ -157,7 +157,7 @@ def main() -> None:
     parser.add_argument(
         "--num-events",
         type=int,
-        default=60000,
+        default=10000,
         help="Number of random events to display (default: 10)",
     )
     parser.add_argument(
@@ -184,7 +184,8 @@ def main() -> None:
 
 
     # Usage example:
-    config_path = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/atlas_muon_filtering.yaml"
+    config_path = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
+
     inputs, targets = load_inputs_targets_from_config(config_path)
     # print(f"Inputs: {inputs}")
     # print(f"Targets: {targets}")

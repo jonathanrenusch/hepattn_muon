@@ -1,6 +1,6 @@
 seed_everything: 42
 name: TRK-v0-full
-ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
+# ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
   train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/cernbox_data/train_data
@@ -13,8 +13,8 @@ data:
   
   num_workers: 10
   num_train: -1
-  num_test: 10
-  num_val: 10
+  num_test: -1
+  num_val: -1
 
   # Select only hits from these detector volumes
   # pix barrel: 8, pix endcap: 7, 9
