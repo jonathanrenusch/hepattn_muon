@@ -6,9 +6,12 @@ Configuration and constants for muon tracking analysis.
 from networkx import hits
 
 
-H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed",
-
-
+H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/gut_check_test_data"
+# HIT_EVAL_FILEPATH = None
+HIT_EVAL_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_gut_check_test_data_eval.h5"
+# H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed",
+# HIT_EVAL_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_valid_PU200_processed_eval.h5"
+# H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed",
 # Tree names
 DEFAULT_TREE_NAME = "MuonHitDump"
 

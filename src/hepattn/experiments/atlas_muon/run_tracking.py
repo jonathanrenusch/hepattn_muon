@@ -26,10 +26,14 @@ class TrackMLTracker(ModelWrapper):
         # First log metrics that depend on outputs from multiple tasks
         # TODO: Make the task names configurable or match task names automatically
         pred_valid = preds["track_valid"]["track_valid"]
+        print("track_valid.shape", pred_valid.shape)
         true_valid = targets["particle_valid"]
+        print("particle_valid.shape", true_valid.shape)
 
         # Set the masks of any track slots that are not used as null
         pred_hit_masks = preds["track_hit_valid"]["track_hit_valid"] & pred_valid.unsqueeze(-1)
+        print("track_hit_valid", preds["track_hit_valid"]["track_hit_valid"].shape)
+        print("track_hit_valid.shape", pred_hit_masks.shape)
         true_hit_masks = targets["particle_hit_valid"] & true_valid.unsqueeze(-1)
 
         # Calculate the true/false positive rates between the predicted and true masks

@@ -11,10 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import yaml
-
+import h5py
 import numpy as np
+from tqdm import tqdm
+import torch
 
-from .data_vis.h5_config import DEFAULT_TREE_NAME, H5_FILEPATH, HISTOGRAM_SETTINGS
+from .data_vis.h5_config import DEFAULT_TREE_NAME, H5_FILEPATH, HISTOGRAM_SETTINGS, HIT_EVAL_FILEPATH
 from .data import AtlasMuonDataModule, AtlasMuonDataset
 
 # Import from the utils module
@@ -61,6 +63,11 @@ def generate_plots_for_file(
 
     # Create subdirectory for this file
     file_output_dir = output_dir / sanitize_filename(config_key)
+   # ...existing code...
+    if HIT_EVAL_FILEPATH is not None:
+        file_output_dir = file_output_dir.with_name(file_output_dir.name + "_FILTERED")
+    # ...existing code...
+
     file_output_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate plots
@@ -157,8 +164,8 @@ def main() -> None:
     parser.add_argument(
         "--num-events",
         type=int,
-        default=10000,
-        help="Number of random events to display (default: 10)",
+        default=1000,
+        help="number of events to use for statistics",
     )
     parser.add_argument(
         "--min-tracks",
@@ -174,59 +181,281 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Create output directory
-    output_dir = create_output_directory(args.output_dir)
-    print(f"Output directory: {output_dir}")
+    # # Create output directory
+    # output_dir = create_output_directory(args.output_dir)
+    # print(f"Output directory: {output_dir}")
 
-    # Filter keys if specified
-    import yaml
+    # # Filter keys if specified
+    # import yaml
 
 
 
-    # Usage example:
-    config_path = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
+    # # Usage example:
+    # config_path = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
 
-    inputs, targets = load_inputs_targets_from_config(config_path)
-    # print(f"Inputs: {inputs}")
-    # print(f"Targets: {targets}")
-    # print(H5_FILEPATH)
-    # Now pass these to your DataModule
-    datamodule = AtlasMuonDataModule(
-        train_dir=H5_FILEPATH[0],
-        val_dir=H5_FILEPATH[0],
-        test_dir=H5_FILEPATH[0],
-        num_workers=20,
-        num_train=-1,
-        num_val=-1,
-        num_test=-1,
-        batch_size=1,
-        inputs=inputs,
-        targets=targets,
-        # ... any other kwargs
-    )
-    dataset = AtlasMuonDataset(
-        dataset_dir=H5_FILEPATH[0],
-        inputs=inputs,
-        targets=targets,
-    )
-    datamodule.setup("test")
-    # # Initialize datamodule
+
+    # inputs, targets = load_inputs_targets_from_config(config_path)
+    # # print(f"Inputs: {inputs}")
+    # # print(f"Targets: {targets}")
+    # # print(H5_FILEPATH)
+    # # Now pass these to your DataModule
+
+    # # Doing quick metrics check: 
+    # if HIT_EVAL_FILEPATH is not None:
+    #     datamodule_eval = AtlasMuonDataModule(
+    #     train_dir=H5_FILEPATH,
+    #     val_dir=H5_FILEPATH,
+    #     test_dir=H5_FILEPATH,
+    #     num_workers=20,
+    #     num_train=args.num_events,
+    #     num_val=-args.num_events,
+    #     num_test=args.num_events,
+    #     batch_size=1,
+    #     inputs=inputs,
+    #     targets=targets,
+    #     # ... any other kwargs
+    #     )
+    #     datamodule_eval.setup("test")
+    #     test_dataloader_eval = datamodule_eval.test_dataloader()
+    #     # ...existing code...
+
+    #     # import torch
+    #     print("Running quick performance stats, since HIT_EVAL_FILEPATH is not None!")
+    #     # Initialize lists to store metrics for each batch
+    #     metrics_lists = {
+    #         "nh_total_pre": [],
+    #         "nh_total_post": [],
+    #         "nh_pred_true": [],
+    #         "nh_pred_false": [],
+    #         "nh_valid_pre": [],
+    #         "nh_valid_post": [],
+    #         "nh_noise_pre": [],
+    #         "nh_noise_post": [],
+    #         "acc": [],
+    #         "valid_recall": [],
+    #         "valid_precision": [],
+    #         "noise_recall": [],
+    #         "noise_precision": [],
+    #     }
+
+    #     # ...inside your batch loop...
+
+    #     for idx, batch in tqdm(enumerate(test_dataloader_eval), total=args.num_events, desc="Collecting feature data"):
+    #         inputs, targets = batch
+
+    #         with h5py.File(HIT_EVAL_FILEPATH, "r") as hit_eval_file:
+    #             pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
+    #             # Convert pred to torch tensor and ensure same dtype/device as true
+    #             pred = torch.from_numpy(pred).to(targets["hit_on_valid_particle"].device)
+    #             # If pred is not boolean, convert to bool
+    #             if pred.dtype != torch.bool:
+    #                 pred = pred.bool()
+
+    #         true = targets["hit_on_valid_particle"][targets["hit_valid"]]
+    #         tp = (pred & true).sum()
+    #         tn = ((~pred) & (~true)).sum()
+
+    #         # Compute metrics for this batch
+    #         batch_metrics = {
+    #             "nh_total_pre": float(pred.numel()),
+    #             "nh_total_post": float(pred.sum().item()),
+    #             "nh_pred_true": pred.float().sum().item(),
+    #             "nh_pred_false": (~pred).float().sum().item(),
+    #             "nh_valid_pre": true.float().sum().item(),
+    #             "nh_valid_post": (pred & true).float().sum().item(),
+    #             "nh_noise_pre": (~true).float().sum().item(),
+    #             "nh_noise_post": (pred & ~true).float().sum().item(),
+    #             "acc": (pred == true).float().mean().item(),
+    #             "valid_recall": (tp / true.sum()).item() if true.sum() > 0 else float('nan'),
+    #             "valid_precision": (tp / pred.sum()).item() if pred.sum() > 0 else float('nan'),
+    #             "noise_recall": (tn / (~true).sum()).item() if (~true).sum() > 0 else float('nan'),
+    #             "noise_precision": (tn / (~pred).sum()).item() if (~pred).sum() > 0 else float('nan'),
+    #         }
+
+    #         # Append each metric to its list
+    #         for k, v in batch_metrics.items():
+    #             metrics_lists[k].append(v)
+    #     # ...existing code...
+    #     # After the loop, compute averages and save to file
+    #     averages = {k: float(np.nanmean(v)) for k, v in metrics_lists.items()}
+
+    #     output_metrics_path = output_dir / "hit_filter_performance_metrics.txt"
+    #     with open(output_metrics_path, "w") as f:
+    #         for k, v in averages.items():
+    #             f.write(f"{k}: {v}\n")
+
+    #     print(f"Saved average metrics to {output_metrics_path}")
+
+    #     del datamodule_eval
+    #     del test_dataloader_eval
+
+    # print("This is HIT_EVAL_FILEPATH", HIT_EVAL_FILEPATH)
     # datamodule = AtlasMuonDataModule(
     #     train_dir=H5_FILEPATH,
     #     val_dir=H5_FILEPATH,
-    #     num_workers=10,
+    #     test_dir=H5_FILEPATH,
+    #     num_workers=20,
     #     num_train=-1,
     #     num_val=-1,
     #     num_test=-1,
     #     batch_size=1,
+    #     inputs=inputs,
+    #     targets=targets,
+    #     hit_eval_train=HIT_EVAL_FILEPATH,
+    #     hit_eval_val=HIT_EVAL_FILEPATH,
+    #     hit_eval_test=HIT_EVAL_FILEPATH,
+    #     # ... any other kwargs
     # )
+    # dataset = AtlasMuonDataset(
+    #     dirpath=H5_FILEPATH,
+    #     inputs=inputs,
+    #     targets=targets,
+    #     hit_eval_path=HIT_EVAL_FILEPATH,
+    # )
+    # datamodule.setup("test")
+
+    # file_info = generate_plots_for_file(
+    #     datamodule,
+    #     H5_FILEPATH.split("/")[-1],
+    #     output_dir,
+    #     args.num_events,
+    #     not args.skip_histograms,  # generate_histograms
+    #     dataset=dataset,
+    # )
+    # Create output directory
+    output_dir = create_output_directory(args.output_dir)
+    print(f"Output directory: {output_dir}")
+
+    config_path = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
+
+    # Load inputs and targets fresh each time to avoid corruption
+    inputs, targets = load_inputs_targets_from_config(config_path)
+
+    # Doing quick metrics check: 
+    if HIT_EVAL_FILEPATH is not None:
+        # Create fresh copies of inputs and targets for the eval datamodule
+        inputs_eval = {k: list(v) for k, v in inputs.items()}  # Deep copy
+        targets_eval = {k: list(v) for k, v in targets.items()}  # Deep copy
+        
+        datamodule_eval = AtlasMuonDataModule(
+            train_dir=H5_FILEPATH,
+            val_dir=H5_FILEPATH,
+            test_dir=H5_FILEPATH,
+            num_workers=10,  # Enable multiprocessing for eval
+            num_train=args.num_events,
+            num_val=-args.num_events,
+            num_test=args.num_events,
+            batch_size=1,
+            inputs=inputs_eval,
+            targets=targets_eval,
+        )
+        datamodule_eval.setup("test")
+        test_dataloader_eval = datamodule_eval.test_dataloader()
+
+        print("Running quick performance stats, since HIT_EVAL_FILEPATH is not None!")
+        
+        # ... your metrics collection code ...
+        metrics_lists = {
+            "nh_total_pre": [],
+            "nh_total_post": [],
+            "nh_pred_true": [],
+            "nh_pred_false": [],
+            "nh_valid_pre": [],
+            "nh_valid_post": [],
+            "nh_noise_pre": [],
+            "nh_noise_post": [],
+            "acc": [],
+            "valid_recall": [],
+            "valid_precision": [],
+            "noise_recall": [],
+            "noise_precision": [],
+        }
+
+        for idx, batch in tqdm(enumerate(test_dataloader_eval), total=args.num_events, desc="Collecting feature data"):
+            inputs_batch, targets_batch = batch
+
+            with h5py.File(HIT_EVAL_FILEPATH, "r") as hit_eval_file:
+                pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
+                pred = torch.from_numpy(pred).to(targets_batch["hit_on_valid_particle"].device)
+                if pred.dtype != torch.bool:
+                    pred = pred.bool()
+
+            true = targets_batch["hit_on_valid_particle"][targets_batch["hit_valid"]]
+            tp = (pred & true).sum()
+            tn = ((~pred) & (~true)).sum()
+
+            batch_metrics = {
+                "nh_total_pre": float(pred.numel()),
+                "nh_total_post": float(pred.sum().item()),
+                "nh_pred_true": pred.float().sum().item(),
+                "nh_pred_false": (~pred).float().sum().item(),
+                "nh_valid_pre": true.float().sum().item(),
+                "nh_valid_post": (pred & true).float().sum().item(),
+                "nh_noise_pre": (~true).float().sum().item(),
+                "nh_noise_post": (pred & ~true).float().sum().item(),
+                "acc": (pred == true).float().mean().item(),
+                "valid_recall": (tp / true.sum()).item() if true.sum() > 0 else float('nan'),
+                "valid_precision": (tp / pred.sum()).item() if pred.sum() > 0 else float('nan'),
+                "noise_recall": (tn / (~true).sum()).item() if (~true).sum() > 0 else float('nan'),
+                "noise_precision": (tn / (~pred).sum()).item() if (~pred).sum() > 0 else float('nan'),
+            }
+
+            for k, v in batch_metrics.items():
+                metrics_lists[k].append(v)
+
+        averages = {k: float(np.nanmean(v)) for k, v in metrics_lists.items()}
+
+        output_metrics_path = output_dir / "hit_filter_performance_metrics.txt"
+        with open(output_metrics_path, "w") as f:
+            for k, v in averages.items():
+                f.write(f"{k}: {v}\n")
+
+        print(f"Saved average metrics to {output_metrics_path}")
+
+        # IMPORTANT: Properly clean up the eval datamodule
+        del test_dataloader_eval
+        del datamodule_eval
+        
+        # Force garbage collection to ensure cleanup
+        import gc
+        gc.collect()
+
+    # Load fresh inputs and targets again for the main datamodule
+    inputs_main = {k: list(v) for k, v in load_inputs_targets_from_config(config_path)[0].items()}
+    targets_main = {k: list(v) for k, v in load_inputs_targets_from_config(config_path)[1].items()}
+
+    print("This is HIT_EVAL_FILEPATH", HIT_EVAL_FILEPATH)
+    datamodule = AtlasMuonDataModule(
+        train_dir=H5_FILEPATH,
+        val_dir=H5_FILEPATH,
+        test_dir=H5_FILEPATH,
+        num_workers=10,  # Enable multiprocessing for eval
+        num_train=args.num_events,
+        num_val=args.num_events,
+        num_test=args.num_events,
+        batch_size=1,
+        inputs=inputs_main,
+        targets=targets_main,
+        hit_eval_train=HIT_EVAL_FILEPATH,
+        hit_eval_val=HIT_EVAL_FILEPATH,
+        hit_eval_test=HIT_EVAL_FILEPATH,
+    )
+    
+    dataset = AtlasMuonDataset(
+        dirpath=H5_FILEPATH,
+        inputs=inputs_main,
+        targets=targets_main,
+        hit_eval_path=HIT_EVAL_FILEPATH,
+    )
+    
+    datamodule.setup("test")
 
     file_info = generate_plots_for_file(
         datamodule,
-        H5_FILEPATH[0].split("/")[-1],
+        H5_FILEPATH.split("/")[-1],
         output_dir,
         args.num_events,
-        not args.skip_histograms,  # generate_histograms
+        not args.skip_histograms,
         dataset=dataset,
     )
 

@@ -1,0 +1,56 @@
+ROOT File Analysis Summary
+==================================================
+File: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data/PhPy8EG_A14_ttbar_hdamp258p75_dil_PU200_skip5000_n2500.root
+Config key: PhPy8EG_A14_ttbar_hdamp258p75_dil_PU200
+Tree name: MuonHitDump
+Analysis timestamp: 2025-08-14T15:10:24.308096
+
+File Statistics:
+  Total entries: 2500
+  Number of branches: 49
+
+Hits Analysis:
+  Total events with hits: 2500
+  Mean hits per event: 6846.44
+  Min hits per event: 1721
+  Max hits per event: 10987
+
+Tracks Analysis:
+  Total events with tracks: 2500
+  Mean tracks per event: 1.18
+  Min tracks per event: 0
+  Max tracks per event: 5
+  Total track segments: 2960
+  Mean track length: 25.46
+  Min track length: 3
+  Max track length: 84
+
+Branch Histograms:
+  Total branches processed: 24
+  Successfully generated: 24
+  Failed: 0
+  Histogram status:
+    ✓ spacePoint_globEdgeHighX
+    ✓ spacePoint_globEdgeHighY
+    ✓ spacePoint_globEdgeHighZ
+    ✓ spacePoint_globEdgeLowX
+    ✓ spacePoint_globEdgeLowY
+    ✓ spacePoint_globEdgeLowZ
+    ✓ spacePoint_time
+    ✓ spacePoint_driftR
+    ✓ spacePoint_readOutSide
+    ✓ spacePoint_covXX
+    ✓ spacePoint_covXY
+    ✓ spacePoint_covYX
+    ✓ spacePoint_covYY
+    ✓ spacePoint_channel
+    ✓ spacePoint_layer
+    ✓ spacePoint_stationPhi
+    ✓ spacePoint_stationEta
+    ✓ spacePoint_stationIndex
+    ✓ spacePoint_technology
+    ✓ spacePoint_truthLink
+    ✓ truthMuon_pt
+    ✓ truthMuon_eta
+    ✓ truthMuon_phi
+    ✓ truthMuon_q

@@ -19,11 +19,18 @@ class AtlasMuonFilter(ModelWrapper):
         super().__init__(name, model, lrs_config, optimizer)
 
     def log_custom_metrics(self, preds, targets, stage):
-        pred = preds["final"]["hit_filter"]["hit_on_valid_particle"]
+        batch_size = targets["hit_on_valid_particle"].shape[0]
+        # print("This is batch_size,", batch_size)
+        pred = preds["final"]["hit_filter"]["hit_on_valid_particle"][targets["hit_valid"]]
         # print("pred shape:", pred.shape)
         # print("target shape:", targets["hit_on_valid_particle"].shape)
         # print("predictions", pred)
-        true = targets["hit_on_valid_particle"]
+        true = targets["hit_on_valid_particle"][targets["hit_valid"]]
+        # true = targets["hit_valid"]
+        # print("num of true particles:", true.sum())
+        # print("num of false particles:", (~true).sum())
+        # print("num of predicted particles:", pred.sum())
+        # print("target keys:", targets.keys())
 
         # # Get the raw probabilities for AUC calculation
         # pred_probs = preds["final"]["hit_filter"]["hit_on_valid_particle_logits"]
@@ -33,10 +40,12 @@ class AtlasMuonFilter(ModelWrapper):
 
         # # Calculate AUC
         # auc = auroc(pred_probs.flatten(), true.flatten().long(), task="binary")
+        # print("pred.shape", pred.shape)
+        # print("true.shape", true.shape)
 
         metrics = {
             # Log quantities based on the number of hits
-            "nh_total_pre": float(pred.shape[1]),
+            "nh_total_pre": float(pred.numel()),
             "nh_total_post": float(pred.sum()),
             "nh_pred_true": pred.float().sum(),
             "nh_pred_false": (~pred).float().sum(),
@@ -52,10 +61,15 @@ class AtlasMuonFilter(ModelWrapper):
             "noise_precision": tn / (~pred).sum(),
             # "auc": auc,
         }
-
+        # print("Batch size:", pred.shape[0])
         # Now actually log the metrics
         for metric_name, metric_value in metrics.items():
-            self.log(f"{stage}/{metric_name}", metric_value, sync_dist=True, batch_size=1)
+            self.log(f"{stage}/{metric_name}", 
+                     metric_value, 
+                     sync_dist=True, 
+                     batch_size=batch_size, 
+                     on_step=False, 
+                     on_epoch=True)
 
 
 def main(args: ArgsType = None) -> None:
@@ -64,6 +78,7 @@ def main(args: ArgsType = None) -> None:
         datamodule_class=AtlasMuonDataModule,
         args=args,
         parser_kwargs={"default_env": True},
+        save_config_callback=None
     )
 
 

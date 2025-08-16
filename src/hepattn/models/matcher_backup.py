@@ -102,12 +102,46 @@ class Matcher(nn.Module):
         self.step = 0
         self.verbose = verbose
 
+    # def compute_matching(self, costs, object_valid_mask=None):
+    #     if object_valid_mask is None:
+    #         object_valid_mask = torch.ones((costs.shape[0], costs.shape[1]), dtype=bool)
+
+    #     object_valid_mask = object_valid_mask.detach().bool()
+    #     batch_obj_lengths = torch.sum(object_valid_mask, dim=1).cpu().numpy().astype(np.int32)
+    #     idxs = []
+
+    #     for batch_idx in range(costs.shape[0]):
+    #         n = batch_obj_lengths[batch_idx]
+    #         # print("n", n)
+    #         cost = costs[batch_idx][:, :n].T  # shape: [n, num_preds]
+    #         num_preds = cost.shape[1]
+    #         # print("num_preds", num_preds)
+    #         pred_idx = []
+    #         # print("cost.shape", cost.shape)
+    #         for row in cost:
+    #             sorted_indices = np.argsort(row)
+    #             # print("sorted_indices", sorted_indices)
+    #             for idx in sorted_indices:
+    #                 if idx not in pred_idx:
+    #                     pred_idx.append(idx.item())
+    #                     break
+
+    #         # Fill up the rest with unused indices in increasing order
+    #         unused = [j for j in range(num_preds) if j not in pred_idx]
+    #         pred_idx += unused
+    #         # print("pred_idx", pred_idx)
+    #         idxs.append(np.array(pred_idx, dtype=np.int32))
+
+    #     return torch.from_numpy(np.stack(idxs))
     def compute_matching(self, costs, object_valid_mask=None):
+        # print(object_valid_mask)
+        # print(costs.shape)
         if object_valid_mask is None:
             object_valid_mask = torch.ones((costs.shape[0], costs.shape[1]), dtype=bool)
 
         object_valid_mask = object_valid_mask.detach().bool()
         batch_obj_lengths = torch.sum(object_valid_mask, dim=1).unsqueeze(-1)
+        # print(batch_obj_lengths)
 
         if self.parallel_solver:
             # If we are using a parallel solver, we can use it to speed up the matching
@@ -120,6 +154,7 @@ class Matcher(nn.Module):
         for k in range(len(costs)):
             # remove invalid targets for efficiency
             cost = costs[k][:, : batch_obj_lengths[k]].T
+            # cost = costs[k][:, : batch_obj_lengths[k]]
             # Solve the matching problem using the current solver
             pred_idx = match_individual(SOLVERS[self.solver], cost, default_idx)
             # These indicies can be used to permute the predictions so they now match the truth objects
@@ -127,6 +162,7 @@ class Matcher(nn.Module):
 
         return torch.from_numpy(np.stack(idxs))
 
+    # def compute_matching(cost)
     @torch.no_grad()
     def forward(self, costs, object_valid_mask=None):
         # Cost matrix dimensions are batch, pred, true
@@ -140,7 +176,7 @@ class Matcher(nn.Module):
 
         pred_idxs = self.compute_matching(costs, object_valid_mask)
         self.step += 1
-        print(pred_idxs)
+
         assert torch.all(pred_idxs >= 0), "Matcher error!"
         return pred_idxs
 
@@ -156,6 +192,7 @@ class Matcher(nn.Module):
             self.solver = solver
             start_time = time.time()
             self.compute_matching(costs)
+
             solver_times[solver] = time.time() - start_time
 
             if self.verbose:

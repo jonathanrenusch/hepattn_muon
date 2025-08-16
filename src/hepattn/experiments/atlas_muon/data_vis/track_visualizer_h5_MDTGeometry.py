@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm 
+import h5py
 
 
 from ..data import AtlasMuonDataset, AtlasMuonDataModule
@@ -127,7 +128,7 @@ class h5TrackVisualizerMDTGeometry:
         print(f"Z range: [{np.min(all_high_z):.1f}, {np.max(all_high_z):.1f}] mm")
 
         # Create the visualization
-
+        
         # Create the visualization
         fig = self._create_track_plots(
             all_high_x,

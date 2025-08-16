@@ -7,8 +7,8 @@ data:
   val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
   test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/test_PU200_processed
 
-  # hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_train_data_eval.h5
-  # hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_val_data_eval.h5
+  hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_train_PU200_processed_eval.h5
+  hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=017-val_acc=0.99449_valid_PU200_processed_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 10
@@ -79,7 +79,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project: trackml_tracking
+      project: atlas_muon_tracking
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -180,12 +180,12 @@ model:
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 10
+          num_layers: 8
           dim: *dim
-          attn_type: flash
-          window_size: 512
-          window_wrap: true
-          hybrid_norm: true
+          attn_type: flash-varlen
+          # window_size: 64
+          # window_wrap: true
+          # hybrid_norm: true
           norm: RMSNorm
 
       num_decoder_layers: 4

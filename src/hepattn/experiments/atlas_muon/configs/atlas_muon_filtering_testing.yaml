@@ -1,10 +1,11 @@
 seed_everything: 42
 name: ATLAS-Muon-v1
-# ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711.ckpt
+ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711.ckpt
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
+  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
+  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/gut_check_test_data
   # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
   train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
   val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
@@ -13,7 +14,7 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 10  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 1  # Start with batch_size=1 to avoid smart batching issues
   use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -61,7 +62,7 @@ trainer:
   # Training configuration
   max_epochs: 300
   accelerator: gpu
-  devices: [1]
+  devices: [2]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs

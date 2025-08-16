@@ -89,98 +89,158 @@ class SmartBatchSampler(Sampler):
             return (len(self.dataset) + self.batch_size - 1) // self.batch_size
 
 
+# class AtlasMuonCollator:
+#     def __init__(self, 
+#                  dataset_inputs, 
+#                  dataset_targets, 
+#                  max_num_particles, 
+#                  verbose: bool = False):
+#         self.dataset_inputs = dataset_inputs
+#         self.dataset_targets = dataset_targets
+#         self.max_num_particles = max_num_particles
+#         self.verbose = verbose
+#         self.batch_count = 0
+#         self.total_padding_ratio = 0.0
+
+#     def __call__(self, batch):
+#         inputs, targets = zip(*batch, strict=False)
+#         self.batch_count += 1
+
+#         # Find the maximum number of hits across all events in the batch
+#         num_hits = [input["hit_x"].shape[-1] for input in inputs]
+#         max_num_hits = max(num_hits)
+#         batched_inputs = {}
+#         batched_targets = {}
+        
+#         # Batch the input features (hits)
+#         for input_name, fields in self.dataset_inputs.items():
+#             # Batch the validity masks
+#             k = f"{input_name}_valid"
+#             batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (max_num_hits,), False)
+
+#             # Some tasks might require to know hit padding info for loss masking
+#             batched_targets[k] = batched_inputs[k]
+
+#             # Batch each field for this input type
+#             for field in fields:
+#                 k = f"{input_name}_{field}"
+#                 batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (max_num_hits,), 0.0)
+
+#         # Batch the target features
+#         for target_name, fields in self.dataset_targets.items():
+#             if target_name == "particle":
+#                 size = (self.max_num_particles, max_num_hits)
+#             else:
+#                 size = (self.max_num_particles,)
+
+#             # Batch the validity masks for targets
+#             k = f"{target_name}_valid"
+#             batched_targets[k] = pad_and_concat([t[k] for t in targets], size, False)
+            
+#             for field in fields:
+#                 k = f"{target_name}_{field}"
+#                 batched_targets[k] = pad_and_concat([t[k] for t in targets], size, torch.nan)
+
+#         # Batch the metadata
+#         batched_targets["sample_id"] = torch.cat([t["sample_id"] for t in targets], dim=-1)
+#         print("Batched inputs:", batched_inputs.keys())
+#         print("Batched targets:", batched_targets.keys())
+#         return batched_inputs, batched_targets
+
+
 class AtlasMuonCollator:
-    def __init__(self, 
-                 dataset_inputs, 
-                 dataset_targets, 
-                 max_num_particles, 
-                 verbose: bool = False):
+    def __init__(self, dataset_inputs, dataset_targets, max_num_obj):
         self.dataset_inputs = dataset_inputs
         self.dataset_targets = dataset_targets
-        self.max_num_particles = max_num_particles
-        self.verbose = verbose
-        self.batch_count = 0
-        self.total_padding_ratio = 0.0
+        self.max_num_obj = max_num_obj
 
     def __call__(self, batch):
         inputs, targets = zip(*batch, strict=False)
-        self.batch_count += 1
+        # print(targets[0].keys())
+        # print(type(inputs))
+        # print(type(targets))
 
-        # Find the maximum number of hits across all events in the batch
-        num_hits = [input["hit_x"].shape[-1] for input in inputs]
-        max_num_hits = max(num_hits)
+        hit_max_sizes = {}
+        # print(self.dataset_inputs)
+        for input_name in self.dataset_inputs:
+            hit_max_sizes[input_name] = max(event[f"{input_name}_valid"].shape[-1] for event in inputs)
+
         batched_inputs = {}
         batched_targets = {}
-        
-        # Batch the input features (hits)
         for input_name, fields in self.dataset_inputs.items():
-            # Batch the validity masks
             k = f"{input_name}_valid"
-            batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (max_num_hits,), False)
+            batched_inputs[k] = pad_and_concat([i[k].unsqueeze(0) for i in inputs], (hit_max_sizes[input_name],), False)
 
             # Some tasks might require to know hit padding info for loss masking
             batched_targets[k] = batched_inputs[k]
 
-            # Batch each field for this input type
             for field in fields:
                 k = f"{input_name}_{field}"
-                batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (max_num_hits,), 0.0)
-
-        # Batch the target features
+                batched_inputs[k] = pad_and_concat([i[k].unsqueeze(0) for i in inputs], (hit_max_sizes[input_name],), 0.0)
+        if "particle_hit_valid" in targets[0].keys():
+            size = (self.max_num_obj, hit_max_sizes["hit"])
+            batched_targets["particle_hit_valid"] = pad_and_concat([t["particle_hit_valid"].unsqueeze(0) for t in targets], size, torch.nan)
+        
         for target_name, fields in self.dataset_targets.items():
+            # print("This is target:", target_name)
+            # print("Fields:", fields)
             if target_name == "particle":
-                size = (self.max_num_particles, max_num_hits)
-            else:
-                size = (self.max_num_particles,)
+                size = (self.max_num_obj,)
+                k = f"{target_name}_valid"
+                batched_targets[k] = pad_and_concat([t[k].unsqueeze(0) for t in targets], size, False)
+            elif target_name == "hit":
+                size = (hit_max_sizes[target_name],)
+                # print(size)
 
-            # Batch the validity masks for targets
-            k = f"{target_name}_valid"
-            batched_targets[k] = pad_and_concat([t[k] for t in targets], size, False)
-            
+
             for field in fields:
                 k = f"{target_name}_{field}"
-                batched_targets[k] = pad_and_concat([t[k] for t in targets], size, torch.nan)
-
+                batched_targets[k] = pad_and_concat([t[k].unsqueeze(0) for t in targets], size, torch.nan)
+            # print(batched_targets.keys())
         # Batch the metadata
         batched_targets["sample_id"] = torch.cat([t["sample_id"] for t in targets], dim=-1)
-        print("Batched inputs:", batched_inputs.keys())
-        print("Batched targets:", batched_targets.keys())
-        return batched_inputs, batched_targets
 
+        return batched_inputs, batched_targets
 
 class AtlasMuonDataset(Dataset):
     def __init__(
         self,
-        dataset_dir: str,
+        dirpath: str,
         inputs: dict,
         targets: dict,
         num_events: int = -1,
+        hit_eval_path: str | None = None,
         event_max_num_particles: int = 6,  # Typically fewer tracks per event in muon data
     ):
         super().__init__()
-
+        # print("We got the hit_eval_path:", hit_eval_path)
         # Set the global random sampling seed
         self.sampling_seed = 42
         np.random.seed(self.sampling_seed)
 
-        self.dataset_dir = Path(dataset_dir)
+        self.dirpath = Path(dirpath)
         self.inputs = inputs
         self.targets = targets
+        self.hit_eval_path = hit_eval_path
+        
+        # Setup hit eval file if specified
+        if self.hit_eval_path:
+            print(f"Using hit eval dataset {self.hit_eval_path}")
         
         # Load metadata
-        with open(self.dataset_dir / 'metadata.yaml', 'r') as f:
+        with open(self.dirpath / 'metadata.yaml', 'r') as f:
             self.metadata = yaml.safe_load(f)
         
         self.hit_features = self.metadata['hit_features']
         self.track_features = self.metadata['track_features']
         
         # Load efficient index arrays
-        # self.global_event_ids = np.load(self.dataset_dir / 'event_global_ids.npy')
-        self.file_indices = np.load(self.dataset_dir / 'event_file_indices.npy')
-        self.row_indices = np.load(self.dataset_dir / 'event_row_indices.npy')
-        # self.num_hits_per_event = np.load(self.dataset_dir / 'event_num_hits.npy')
-        # self.num_tracks_per_event = np.load(self.dataset_dir / 'event_num_tracks.npy')
-        # self.chunk_info = np.load(self.dataset_dir / 'chunk_info.npy', allow_pickle=True)
+        # self.global_event_ids = np.load(self.dirpath / 'event_global_ids.npy')
+        self.file_indices = np.load(self.dirpath / 'event_file_indices.npy')
+        self.row_indices = np.load(self.dirpath / 'event_row_indices.npy')
+        # self.num_hits_per_event = np.load(self.dirpath / 'event_num_hits.npy')
+        # self.num_tracks_per_event = np.load(self.dirpath / 'event_num_tracks.npy')
+        # self.chunk_info = np.load(self.dirpath / 'chunk_info.npy', allow_pickle=True)
         
         # Calculate number of events to use
         num_events_available = len(self.row_indices)
@@ -205,6 +265,64 @@ class AtlasMuonDataset(Dataset):
     def __len__(self):
         return self.num_events
 
+    # def __getitem__(self, idx):
+    #     inputs = {}
+    #     targets = {}
+ 
+    #     # DEBUG: Print self.inputs to see if it's corrupted
+    #     print(f"DEBUG: Event {idx} - self.inputs: {self.inputs}")
+    #     print(f"DEBUG: Event {idx} - self.inputs type: {type(self.inputs)}")
+    #     for k, v in self.inputs.items():
+    #         print(f"DEBUG: self.inputs[{k}] = {v}, type: {type(v)}")
+
+    #     # Load the event
+    #     hits, particles, num_hits, num_tracks = self.load_event(idx)
+
+    #     # DEBUG: Print hits dictionary info before processing
+    #     print(f"DEBUG: Event {idx} - hits type: {type(hits)}")
+    #     print(f"DEBUG: Event {idx} - hits keys: {list(hits.keys())}")
+    #     print(f"DEBUG: Event {idx} - hits keys types: {[type(k) for k in hits.keys()]}")
+        
+    #     # Build the input hits - using same structure as TrackML
+    #     for feature, fields in self.inputs.items():
+    #         print(f"DEBUG: Processing feature: {feature}, fields: {fields}")
+            
+    #         # SAFETY CHECK: Ensure fields is a list/tuple of strings
+    #         if not isinstance(fields, (list, tuple)):
+    #             print(f"ERROR: fields is not a list/tuple! Type: {type(fields)}")
+    #             print(f"Expected fields to be list of strings, got: {fields}")
+    #             raise TypeError(f"self.inputs[{feature}] should be a list of field names, got {type(fields)}")
+            
+    #         inputs[f"{feature}_valid"] = torch.full((num_hits,), True)
+    #         targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
+            
+    #         for field in fields:
+    #             print(f"DEBUG: Processing field: {field}, type: {type(field)}")
+                
+    #             # SAFETY CHECK: Ensure field is a string
+    #             if not isinstance(field, str):
+    #                 print(f"ERROR: field is not a string! Type: {type(field)}")
+    #                 print(f"Expected field to be string, got: {field}")
+    #                 raise TypeError(f"Field name should be a string, got {type(field)}")
+                
+    #             # DEBUG: Check if field exists in hits
+    #             if field not in hits:
+    #                 print(f"ERROR: Field '{field}' not found in hits dictionary!")
+    #                 print(f"Available keys: {list(hits.keys())}")
+    #                 raise KeyError(f"Field '{field}' not found in hits")
+                
+    #             # DEBUG: Check the value type
+    #             hit_value = hits[field]
+    #             print(f"DEBUG: hits[{field}] type: {type(hit_value)}, shape: {getattr(hit_value, 'shape', 'no shape')}")
+                
+    #             try:
+    #                 inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
+    #             except Exception as e:
+    #                 print(f"ERROR: Failed to convert hits[{field}] to tensor: {e}")
+    #                 print(f"hits[{field}] = {hits[field]}")
+    #                 raise
+
+
     def __getitem__(self, idx):
         inputs = {}
         targets = {}
@@ -212,16 +330,23 @@ class AtlasMuonDataset(Dataset):
         # Load the event
         hits, particles, num_hits, num_tracks = self.load_event(idx)
 
+        # If a hit eval file was specified, read in the predictions from it to use the hit filtering
+        
         
         # Build the input hits - using same structure as TrackML
+        # print("inputs", hits.keys())
+        # print("self.inputs.items():", self.inputs.items())
         for feature, fields in self.inputs.items():
+            # print("Fields:", fields)
+            # print("feature:", feature)
             inputs[f"{feature}_valid"] = torch.full((num_hits,), True)
             # inputs[f"{feature}_valid"] = torch.full((num_hits,), True).unsqueeze(0)
             targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
             for field in fields:
+                # print(field)
                 inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
                 # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).half()
-                inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
+                # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
 
         # Build the targets for whether a particle slot is used or not
         targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
@@ -260,6 +385,8 @@ class AtlasMuonDataset(Dataset):
         # Add sample ID
         targets["sample_id"] = torch.tensor([idx], dtype=torch.int32)
 
+         
+
         # Build the regression targets
         if "particle" in self.targets:
             for field in self.targets["particle"]:
@@ -282,7 +409,7 @@ class AtlasMuonDataset(Dataset):
         chunk = self.metadata['event_mapping']['chunk_summary'][file_idx]
 
         # Load from HDF5 file
-        h5_file_path = self.dataset_dir / chunk['h5_file']
+        h5_file_path = self.dirpath / chunk['h5_file']
         
         try:
             with h5py.File(h5_file_path, 'r') as f:
@@ -302,7 +429,8 @@ class AtlasMuonDataset(Dataset):
                 
         except Exception as e:
             raise RuntimeError(f"Failed to load event {idx} from HDF5 file {h5_file_path}: {e}")
-        
+
+        # Post-processing
         # Convert hits array to dictionary
         hits_dict = {}
         for i, feature_name in enumerate(self.hit_features):
@@ -357,29 +485,9 @@ class AtlasMuonDataset(Dataset):
         
         # Add derived hit fields (vectorized numpy operations)
         hits["r"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2)
-        # Checking if r is empty:
-        # print()
-        # print(hits["r"].shape)
-        # print(hits["r"])
-        # if hits["r"].size == 0:
-        #     print(f"WARNING: Empty hits array for feature 'r'")
-        # # Checking if r has NaN or Inf values:
-        # if np.isnan(hits["r"]).any():
-        #     print("WARNING: NaN values found in hits['r']")
-        # if np.isinf(hits["r"]).any():
-        #     print("WARNING: Inf values found in hits['r']")
-        # print(hits["r"].shape)
 
         hits["s"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2 + hits["spacePoint_globEdgeLowZ"] ** 2)
-        # Checking if s is empty:
-        # if hits["s"].size == 0:
-        #     print(f"WARNING: Empty hits array for feature 's'")
-        # # Checking if s has NaN or Inf values:
-        # if np.isnan(hits["s"]).any():
-        #     print("WARNING: NaN values found in hits['s']")
-        # if np.isinf(hits["s"]).any():
-        #     print("WARNING: Inf values found in hits['s']")
-        # hits["theta"] = np.arccos(np.clip(hits["spacePoint_globEdgeLowZ"] / hits["s"], -1, 1))
+
         hits["theta"] = np.arccos(np.clip(hits["spacePoint_globEdgeLowZ"] / hits["s"], -1, 1))
         hits["phi"] = np.arctan2(hits["spacePoint_globEdgeLowY"], hits["spacePoint_globEdgeLowX"])
         hits["on_valid_particle"] = hits["spacePoint_truthLink"] >= 0
@@ -389,6 +497,16 @@ class AtlasMuonDataset(Dataset):
         for i, feature_name in enumerate(self.track_features):
             tracks_dict[feature_name] = tracks_array[:, i]
         
+        
+        if self.hit_eval_path is not None:
+            with h5py.File(self.hit_eval_path, "r") as hit_eval_file:
+                assert str(idx) in hit_eval_file, f"Key {idx} not found in file {self.hit_eval_path}"
+
+                hit_filter_pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
+                for k in hits:
+                    hits[k] = hits[k][hit_filter_pred]
+            num_hits = np.sum(hit_filter_pred) 
+
         particles = {
             'particle_id': np.unique(hits["spacePoint_truthLink"][hits["on_valid_particle"]]),  # Sequential IDs
             'truthMuon_pt': tracks_dict['truthMuon_pt'],
@@ -396,8 +514,7 @@ class AtlasMuonDataset(Dataset):
             'truthMuon_phi': tracks_dict['truthMuon_phi'],
             'truthMuon_q': tracks_dict['truthMuon_q'],
         }
-
-        return hits, particles, num_hits, num_tracks
+        return hits, particles, num_hits, num_tracks 
 
 
     # def load_event(self, idx):
@@ -410,7 +527,7 @@ class AtlasMuonDataset(Dataset):
     #     chunk = self.chunk_info[file_idx]
         
     #     # Load from HDF5 file (much faster than parquet for single events)
-    #     h5_file_path = self.dataset_dir / chunk['h5_file']
+    #     h5_file_path = self.dirpath / chunk['h5_file']
         
     #     try:
     #         with h5py.File(h5_file_path, 'r') as f:
@@ -489,8 +606,8 @@ class AtlasMuonDataset(Dataset):
     #     chunk = self.chunk_info[file_idx]
         
     #     # Load hits and tracks from parquet files
-    #     hits_file_path = self.dataset_dir / chunk['hits_file']
-    #     tracks_file_path = self.dataset_dir / chunk['tracks_file']
+    #     hits_file_path = self.dirpath / chunk['hits_file']
+    #     tracks_file_path = self.dirpath / chunk['tracks_file']
         
     #     # Load specific row from parquet files
     #     hits_table = pq.read_table(hits_file_path, filters=[('row_number', '==', row_idx)])
@@ -580,7 +697,7 @@ class AtlasMuonDataset(Dataset):
     #     chunk = self.chunk_info[file_idx]
         
     #     # Load from HDF5 file (much faster than parquet for single events)
-    #     h5_file_path = self.dataset_dir / chunk['h5_file']
+    #     h5_file_path = self.dirpath / chunk['h5_file']
     #     try:
     #         with h5py.File(h5_file_path, 'r') as f:
     #             # Direct access to specific event group
@@ -658,8 +775,8 @@ class AtlasMuonDataset(Dataset):
     #     chunk = self.chunk_info[file_idx]
         
     #     # Load hits and tracks from parquet files
-    #     hits_file_path = self.dataset_dir / chunk['hits_file']
-    #     tracks_file_path = self.dataset_dir / chunk['tracks_file']
+    #     hits_file_path = self.dirpath / chunk['hits_file']
+    #     tracks_file_path = self.dirpath / chunk['tracks_file']
         
     #     # Load the specific row (event) from parquet files without row_number filter
 
@@ -748,6 +865,20 @@ def pad_and_concat(items: list[Tensor], target_size: tuple[int], pad_value) -> T
     """Takes a list of tensors, pads them to a given size, and then concatenates them along a new dimension at zero."""
     return torch.cat([pad_to_size(item, (1, *target_size), pad_value) for item in items], dim=0)
 
+# def pad_and_concat(items: list[Tensor], target_size: tuple[int], pad_value) -> Tensor:
+#     """Pads each tensor in items to target_size, then stacks along a new batch dimension."""
+#     padded = []
+#     for item in items:
+#         # If item is 1D and target_size is 1D, pad to target_size
+#         # If item is 1D and target_size is 2D, unsqueeze first
+#         if item.dim() == len(target_size):
+#             padded.append(pad_to_size(item, target_size, pad_value))
+#         elif item.dim() + 1 == len(target_size):
+#             padded.append(pad_to_size(item.unsqueeze(0), target_size, pad_value))
+#         else:
+#             raise ValueError(f"pad_and_concat: item shape {item.shape} incompatible with target_size {target_size}")
+#     return torch.cat(padded, dim=0)
+
 
 # class AtlasMuonCollator:
 #     def __init__(self, dataset_inputs, dataset_targets, max_num_obj):
@@ -835,6 +966,9 @@ class AtlasMuonDataModule(LightningDataModule):
         use_smart_batching: bool = False,  # Disable smart batching by default
         drop_last: bool = False,
         max_hits_per_batch: int = 50000,  # Memory safety limit
+        hit_eval_train: str | None = None,
+        hit_eval_val: str | None = None,
+        hit_eval_test: str | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -842,6 +976,9 @@ class AtlasMuonDataModule(LightningDataModule):
         self.train_dir = train_dir
         self.val_dir = val_dir
         self.test_dir = test_dir
+        self.hit_eval_train = hit_eval_train
+        self.hit_eval_val = hit_eval_val
+        self.hit_eval_test = hit_eval_test  
         self.num_workers = num_workers
         self.num_train = num_train
         self.num_val = num_val
@@ -856,15 +993,17 @@ class AtlasMuonDataModule(LightningDataModule):
     def setup(self, stage: str):
         if stage == "fit" or stage == "test":
             self.train_dataset = AtlasMuonDataset(
-                dataset_dir=self.train_dir,
+                dirpath=self.train_dir,
                 num_events=self.num_train,
+                hit_eval_path=self.hit_eval_train,
                 **self.kwargs,
             )
 
         if stage == "fit":
             self.val_dataset = AtlasMuonDataset(
-                dataset_dir=self.val_dir,
+                dirpath=self.val_dir,
                 num_events=self.num_val,
+                hit_eval_path=self.hit_eval_val,
                 **self.kwargs,
             )
 
@@ -877,15 +1016,16 @@ class AtlasMuonDataModule(LightningDataModule):
         if stage == "test":
             assert self.test_dir is not None, "No test directory specified"
             self.test_dataset = AtlasMuonDataset(
-                dataset_dir=self.test_dir,
+                dirpath=self.test_dir,
                 num_events=self.num_test,
+                hit_eval_path=self.hit_eval_val,
                 **self.kwargs,
             )
             print(f"Created test dataset with {len(self.test_dataset):,} events")
 
     def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool):
         # Create appropriate sampler and batch_sampler
-        if self.use_smart_batching and self.batch_size > 1:
+        if self.use_smart_batching:
             batch_sampler = SmartBatchSampler(
                 dataset=dataset,
                 batch_size=self.batch_size,
@@ -909,16 +1049,57 @@ class AtlasMuonDataModule(LightningDataModule):
             return DataLoader(
                 dataset=dataset,
                 batch_size=self.batch_size,
-                # collate_fn=AtlasMuonCollator(
-                #     dataset.inputs, 
-                #     dataset.targets, 
-                #     dataset.event_max_num_particles
-                # ),
+                collate_fn=AtlasMuonCollator(
+                    dataset.inputs, 
+                    dataset.targets, 
+                    dataset.event_max_num_particles
+                ),
                 sampler=None,
                 num_workers=self.num_workers,
                 shuffle=shuffle,
                 pin_memory=self.pin_memory,
             )
+    # def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool):
+    #     # Disable multiprocessing when using hit filtering to avoid race conditions
+    #     # num_workers = 0 if dataset.hit_eval_path is not None else self.num_workers
+    #     # num_workers = 10
+        
+    #     # Create appropriate sampler and batch_sampler
+    #     if self.use_smart_batching:
+    #         batch_sampler = SmartBatchSampler(
+    #             dataset=dataset,
+    #             batch_size=self.batch_size,
+    #             shuffle=shuffle,
+    #             drop_last=self.drop_last,
+    #             max_hits_per_batch=self.max_hits_per_batch
+    #         )
+    #         return DataLoader(
+    #             dataset=dataset,
+    #             batch_sampler=batch_sampler,
+    #             collate_fn=AtlasMuonCollator(
+    #                 dataset.inputs, 
+    #                 dataset.targets, 
+    #                 dataset.event_max_num_particles
+    #             ),
+    #             num_workers=num_workers,
+    #             pin_memory=self.pin_memory,
+    #         )
+    #     else:
+    #         # Fallback to standard batching
+    #         return DataLoader(
+    #             dataset=dataset,
+    #             batch_size=self.batch_size,
+    #             collate_fn=AtlasMuonCollator(
+    #                 dataset.inputs, 
+    #                 dataset.targets, 
+    #                 dataset.event_max_num_particles
+    #             ),
+    #             sampler=None,
+    #             num_workers=num_workers,
+    #             shuffle=shuffle,
+    #             pin_memory=self.pin_memory,
+    #         )
+
 
     def train_dataloader(self):
         return self.get_dataloader(dataset=self.train_dataset, stage="fit", shuffle=True)

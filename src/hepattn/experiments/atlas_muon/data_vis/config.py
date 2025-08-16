@@ -76,6 +76,7 @@ HISTOGRAM_SETTINGS = {   "spacePoint_globEdgeHighX": {"bins": 100, "range": (-15
                          "spacePoint_layer": {"bins": None, "range": (0, 10)},
                          "spacePoint_stationPhi": { "bins": None, "range": (0, 50)},
                          "spacePoint_stationEta": {"bins": None, "range": (-10, 10)},
+                         "spacePoint_stationIndex": {"bins": None, "range": (-100, 100)},
                          "spacePoint_technology": {"bins": None, "range": (-1, 10)},
                          "spacePoint_truthLink": {"bins": None, "range": (-1, 8)},
                          "truthMuon_pt": {"bins": 100, "range": (0, 200)},

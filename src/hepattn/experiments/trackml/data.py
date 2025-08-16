@@ -83,12 +83,12 @@ class TrackMLDataset(Dataset):
         # Load the event
         hits, particles = self.load_event(idx)
         num_particles = len(particles)
-        print("This is number of particles:", num_particles)
+        # print("This is number of particles:", num_particles)
 
         # Build the input hits
         for feature, fields in self.inputs.items():
-            print("This is feature:", feature)
-            print("This is length of hits:", len(hits))
+            # print("This is feature:", feature)
+            # print("This is length of hits:", len(hits))
             inputs[f"{feature}_valid"] = torch.full((len(hits),), True).unsqueeze(0)
             targets[f"{feature}_valid"] = inputs[f"{feature}_valid"]
 
@@ -135,21 +135,14 @@ class TrackMLDataset(Dataset):
         hit_particle_ids = torch.from_numpy(hits["particle_id"].values)
 
         # Create the mask targets
-        # print("particle_ids:", particle_ids.unsqueeze(-1).shape)
-        # print("particle_ids:", particle_ids.unsqueeze(-1))
-        # print("hit_particle_ids:", hit_particle_ids.unsqueeze(-2).shape)
-        # print("hit_particle_ids:", hit_particle_ids.unsqueeze(-2))
         targets["particle_hit_valid"] = (particle_ids.unsqueeze(-1) == hit_particle_ids.unsqueeze(-2)).unsqueeze(0)
-        # print("Targets particle_hit_valid:", targets["particle_hit_valid"].shape)
-        # print("Targets particle_hit_valid:", targets["particle_hit_valid"])
+
         # Create the hit filter targets
         targets["hit_on_valid_particle"] = torch.from_numpy(hits["on_valid_particle"].to_numpy()).unsqueeze(0)
-        # print("Targets hit_on_valid_particle:", targets["hit_on_valid_particle"].shape)
-        # print("Targets hit_on_valid_particle:", targets["hit_on_valid_particle"])
+
         # Add sample ID
         targets["sample_id"] = torch.tensor([self.sample_ids[idx]], dtype=torch.int32)
-        # print("Targets sample_id:", targets["sample_id"].shape)
-        # Targets hit_on_valid_particle: torch.Size([1, 10000])
+
 
         # Build the regression targets
         if "particle" in self.targets:
