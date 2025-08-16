@@ -43,19 +43,8 @@ class PredictionWriter(Callback):
     @property
     def output_path(self) -> Path:
         # The output dataset will be saved in the same directory as the checkpoint
-        
-        if self.trainer.ckpt_path is None:
-            raise ValueError("Checkpoint path is not set on the trainer. Make sure to pass --ckpt_path when running test.")
-            
-        out_dir = Path(self.trainer.ckpt_path).parent
-        out_basename = str(Path(self.trainer.ckpt_path).stem)
         split = Path(self.dataset.dirpath).name
-        return Path(out_dir / f"{out_basename}_{split}_eval.h5")
-
-    def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Open the HDF5 file for writing when testing starts."""
-        if self.file is None:
-            self.file = h5py.File(self.output_path, "w")
+        return Path(self.trainer.ckpt_dir / f"{self.trainer.ckpt_name}_{split}_eval.h5")
 
     def on_test_batch_end(self, trainer, pl_module, test_step_outputs, batch, batch_idx):
         inputs, targets = batch
@@ -75,9 +64,7 @@ class PredictionWriter(Callback):
             self.write_sample(batch_idx, inputs, targets, outputs, preds, losses, 0)
 
     def write_sample(self, sample_id, inputs, targets, outputs, preds, losses, idx):
-        """
-        Write a single sample to the output file.
-        """
+        """Write a single sample to the output file."""
         # create a group for thie sample_id
         if isinstance(sample_id, Tensor):
             sample_id = sample_id.item()

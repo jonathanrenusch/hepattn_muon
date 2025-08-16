@@ -512,7 +512,7 @@ def preprocess_event(events, event_idx, namecodes, min_pt, verbose):
         cut_mask = particle_cuts[cut_name]
         cut_size = np.sum(cut_mask)
         pre_cut_size = np.sum(particle_cut_final)
-        particle_cut_final = particle_cut_final & cut_mask
+        particle_cut_final &= cut_mask
         post_cut_size = np.sum(particle_cut_final)
 
         if verbose:
@@ -698,7 +698,6 @@ def preprocess_files(in_dir: str, out_dir: str, overwrite: bool, parallel: bool 
     out_dir : str
         Directory of where to save output numpy files
     """
-
     num_events_per_file = 1000
 
     in_dir = Path(in_dir)

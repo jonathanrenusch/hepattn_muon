@@ -42,14 +42,15 @@ class ModelWrapper(LightningModule):
     def log_losses(self, losses, stage):
         total_loss = 0
 
-        # Log the losses from each task from each layer
         for layer_name, layer_losses in losses.items():
+            layer_loss = 0
             for task_name, task_losses in layer_losses.items():
                 for loss_name, loss_value in task_losses.items():
                     self.log(f"{stage}/{layer_name}_{task_name}_{loss_name}", loss_value, sync_dist=True)
+                    layer_loss += loss_value
                     total_loss += loss_value
+            self.log(f"{stage}/{layer_name}_loss", layer_loss, sync_dist=True)
 
-        # Log the total loss
         self.log(f"{stage}/loss", total_loss, sync_dist=True)
         return total_loss
 
@@ -65,7 +66,7 @@ class ModelWrapper(LightningModule):
 
             # If the task returned a non-empty metrics dict, log it
             if task_metrics:
-                self.log_dict({f"{stage}/final_{task.name}_{k}": v for k, v in task_metrics.items()})
+                self.log_dict({f"{stage}/final_{task.name}_{k}": v for k, v in task_metrics.items()}, sync_dist=True)
 
     def log_metrics(self, preds, targets, stage):
         # First log any task metrics

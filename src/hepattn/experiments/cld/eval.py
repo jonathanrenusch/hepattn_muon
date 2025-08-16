@@ -1,5 +1,3 @@
-# ruff: noqa: E501
-
 from pathlib import Path
 
 import h5py
@@ -92,15 +90,19 @@ def main():
 
     plot_specs = {
         "mom.r": ("$p_T$ [GeV]", np.geomspace(0.01, 100.0, 32), "log"),
+        "mom.rinv": ("$p_T$ [GeV] (rinv)", np.geomspace(0.01, 100.0, 32), "log"),
+        "mom.qopt": ("$p_T$ [GeV] (qopt)", np.geomspace(0.01, 100.0, 32), "log"),
         "mom.eta": (r"$\eta$", np.linspace(-4, 4, 32), "linear"),
         "mom.phi": (r"$\phi$", np.linspace(-np.pi, np.pi, 32), "linear"),
+        "mom.sinphi": (r"$\sin\phi$", np.linspace(-np.pi, np.pi, 32), "linear"),
+        "mom.cosphi": (r"$\cos\phi$", np.linspace(-np.pi, np.pi, 32), "linear"),
         "vtx.r": ("Vertex $r_0$ [m]", np.linspace(0.0, 0.05, 32), "linear"),
         "vtx.z": ("Vertex $z_0$ [m]", np.linspace(-0.5, 0.5, 32), "linear"),
         "isolation": (r"$\Delta R$ Isolation", np.logspace(-4, 0, 32), "log"),
-        "num_vtxd": ("Number of Vertex Detector Hits", np.arange(0, 12) + 0.5, "linear"),
-        "num_trkr": ("Number of Tracker Hits", np.arange(0, 12) + 0.5, "linear"),
-        "num_ecal": ("Number of ECAL Hits", np.geomspace(1, 10000, 32), "log"),
-        "num_hcal": ("Number of HCAL Hits", np.geomspace(1, 1000, 32), "log"),
+        "num_vtxd": ("Number of Vertex Detector Hits", np.arange(0, 20) + 0.5, "linear"),
+        "num_trkr": ("Number of Tracker Hits", np.arange(0, 20) + 0.5, "linear"),
+        "num_ecal": ("Number of ECAL Hits", np.geomspace(1, 10000, 32), "linear"),
+        "num_hcal": ("Number of HCAL Hits", np.geomspace(1, 1000, 32), "linear"),
     }
 
     particle_total_valid = {hit: {field: np.zeros(len(plot_specs[field][1]) - 1) for field in plot_specs} for hit in hits}
@@ -109,7 +111,7 @@ def main():
     {hit: {field: np.zeros(len(plot_specs[field][1]) - 1) for field in plot_specs} for hit in hits}
     {hit: {field: np.zeros(len(plot_specs[field][1]) - 1) for field in plot_specs} for hit in hits}
 
-    for idx in tqdm(range(1000)):
+    for idx in tqdm(range(100)):
         # Load the data from the event
         sample_id = dataset.sample_ids[idx]
 
@@ -134,7 +136,7 @@ def main():
                 # The masks will have had the particle padding applied, but also the hit padding (since they are batched)
                 flow_hit_valid = preds[f"flow_{hit}_assignment/flow_{hit}_valid"][0][:, : len(hit_valid)]
 
-            particle_valid = particle_valid & (particle_hit_valid.sum(-1) > 0)
+            particle_valid &= particle_hit_valid.sum(-1) > 0
 
             hit_iou = (particle_hit_valid & flow_hit_valid).sum(-1) / (particle_hit_valid | flow_hit_valid).sum(-1)
 

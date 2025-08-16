@@ -7,6 +7,8 @@ import torch
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
+torch._dynamo.config.capture_scalar_outputs = True  # noqa: SLF001
+
 
 # Add support for converting yaml lists to tensors
 def serializer(x: torch.Tensor) -> list:
@@ -23,15 +25,14 @@ register_type(torch.Tensor, serializer, deserializer)
 def get_best_epoch(config_path: Path) -> Path:
     """Find the best perfoming epoch.
 
-    Parameters
-    ----------
-    config_path : Path
-        Path to saved training config file.
+    Args:
+        config_path (Path): Path to saved training config file.
 
-    Returns
-    -------
-    Path
-        Path to best checkpoint for the training run.
+    Returns:
+        Path: Path to best checkpoint for the training run.
+
+    Raises:
+        FileNotFoundError: If no checkpoints are found in the expected directory.
     """
     ckpt_dir = Path(config_path.parent / "ckpts")
     print(f"No --ckpt_path specified, looking for best checkpoint in {ckpt_dir.resolve()!r}")
@@ -48,9 +49,17 @@ def get_best_epoch(config_path: Path) -> Path:
 class CLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:
         parser.add_argument("--name", default="hepattn", help="Name for this training run.")
-        parser.link_arguments("name", "trainer.logger.init_args.experiment_name")
+
+        parser.add_argument(
+            "--matmul_precision",
+            type=str,
+            choices=["highest", "high", "medium", "low"],
+            default="high",
+            help="Precision setting for float32 matrix multiplications.",
+        )
+
         parser.link_arguments("name", "model.name")
-        parser.link_arguments("trainer.default_root_dir", "trainer.logger.init_args.save_dir")
+        parser.link_arguments("name", "trainer.logger.init_args.name")
 
     def before_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
@@ -74,7 +83,7 @@ class CLI(LightningCLI):
             log_dir_timestamp = str(Path(log_dir / dirname).resolve())
             sc["trainer.default_root_dir"] = log_dir_timestamp
             if sc[log]:
-                sc[f"{log}.init_args.save_dir"] = log_dir_timestamp
+                sc[f"{log}.init_args.offline_directory"] = log_dir_timestamp
 
         if self.subcommand == "test":
             # Modify callbacks when testing
@@ -84,6 +93,13 @@ class CLI(LightningCLI):
                 if hasattr(c, "init_args") and hasattr(c.init_args, "refresh_rate"):
                     c.init_args.refresh_rate = 1
 
+            # Use the best epoch for testing
+            if sc["ckpt_path"] is None:
+                config = sc["config"]
+                assert len(config) == 1
+                best_epoch_path = get_best_epoch(Path(config[0].rel_path))
+                sc["ckpt_path"] = best_epoch_path
+
             # Ensure only one device is used for testing
             n_devices = sc["trainer.devices"]
             if (isinstance(n_devices, str | int)) and int(n_devices) > 1:
@@ -92,19 +108,16 @@ class CLI(LightningCLI):
             if isinstance(n_devices, list) and len(n_devices) > 1:
                 raise ValueError("Testing requires --trainer.devices=1")
 
+        # Set the matmul precision
+        torch.set_float32_matmul_precision(sc["matmul_precision"])
+
     def after_instantiate_classes(self) -> None:
-        """After instantiating classes, set the checkpoint path if not provided."""
-        if self.subcommand == "test" and not self.trainer.ckpt_path:
-            # First try to get checkpoint path from config if explicitly provided
-            if hasattr(self.config.test, 'ckpt_path') and self.config.test.ckpt_path:
-                ckpt_path = Path(self.config.test.ckpt_path)
-                self.trainer.ckpt_path = str(ckpt_path)
-                print(f"Using checkpoint from config: {self.trainer.ckpt_path}")
-            # Otherwise try to find the best epoch from the config directory
-            elif "config" in self.config[self.subcommand] and len(self.config[self.subcommand]["config"]) >= 1:
-                config_path = Path(self.config[self.subcommand]["config"][0].rel_path)
-                best_epoch_path = get_best_epoch(config_path)
-                self.trainer.ckpt_path = str(best_epoch_path)
-                print(f"Using best epoch checkpoint: {self.trainer.ckpt_path}")
-            else:
-                raise ValueError("No checkpoint path found. Please provide --ckpt_path when running test.")
+        sc = self.config[self.subcommand]
+
+        if self.subcommand == "test":
+            ckpt_path = sc["ckpt_path"] or get_best_epoch(Path(sc["config"][0].rel_path))
+            # Workaround to store ckpt dir for prediction writer since trainer.ckpt_path gets set to none somewhere
+            # TODO: Figure out what causes trainer.ckpt_path to be set to none
+            self.trainer.ckpt_path = ckpt_path
+            self.trainer.ckpt_dir = Path(ckpt_path).parent
+            self.trainer.ckpt_name = str(Path(ckpt_path).stem)

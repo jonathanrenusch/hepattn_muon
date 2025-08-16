@@ -2,27 +2,25 @@ import torch
 from torch import Tensor, nn
 import numpy as np 
 
-from hepattn.models.decoder import MaskFormerDecoderLayer
-from hepattn.models.task import ObjectHitMaskTask
+from hepattn.models.decoder import MaskFormerDecoder
+from hepattn.models.task import IncidenceRegressionTask, ObjectClassificationTask
 
 
 class MaskFormer(nn.Module):
     def __init__(
         self,
         input_nets: nn.ModuleList,
-        encoder: nn.Module,
-        decoder_layer_config: dict,
-        num_decoder_layers: int,
+        encoder: nn.Module | None,
+        decoder: MaskFormerDecoder,
         tasks: nn.ModuleList,
-        num_queries: int,
         dim: int,
+        target_object: str = "particle",
+        pooling: nn.Module | None = None,
         matcher: nn.Module | None = None,
         input_sort_field: str | None = None,
-        use_attn_masks: bool = True,
-        use_query_masks: bool = True,
+        raw_variables: list[str] | None = None,
     ):
-        """
-        Initializes the MaskFormer model, which is a modular transformer-style architecture designed
+        """Initializes the MaskFormer model, which is a modular transformer-style architecture designed
         for multi-task object inference with attention-based decoding and optional encoder blocks.
 
         Parameters
@@ -31,37 +29,38 @@ class MaskFormer(nn.Module):
             A list of input modules, each responsible for embedding a specific input type.
         encoder : nn.Module
             An optional encoder module that processes merged input embeddings with optional sorting.
-        decoder_layer_config : dict
-            Configuration dictionary used to initialize each MaskFormerDecoderLayer.
-        num_decoder_layers : int
-            The number of decoder layers to stack.
+        decoder : MaskFormerDecoder
+            The decoder module that handles multi-layer decoding and task integration.
         tasks : nn.ModuleList
             A list of task modules, each responsible for producing and processing predictions from decoder outputs.
         matcher : nn.Module or None
             A module used to match predictions to targets (e.g., using the Hungarian algorithm) for loss computation.
-        num_queries : int
-            The number of object-level queries to initialize and decode.
         dim : int
             The dimensionality of the query and key embeddings.
+        target_object : str
+            The target object name which is used to mark valid/invalid objects during matching.
         input_sort_field : str or None, optional
             An optional key used to sort the input objects (e.g., for windowed attention).
-        use_attn_masks : bool, optional
-            If True, attention masks will be used to control which input objects are attended to.
-        use_query_masks : bool, optional
-            If True, query masks will be used to control which queries are valid during attention.
+        raw_variables : list[str] or None, optional
+            A list of variable names that passed to tasks without embedding.
         """
         super().__init__()
 
         self.input_nets = input_nets
         self.encoder = encoder
-        self.decoder_layers = nn.ModuleList([MaskFormerDecoderLayer(**decoder_layer_config) for _ in range(num_decoder_layers)])
+        self.decoder = decoder
+
+        # Set tasks as a member of the decoder and extract num_queries
+        self.decoder.tasks = tasks
+        self.num_queries = decoder.num_queries
+
+        self.pooling = pooling
         self.tasks = tasks
+        self.target_object = target_object
         self.matcher = matcher
-        self.num_queries = num_queries
-        self.query_initial = nn.Parameter(torch.randn(num_queries, dim))
+        self.query_initial = nn.Parameter(torch.randn(self.num_queries, dim))
         self.input_sort_field = input_sort_field
-        self.use_attn_masks = use_attn_masks
-        self.use_query_masks = use_query_masks
+        self.raw_variables = raw_variables or []
 
     def forward(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         # Atomic input names
@@ -72,13 +71,16 @@ class MaskFormer(nn.Module):
 
         x = {}
 
-        # Check input data for NaNs
-        # for key, tensor in inputs.items():
-        #     # print("key:", key, "shape:", tensor.shape)
-        #     if torch.is_tensor(tensor) and tensor.dtype.is_floating_point:
-        #         if torch.isnan(tensor).any():
-        #             print(f"NaN found in input '{key}': shape={tensor.shape}, nan_count={torch.isnan(tensor).sum()}")
-    
+        for raw_var in self.raw_variables:
+            # If the raw variable is present in the inputs, add it directly to the output
+            if raw_var in inputs:
+                x[raw_var] = inputs[raw_var]
+
+        # Store input positional encodings if we need to preserve them for the decoder
+        if self.decoder.preserve_posenc:
+            assert all(input_net.posenc is not None for input_net in self.input_nets)
+            x["key_posenc"] = torch.concatenate([input_net.posenc(inputs) for input_net in self.input_nets], dim=-2)
+
         # Embed the input objects
         for input_net in self.input_nets:
             input_name = input_net.input_name
@@ -105,7 +107,6 @@ class MaskFormer(nn.Module):
 
         # calculate the batch size and combined number of input constituents
         batch_size = x["key_valid"].shape[0]
-        num_constituents = x["key_valid"].shape[-1]
 
         # if all key_valid are true, then we can just set it to None
         if batch_size == 1 and x["key_valid"].all():
@@ -134,65 +135,28 @@ class MaskFormer(nn.Module):
 
         # Generate the queries that represent objects
         x["query_embed"] = self.query_initial.expand(batch_size, -1, -1)
-        x["query_valid"] = torch.full((batch_size, self.num_queries), True)
+        x["query_valid"] = torch.full((batch_size, self.num_queries), True, device=x["query_embed"].device)
 
-        # Pass encoded inputs through decoder to produce outputs
-        outputs = {}
-        for layer_index, decoder_layer in enumerate(self.decoder_layers):
-            outputs[f"layer_{layer_index}"] = {}
+        # Pass through decoder layers
+        x, outputs = self.decoder(x, input_names)
 
-            attn_masks = {}
-            query_mask = None
-
-            for task in self.tasks:
-                # Get the outputs of the task given the current embeddings and record them
-                task_outputs = task(x)
-
-                outputs[f"layer_{layer_index}"][task.name] = task_outputs
-
-                # Here we check if each task has an attention mask to contribute, then after
-                # we fill in any attention masks for any features that did not get an attention mask
-                task_attn_masks = task.attn_mask(task_outputs)
-
-                for input_name, attn_mask in task_attn_masks.items():
-                    # We only want to mask an attention slot if every task agrees the slots should be masked
-                    # so we only mask if both the existing and new attention mask are masked, which means a slot is valid if
-                    # either current or new mask is valid
-                    if input_name in attn_masks:
-                        attn_masks[input_name] |= attn_mask
-                    else:
-                        attn_masks[input_name] = attn_mask
-
-                # Now do same but for query masks
-                task_query_mask = task.query_mask(task_outputs)
-
-                if task_query_mask is not None and self.use_query_masks:
-                    query_mask = query_mask | task_query_mask if query_mask is not None else task_query_mask
-
-            # Fill in attention masks for features that did not get one specified by any task
-            if attn_masks and self.use_attn_masks:
-                attn_mask = torch.full((batch_size, self.num_queries, num_constituents), True, device=x["key_embed"].device)
-
-                for input_name, input_attn_mask in attn_masks.items():
-                    attn_mask[..., x[f"key_is_{input_name}"]] = input_attn_mask
-
-            # If no attention masks were specified, set it to none to avoid redundant masking
-            else:
-                attn_mask = None
-
-            # Update the keys and queries
-            x["query_embed"], x["key_embed"] = decoder_layer(
-                x["query_embed"], x["key_embed"], attn_mask=attn_mask, q_mask=query_mask, kv_mask=x.get("key_valid")
-            )
-
-            # Unmerge the updated features back into the separate input types
-            for input_name in input_names:
-                x[input_name + "_embed"] = x["key_embed"][..., x[f"key_is_{input_name}"], :]
+        # Do any pooling if desired
+        if self.pooling is not None:
+            x_pooled = self.pooling(x[f"{self.pooling.input_name}_embed"], x[f"{self.pooling.input_name}_valid"])
+            x[f"{self.pooling.output_name}_embed"] = x_pooled
 
         # Get the final outputs - we don't need to compute attention masks or update things here
         outputs["final"] = {}
         for task in self.tasks:
             outputs["final"][task.name] = task(x)
+
+            # Need this for incidence-based regression task
+            if isinstance(task, IncidenceRegressionTask):
+                # Assume that the incidence task has only one output
+                x["incidence"] = outputs["final"][task.name][task.outputs[0]].detach()
+            if isinstance(task, ObjectClassificationTask):
+                # Assume that the classification task has only one output
+                x["class_probs"] = outputs["final"][task.name][task.outputs[0]].detach()
 
         return outputs
 
@@ -212,6 +176,8 @@ class MaskFormer(nn.Module):
             preds[layer_name] = {}
 
             for task in self.tasks:
+                if layer_name != "final" and not task.has_intermediate_loss:
+                    continue
                 preds[layer_name][task.name] = task.predict(layer_outputs[task.name])
 
         return preds
@@ -227,12 +193,12 @@ class MaskFormer(nn.Module):
         ----------
         outputs:
             The outputs produces the forward pass of the model.
-        outputs:
+        targets:
             The data containing the targets.
         """
         # Will hold the costs between all pairs of objects - cost axes are (batch, pred, true)
         costs = {}
-        batch_idxs = torch.arange(targets["particle_valid"].shape[0]).unsqueeze(1)
+        batch_idxs = torch.arange(targets[f"{self.target_object}_valid"].shape[0]).unsqueeze(1)
         for layer_name, layer_outputs in outputs.items():
             layer_costs = None
 
@@ -247,39 +213,35 @@ class MaskFormer(nn.Module):
 
                 # Add the cost on to our running cost total, otherwise initialise a running cost matrix
                 for cost in task_costs.values():
-                    if layer_costs is not None:
-                        layer_costs += cost
-                    else:
+                    if layer_costs is None:
                         layer_costs = cost
+                    else:
+                        layer_costs += cost
 
-            costs[layer_name] = layer_costs.detach()
+            # Added to allow completely turning off inter layer loss
+            # Possibly redundant as completely switching them off performs worse
+            if layer_costs is not None:
+                layer_costs = layer_costs.detach()
+
+            costs[layer_name] = layer_costs
 
         # Permute the outputs for each output in each layer
-        for layer_name in costs:
+        for layer_name, cost in costs.items():
+            if cost is None:
+                continue
+
             # Get the indicies that can permute the predictions to yield their optimal matching
-            # print("Matching layer:", layer_name)
-            # print("valid particles:", targets["particle_valid"])
-            # print("costs[layer_name]:", costs[layer_name])
-            # print("Matching layer:", layer_name)
-            # print("valid particles:", targets["particle_valid"])
-            # print("valid particles shape:", targets["particle_valid"].shape)
-            # print("costs[layer_name]:", costs[layer_name])
-            # print("costs[layer_name] shape:", costs[layer_name].shape)
-            # ...existing code...
-            pred_idxs = self.matcher(costs[layer_name], targets["particle_valid"])
+            pred_idxs = self.matcher(cost, targets[f"{self.target_object}_valid"])
 
-            # Ensure proper tensor conversion
-            if isinstance(pred_idxs, np.ndarray):
-                pred_idxs = torch.from_numpy(pred_idxs).long()
-            elif not isinstance(pred_idxs, torch.Tensor):
-                pred_idxs = torch.tensor(pred_idxs, dtype=torch.long)
-
-            # Ensure it's on the right device
-            pred_idxs = pred_idxs.to(outputs[layer_name][self.tasks[0].name][self.tasks[0].outputs[0]].device)
-            # ...existing code...
-            # Apply the permutation in place
-            # print(outputs)
             for task in self.tasks:
+                # Tasks without a object dimension do not need permutation (constituent-level or sample-level)
+                if not task.permute_loss:
+                    continue
+
+                # The task didn't produce an output for this layer, so skip it
+                if layer_name != "final" and not task.has_intermediate_loss:
+                    continue
+
                 for output_name in task.outputs:
                     # print("output_name:", output_name)
                     # print("layer_name:", layer_name)
@@ -294,8 +256,7 @@ class MaskFormer(nn.Module):
         for layer_name in outputs:
             losses[layer_name] = {}
             for task in self.tasks:
-                # Skip tasks that are not ObjectHitMaskTask for intermediate layers
-                if layer_name != "final" and not isinstance(task, ObjectHitMaskTask):
+                if layer_name != "final" and not task.has_intermediate_loss:
                     continue
                 losses[layer_name][task.name] = task.loss(outputs[layer_name][task.name], targets)
 

@@ -13,8 +13,7 @@ from torch.nn.attention.flex_attention import (
 
 @lru_cache
 def create_block_mask_cached(score_mod, B, H, M, N, device="cuda"):  # noqa: N803
-    block_mask = create_block_mask(score_mod, B, H, M, N, device=device)
-    return block_mask
+    return create_block_mask(score_mod, B, H, M, N, device=device)
 
 
 # Compile the flex_attention function
@@ -41,13 +40,11 @@ def build_seq_idx(tensor: torch.Tensor):
     range_tensor = torch.arange(total_length, device="cuda", dtype=torch.int32)
 
     # Use searchsorted to find the index for each position
-    seq_idx = torch.searchsorted(offsets, range_tensor, right=True) - 1
-
-    return seq_idx
+    return torch.searchsorted(offsets, range_tensor, right=True) - 1
 
 
 def create_njt_wrapper(orig_mask_mod, offsets, seq_idx):
-    """Generic Wrapper that converts Dense mask_mod functions to NJT mask_mod functions"""
+    """Generic Wrapper that converts Dense mask_mod functions to NJT mask_mod functions."""
 
     def njt_score_mod(b, h, q_idx, kv_idx):
         q_nested = q_idx - offsets[seq_idx[q_idx]]
@@ -66,7 +63,7 @@ def causal_mask(b, h, q_idx, kv_idx):  # noqa: ARG001
 @pytest.mark.gpu
 def test_flex_nested():
     # Current limitation that the total combined sequence length must be divisible by 128
-    sentence_lengths = [random.randint(1, 1024) for _ in range(batch_size - 1)]  # noqa: S311
+    sentence_lengths = [random.randint(1, 1024) for _ in range(batch_size - 1)]
     total = sum(sentence_lengths)
     sentence_lengths.append(128 - total % 128)
     total = sum(sentence_lengths)
