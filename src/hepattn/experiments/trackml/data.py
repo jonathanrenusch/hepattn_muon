@@ -118,6 +118,7 @@ class TrackMLDataset(Dataset):
         targets["particle_valid"] = torch.full((self.event_max_num_particles,), False)
         targets["particle_valid"][:num_particles] = True
         targets["particle_valid"] = targets["particle_valid"].unsqueeze(0)
+
         # print("Targets particle_valid:", targets["particle_valid"])
         # print("Targets particle_valid:", targets["particle_valid"].shape)
         # Targets particle_valid: tensor([[ True,  True,  True,  ..., False, False, False]])
@@ -136,9 +137,11 @@ class TrackMLDataset(Dataset):
 
         # Create the mask targets
         targets["particle_hit_valid"] = (particle_ids.unsqueeze(-1) == hit_particle_ids.unsqueeze(-2)).unsqueeze(0)
-
+        # print("particle_hit_valid.shape", targets["particle_hit_valid"].shape)
         # Create the hit filter targets
         targets["hit_on_valid_particle"] = torch.from_numpy(hits["on_valid_particle"].to_numpy()).unsqueeze(0)
+        # print("hit_on_valid_particle.shape", targets["hit_on_valid_particle"].shape)
+        # print("sum. hit on particle", targets["hit_on_valid_particle"].sum())
 
         # Add sample ID
         targets["sample_id"] = torch.tensor([self.sample_ids[idx]], dtype=torch.int32)
@@ -153,8 +156,20 @@ class TrackMLDataset(Dataset):
 
                 x[:num_particles] = torch.from_numpy(particles[field].to_numpy()[: self.event_max_num_particles])
                 targets[f"particle_{field}"] = x.unsqueeze(0)
+        # print some 
+        # print(inputs.keys())
+        for key in inputs.keys():
+            print(key, inputs[key])
+        # print(targets.keys())
+        # for key in targets.keys():
+        #     # if key != "hit_valid":
+        #     print(key, targets[key])
+                # print(key, "min", torch.min(targets[key]))
+                # print(key, "max", torch.max(targets[key]))
+                # print(key, "mean", torch.mean(targets[key]))
 
         return inputs, targets
+
 
     def load_event(self, idx):
         event_name = self.event_names[idx]

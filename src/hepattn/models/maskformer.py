@@ -285,7 +285,9 @@ class MaskFormer(nn.Module):
                     # print("layer_name:", layer_name)
                     # print("outputs[layer_name][task.name][output_name]:", outputs[layer_name][task.name][output_name].shape)
                     # print("batch_idxs:", batch_idxs.shape)
-                    # print("pred_idxs:", pred_idxs.shape)
+                    # print("pred_idxs:", pred_idxs)
+                    # print("batch_idxs:", batch_idxs)
+                    # print("outputs[layer_name][task.name][output_name]", outputs[layer_name][task.name][output_name].shape)
 
                     outputs[layer_name][task.name][output_name] = outputs[layer_name][task.name][output_name][batch_idxs, pred_idxs]
 

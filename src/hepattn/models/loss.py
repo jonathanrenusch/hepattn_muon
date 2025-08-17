@@ -108,7 +108,23 @@ def focal_loss(pred_logits, targets, balance=True, gamma=2.0, mask=None, weight=
     return losses.mean()
 
 
+# def mask_focal_costs(pred_logits, true, alpha=-1.0, gamma=2.0):
+#     pred = pred_logits.sigmoid()
+#     focal_pos = ((1 - pred) ** gamma) * F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred), reduction="none")
+#     focal_neg = (pred**gamma) * F.binary_cross_entropy_with_logits(pred_logits, torch.zeros_like(pred), reduction="none")
+#     if alpha >= 0:
+#         focal_pos *= alpha
+#         focal_neg *= 1 - alpha
+
+#     # Context manager necessary to overwride global autocast to ensure float32 cost is returned
+#     with torch.autocast(device_type="cuda", enabled=False):
+#         costs = torch.einsum("bnc,bmc->bnm", focal_pos, true) + torch.einsum("bnc,bmc->bnm", focal_neg, (1 - true))
+
+#     return costs
+
 def mask_focal_costs(pred_logits, true, alpha=-1.0, gamma=2.0):
+    # cap pred logits: 
+    pred_logits = torch.clamp(pred_logits, -100, 100)
     pred = pred_logits.sigmoid()
     focal_pos = ((1 - pred) ** gamma) * F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred), reduction="none")
     focal_neg = (pred**gamma) * F.binary_cross_entropy_with_logits(pred_logits, torch.zeros_like(pred), reduction="none")
@@ -116,9 +132,18 @@ def mask_focal_costs(pred_logits, true, alpha=-1.0, gamma=2.0):
         focal_pos *= alpha
         focal_neg *= 1 - alpha
 
-    # Context manager necessary to overwride global autocast to ensure float32 cost is returned
+    # Context manager necessary to overwrite global autocast to ensure float32 cost is returned
     with torch.autocast(device_type="cuda", enabled=False):
         costs = torch.einsum("bnc,bmc->bnm", focal_pos, true) + torch.einsum("bnc,bmc->bnm", focal_neg, (1 - true))
+
+    # Debugging
+    if torch.isnan(costs).any() or torch.isinf(costs).any():
+        print("Numerical issue detected in mask_focal_costs:")
+        print(f"  NaN count: {torch.isnan(costs).sum()}")
+        print(f"  Inf count: {torch.isinf(costs).sum()}")
+        print(f"  Costs shape: {costs.shape}")
+        print(f"  Pred logits stats: min={pred_logits.min()}, max={pred_logits.max()}, has_nan={torch.isnan(pred_logits).any()}")
+        print(f"  True stats: min={true.min()}, max={true.max()}, has_nan={torch.isnan(true).any()}")
 
     return costs
 
@@ -132,21 +157,42 @@ def mask_bce_loss(pred_logits, true, mask=None, weight=None):
     return losses.mean()
 
 
+# def mask_bce_costs(pred_logits, true):
+#     # print("pred_logits", pred_logits.shape)
+#     # print("true", true.shape)
+#     pred_logits = torch.clamp(pred_logits, -100, 100)
+
+#     pos = F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred_logits), reduction="none")
+#     neg = F.binary_cross_entropy_with_logits(pred_logits, torch.zeros_like(pred_logits), reduction="none")
+
+#     # Context manager necessary to overwride global autocast to ensure float32 cost is returned
+#     with torch.autocast(device_type="cuda", enabled=False):
+#         costs = torch.einsum("bnc,bmc->bnm", pos, true) + torch.einsum("bnc,bmc->bnm", neg, (1 - true))
+#     # print("mask_bce_costs", costs.shape)
+#     # This is added for debugging purposes: 
+#     # Add cost normalization
+#     # costs = torch.clamp(costs, 0, 1e4)  # Reasonable upper bound
+#     return costs
+
 def mask_bce_costs(pred_logits, true):
-    # print("pred_logits", pred_logits.shape)
-    # print("true", true.shape)
     pred_logits = torch.clamp(pred_logits, -100, 100)
 
     pos = F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred_logits), reduction="none")
     neg = F.binary_cross_entropy_with_logits(pred_logits, torch.zeros_like(pred_logits), reduction="none")
 
-    # Context manager necessary to overwride global autocast to ensure float32 cost is returned
+    # Context manager necessary to overwrite global autocast to ensure float32 cost is returned
     with torch.autocast(device_type="cuda", enabled=False):
         costs = torch.einsum("bnc,bmc->bnm", pos, true) + torch.einsum("bnc,bmc->bnm", neg, (1 - true))
-    # print("mask_bce_costs", costs.shape)
-    # This is added for debugging purposes: 
-    # Add cost normalization
-    # costs = torch.clamp(costs, 0, 1e4)  # Reasonable upper bound
+
+    # Debugging
+    if torch.isnan(costs).any() or torch.isinf(costs).any():
+        print("Numerical issue detected in mask_bce_costs:")
+        print(f"  NaN count: {torch.isnan(costs).sum()}")
+        print(f"  Inf count: {torch.isinf(costs).sum()}")
+        print(f"  Costs shape: {costs.shape}")
+        print(f"  Pred logits stats: min={pred_logits.min()}, max={pred_logits.max()}, has_nan={torch.isnan(pred_logits).any()}")
+        print(f"  True stats: min={true.min()}, max={true.max()}, has_nan={torch.isnan(true).any()}")
+
     return costs
 
 

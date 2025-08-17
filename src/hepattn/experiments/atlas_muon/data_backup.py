@@ -22,6 +22,185 @@ def pad_and_concat(items: list[Tensor], target_size: tuple[int], pad_value) -> T
     return torch.cat([pad_to_size(item, (1, *target_size), pad_value) for item in items], dim=0)
 
 
+class SmartBatchSampler(Sampler):
+    """
+    A sampler that groups events with similar numbers of hits together to minimize padding.
+    This improves efficiency by reducing the amount of padding needed within each batch.
+    Includes memory safety by limiting maximum batch memory usage.
+    """
+    def __init__(self, dataset, batch_size: int, shuffle: bool = True, drop_last: bool = False, 
+                 max_hits_per_batch: int = None):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        
+        # Get hit counts for all events to enable smart batching
+        self.hit_counts = dataset.num_hits_per_event[:len(dataset)]
+        self.indices = np.arange(len(dataset))
+        
+        # Memory safety: limit maximum hits per batch to prevent OOM
+        if max_hits_per_batch is None:
+            # Conservative default: assume we can handle 50k hits per batch
+            self.max_hits_per_batch = 50000
+        else:
+            self.max_hits_per_batch = max_hits_per_batch
+        
+    def __iter__(self):
+        # Sort indices by hit count for better batching
+        if self.shuffle:
+            # Add some randomness while still keeping similar-sized events together
+            # Sort into bins of similar hit counts, then shuffle within bins
+            bin_size = self.batch_size * 4  # Group into larger bins first
+            sorted_indices = self.indices[np.argsort(self.hit_counts)]
+            
+            batched_indices = []
+            for i in range(0, len(sorted_indices), bin_size):
+                bin_indices = sorted_indices[i:i + bin_size]
+                np.random.shuffle(bin_indices)  # Shuffle within bin
+                batched_indices.extend(bin_indices)
+            indices = batched_indices
+        else:
+            # For validation, just sort by hit count for maximum efficiency
+            indices = self.indices[np.argsort(self.hit_counts)]
+        
+        # Create memory-safe batches
+        current_batch = []
+        for idx in indices:
+            current_batch.append(idx)
+            batch_hit_counts = [self.hit_counts[i] for i in current_batch]
+            max_hits_in_batch = max(batch_hit_counts)
+            total_padded_hits = max_hits_in_batch * len(current_batch)
+            if total_padded_hits > self.max_hits_per_batch:
+                # yielding batch
+                yield current_batch[:-1]
+                current_batch = [current_batch[-1]]
+        
+        # Handle remaining events
+        if current_batch and (not self.drop_last or len(current_batch) == self.batch_size):
+            yield current_batch
+    
+    def __len__(self):
+        # Conservative estimate: assume normal batching most of the time
+        # This gives a reasonable approximation for progress bars and schedulers
+        if self.drop_last:
+            return len(self.dataset) // self.batch_size
+        else:
+            return (len(self.dataset) + self.batch_size - 1) // self.batch_size
+
+
+# class AtlasMuonCollator:
+#     def __init__(self, 
+#                  dataset_inputs, 
+#                  dataset_targets, 
+#                  max_num_particles, 
+#                  verbose: bool = False):
+#         self.dataset_inputs = dataset_inputs
+#         self.dataset_targets = dataset_targets
+#         self.max_num_particles = max_num_particles
+#         self.verbose = verbose
+#         self.batch_count = 0
+#         self.total_padding_ratio = 0.0
+
+#     def __call__(self, batch):
+#         inputs, targets = zip(*batch, strict=False)
+#         self.batch_count += 1
+
+#         # Find the maximum number of hits across all events in the batch
+#         num_hits = [input["hit_x"].shape[-1] for input in inputs]
+#         max_num_hits = max(num_hits)
+#         batched_inputs = {}
+#         batched_targets = {}
+        
+#         # Batch the input features (hits)
+#         for input_name, fields in self.dataset_inputs.items():
+#             # Batch the validity masks
+#             k = f"{input_name}_valid"
+#             batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (max_num_hits,), False)
+
+#             # Some tasks might require to know hit padding info for loss masking
+#             batched_targets[k] = batched_inputs[k]
+
+#             # Batch each field for this input type
+#             for field in fields:
+#                 k = f"{input_name}_{field}"
+#                 batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (max_num_hits,), 0.0)
+
+#         # Batch the target features
+#         for target_name, fields in self.dataset_targets.items():
+#             if target_name == "particle":
+#                 size = (self.max_num_particles, max_num_hits)
+#             else:
+#                 size = (self.max_num_particles,)
+
+#             # Batch the validity masks for targets
+#             k = f"{target_name}_valid"
+#             batched_targets[k] = pad_and_concat([t[k] for t in targets], size, False)
+            
+#             for field in fields:
+#                 k = f"{target_name}_{field}"
+#                 batched_targets[k] = pad_and_concat([t[k] for t in targets], size, torch.nan)
+
+#         # Batch the metadata
+#         batched_targets["sample_id"] = torch.cat([t["sample_id"] for t in targets], dim=-1)
+#         print("Batched inputs:", batched_inputs.keys())
+#         print("Batched targets:", batched_targets.keys())
+#         return batched_inputs, batched_targets
+
+
+class AtlasMuonCollator:
+    def __init__(self, dataset_inputs, dataset_targets, max_num_obj):
+        self.dataset_inputs = dataset_inputs
+        self.dataset_targets = dataset_targets
+        self.max_num_obj = max_num_obj
+
+    def __call__(self, batch):
+        inputs, targets = zip(*batch, strict=False)
+        # print(targets[0].keys())
+        # print(type(inputs))
+        # print(type(targets))
+
+        hit_max_sizes = {}
+        # print(self.dataset_inputs)
+        for input_name in self.dataset_inputs:
+            hit_max_sizes[input_name] = max(event[f"{input_name}_valid"].shape[-1] for event in inputs)
+
+        batched_inputs = {}
+        batched_targets = {}
+        for input_name, fields in self.dataset_inputs.items():
+            k = f"{input_name}_valid"
+            batched_inputs[k] = pad_and_concat([i[k].unsqueeze(0) for i in inputs], (hit_max_sizes[input_name],), False)
+
+            # Some tasks might require to know hit padding info for loss masking
+            batched_targets[k] = batched_inputs[k]
+
+            for field in fields:
+                k = f"{input_name}_{field}"
+                batched_inputs[k] = pad_and_concat([i[k].unsqueeze(0) for i in inputs], (hit_max_sizes[input_name],), 0.0)
+        if "particle_hit_valid" in targets[0].keys():
+            size = (self.max_num_obj, hit_max_sizes["hit"])
+            batched_targets["particle_hit_valid"] = pad_and_concat([t["particle_hit_valid"].unsqueeze(0) for t in targets], size, torch.nan)
+        
+        for target_name, fields in self.dataset_targets.items():
+            # print("This is target:", target_name)
+            # print("Fields:", fields)
+            if target_name == "particle":
+                size = (self.max_num_obj,)
+                k = f"{target_name}_valid"
+                batched_targets[k] = pad_and_concat([t[k].unsqueeze(0) for t in targets], size, False)
+            elif target_name == "hit":
+                size = (hit_max_sizes[target_name],)
+                # print(size)
+
+
+            for field in fields:
+                k = f"{target_name}_{field}"
+                batched_targets[k] = pad_and_concat([t[k].unsqueeze(0) for t in targets], size, torch.nan)
+            # print(batched_targets.keys())
+        # Batch the metadata
+        batched_targets["sample_id"] = torch.cat([t["sample_id"] for t in targets], dim=-1)
+
+        return batched_inputs, batched_targets
 
 class AtlasMuonDataset(Dataset):
     def __init__(
@@ -32,7 +211,6 @@ class AtlasMuonDataset(Dataset):
         num_events: int = -1,
         hit_eval_path: str | None = None,
         event_max_num_particles: int = 6,  # Typically fewer tracks per event in muon data
-        dummy_testing: bool = False,
     ):
         super().__init__()
         # print("We got the hit_eval_path:", hit_eval_path)
@@ -44,7 +222,6 @@ class AtlasMuonDataset(Dataset):
         self.inputs = inputs
         self.targets = targets
         self.hit_eval_path = hit_eval_path
-        self.dummy_testing = dummy_testing
         
         # Setup hit eval file if specified
         if self.hit_eval_path:
@@ -110,7 +287,6 @@ class AtlasMuonDataset(Dataset):
             for field in fields:
                 # print(field)
                 inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).unsqueeze(0)
-                # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).unsqueeze(0).half()
                 # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field]).half()
                 # inputs[f"{feature}_{field}"] = torch.from_numpy(hits[field])
 
@@ -169,9 +345,9 @@ class AtlasMuonDataset(Dataset):
                 targets[f"particle_{field}"] = x.unsqueeze(0)
 
         # for key in inputs.keys():
-        #     print(key, inputs[key])
+        #     print(key, inputs[key].shape)
         # for key in targets.keys():
-        #     print(key, targets[key])
+        #     print(key, targets[key].shape)
         # print("sample_id", targets["sample_id"])
         return inputs, targets
 
@@ -279,43 +455,9 @@ class AtlasMuonDataset(Dataset):
                 assert str(idx) in hit_eval_file, f"Key {idx} not found in file {self.hit_eval_path}"
 
                 hit_filter_pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
-                # TODO: print out the average match between hit filter and the ground truth you are loading here, 
-                # for a quick debugging gut check
-                # print("-"*20)
-                # print("true positives:", np.sum(hit_filter_pred & hits["on_valid_particle"]))
-                # print("false positives:", (np.sum(hit_filter_pred) - np.sum(hits["on_valid_particle"])))
-                # print("number of predicted hits:", np.sum(hit_filter_pred))
-                # print("number of true hits:", np.sum(hits["on_valid_particle"]))
-                # print("-"*20)
-                # print("true positives:", np.sum(hit_filter_pred & hits["on_valid_particle"]) / np.sum(hits["on_valid_particle"]))
-                # how many did we lose:
-                # print("precision:", np.sum(hit_filter_pred & hits["on_valid_particle"]) / np.sum(hit_filter_pred))
-                # # how many did we miss:
-                # print("false positives:", (np.sum(hit_filter_pred) - np.sum(hits["on_valid_particle"]))/ np.sum(hit_filter_pred))
-                # false positives:
-                # print("false positives:", np.sum(hit_filter_pred & ~hits["on_valid_particle"]) / np.sum(~hits["on_valid_particle"]))
                 for k in hits:
                     hits[k] = hits[k][hit_filter_pred]
             num_hits = np.sum(hit_filter_pred) 
-
-
-        # This example starts of how this is being used in the Trackml don't run this
-        # if self.hit_eval_path:
-        #     with h5py.File(self.hit_eval_path, "r") as hit_eval_file:
-        #         assert str(self.sample_ids[idx]) in hit_eval_file, f"Key {self.sample_ids[idx]} not found in file {self.hit_eval_path}"
-
-        #         # The dataset has shape (1, num_hits)
-        #         hit_filter_pred = hit_eval_file[f"{self.sample_ids[idx]}/preds/final/hit_filter/hit_on_valid_particle"][0]
-        #         hits = hits[hit_filter_pred]
-        # This example is over!!!!
-
-
-        # For debugging purposes
-        if self.dummy_testing:
-            for k in hits: 
-                hits[k] = hits[k][hits["on_valid_particle"]]
-            num_hits = np.sum(hits["on_valid_particle"])
-
 
         particles = {
             'particle_id': np.unique(hits["spacePoint_truthLink"][hits["on_valid_particle"]]),  # Sequential IDs
@@ -325,66 +467,13 @@ class AtlasMuonDataset(Dataset):
             'truthMuon_q': tracks_dict['truthMuon_q'],
         }
         return hits, particles, num_hits, num_tracks 
-    
 
-class AtlasMuonCollator:
-    def __init__(self, dataset_inputs, dataset_targets, max_num_obj):
-        self.dataset_inputs = dataset_inputs
-        self.dataset_targets = dataset_targets
-        self.max_num_obj = max_num_obj
 
-    def __call__(self, batch):
-        inputs, targets = zip(*batch, strict=False)
-        # print(targets[0].keys())
-        # print(type(inputs))
-        # print(type(targets))
+def pad_and_concat(items: list[Tensor], target_size: tuple[int], pad_value) -> Tensor:
+    """Takes a list of tensors, pads them to a given size, and then concatenates them along a new dimension at zero."""
+    return torch.cat([pad_to_size(item, (1, *target_size), pad_value) for item in items], dim=0)
 
-        hit_max_sizes = {}
-        # print(self.dataset_inputs)
-        for input_name in self.dataset_inputs:
 
-            hit_max_sizes[input_name] = max(event[f"{input_name}_valid"].shape[-1] for event in inputs)
-        # print(hit_max_sizes)
-        batched_inputs = {}
-        batched_targets = {}
-        for input_name, fields in self.dataset_inputs.items():
-            k = f"{input_name}_valid"
-            batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (hit_max_sizes[input_name],), False)
-
-            # Some tasks might require to know hit padding info for loss masking
-            batched_targets[k] = batched_inputs[k]
-
-            for field in fields:
-                k = f"{input_name}_{field}"
-                batched_inputs[k] = pad_and_concat([i[k] for i in inputs], (hit_max_sizes[input_name],), 0.0)
-        if "particle_hit_valid" in targets[0].keys():
-            size = (self.max_num_obj, hit_max_sizes["hit"])
-            batched_targets["particle_hit_valid"] = pad_and_concat([t["particle_hit_valid"] for t in targets], size, False)
-        
-        for target_name, fields in self.dataset_targets.items():
-            # print("This is target:", target_name)
-            # print("Fields:", fields)
-            if target_name == "particle":
-                size = (self.max_num_obj,)
-                
-            elif target_name == "hit":
-                size = (hit_max_sizes[target_name],)
-                # print(size)
-            k = f"{target_name}_valid"
-            batched_targets[k] = pad_and_concat([t[k] for t in targets], size, False)
-
-            for field in fields:
-                k = f"{target_name}_{field}"
-                batched_targets[k] = pad_and_concat([t[k] for t in targets], size, torch.nan)
-            # print(batched_targets.keys())
-        # Batch the metadata
-        batched_targets["sample_id"] = torch.cat([t["sample_id"] for t in targets], dim=-1)
-        # for key in batched_inputs.keys():
-            # print(f"Input {key} shape: {batched_inputs[key].shape}")
-            # print(f"Input {key}: {batched_inputs[key]}")
-        # for key in batched_targets.keys():
-        #     print(f"Target {key}: {batched_targets[key]}")
-        return batched_inputs, batched_targets
 
 class AtlasMuonDataModule(LightningDataModule):
     def __init__(
@@ -395,9 +484,12 @@ class AtlasMuonDataModule(LightningDataModule):
         num_train: int,
         num_val: int,
         num_test: int,
+        batch_size: int = 1,
         test_dir: str | None = None,
         pin_memory: bool = True,
-        batch_size: int = 100,
+        use_smart_batching: bool = False,  # Disable smart batching by default
+        drop_last: bool = False,
+        max_hits_per_batch: int = 50000,  # Memory safety limit
         hit_eval_train: str | None = None,
         hit_eval_val: str | None = None,
         hit_eval_test: str | None = None,
@@ -408,15 +500,18 @@ class AtlasMuonDataModule(LightningDataModule):
         self.train_dir = train_dir
         self.val_dir = val_dir
         self.test_dir = test_dir
-        self.batch_size = batch_size
+        self.hit_eval_train = hit_eval_train
+        self.hit_eval_val = hit_eval_val
+        self.hit_eval_test = hit_eval_test  
         self.num_workers = num_workers
         self.num_train = num_train
         self.num_val = num_val
         self.num_test = num_test
+        self.batch_size = batch_size
         self.pin_memory = pin_memory
-        self.hit_eval_train = hit_eval_train
-        self.hit_eval_val = hit_eval_val
-        self.hit_eval_test = hit_eval_test
+        self.use_smart_batching = use_smart_batching
+        self.drop_last = drop_last
+        self.max_hits_per_batch = max_hits_per_batch
         self.kwargs = kwargs
 
     def setup(self, stage: str):
@@ -435,35 +530,101 @@ class AtlasMuonDataModule(LightningDataModule):
                 hit_eval_path=self.hit_eval_val,
                 **self.kwargs,
             )
-        # Only print train/val dataset details when actually training
+
         if stage == "fit" and self.trainer.is_global_zero:
             print(f"Created training dataset with {len(self.train_dataset):,} events")
             print(f"Created validation dataset with {len(self.val_dataset):,} events")
-            
+            if self.use_smart_batching:
+                print(f"Using smart batching with batch size {self.batch_size}, max {self.max_hits_per_batch:,} hits per batch")
+
         if stage == "test":
-            assert self.test_dir is not None, "No test file specified, see --data.test_dir"
+            assert self.test_dir is not None, "No test directory specified"
             self.test_dataset = AtlasMuonDataset(
                 dirpath=self.test_dir,
                 num_events=self.num_test,
-                hit_eval_path=self.hit_eval_test,
+                hit_eval_path=self.hit_eval_val,
                 **self.kwargs,
             )
             print(f"Created test dataset with {len(self.test_dataset):,} events")
 
     def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool):
-        return DataLoader(
-            dataset=dataset,
-            batch_size=self.batch_size,
-            collate_fn=AtlasMuonCollator(
-                dataset.inputs, 
-                dataset.targets, 
-                dataset.event_max_num_particles
-            ),
-            sampler=None,
-            num_workers=self.num_workers,
-            shuffle=shuffle,
-            pin_memory=self.pin_memory,
-        )
+        # Create appropriate sampler and batch_sampler
+        if self.use_smart_batching:
+            batch_sampler = SmartBatchSampler(
+                dataset=dataset,
+                batch_size=self.batch_size,
+                shuffle=shuffle,
+                drop_last=self.drop_last,
+                max_hits_per_batch=self.max_hits_per_batch
+            )
+            return DataLoader(
+                dataset=dataset,
+                batch_sampler=batch_sampler,
+                # collate_fn=AtlasMuonCollator(
+                #     dataset.inputs, 
+                #     dataset.targets, 
+                #     dataset.event_max_num_particles
+                # ),
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+            )
+        else:
+            # Fallback to standard batching
+            return DataLoader(
+                dataset=dataset,
+                batch_size=None,
+                # batch_size=self.batch_size,
+                # collate_fn=AtlasMuonCollator(
+                #     dataset.inputs, 
+                #     dataset.targets, 
+                #     dataset.event_max_num_particles
+                # ),
+                sampler=None,
+                num_workers=self.num_workers,
+                shuffle=shuffle,
+                pin_memory=self.pin_memory,
+            )
+    # def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool):
+    #     # Disable multiprocessing when using hit filtering to avoid race conditions
+    #     # num_workers = 0 if dataset.hit_eval_path is not None else self.num_workers
+    #     # num_workers = 10
+        
+    #     # Create appropriate sampler and batch_sampler
+    #     if self.use_smart_batching:
+    #         batch_sampler = SmartBatchSampler(
+    #             dataset=dataset,
+    #             batch_size=self.batch_size,
+    #             shuffle=shuffle,
+    #             drop_last=self.drop_last,
+    #             max_hits_per_batch=self.max_hits_per_batch
+    #         )
+    #         return DataLoader(
+    #             dataset=dataset,
+    #             batch_sampler=batch_sampler,
+    #             collate_fn=AtlasMuonCollator(
+    #                 dataset.inputs, 
+    #                 dataset.targets, 
+    #                 dataset.event_max_num_particles
+    #             ),
+    #             num_workers=num_workers,
+    #             pin_memory=self.pin_memory,
+    #         )
+    #     else:
+    #         # Fallback to standard batching
+    #         return DataLoader(
+    #             dataset=dataset,
+    #             batch_size=self.batch_size,
+    #             collate_fn=AtlasMuonCollator(
+    #                 dataset.inputs, 
+    #                 dataset.targets, 
+    #                 dataset.event_max_num_particles
+    #             ),
+    #             sampler=None,
+    #             num_workers=num_workers,
+    #             shuffle=shuffle,
+    #             pin_memory=self.pin_memory,
+    #         )
+
 
     def train_dataloader(self):
         return self.get_dataloader(dataset=self.train_dataset, stage="fit", shuffle=True)
