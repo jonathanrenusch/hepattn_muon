@@ -455,7 +455,8 @@ def main():
         num_events_per_file=args.num_events_per_file,
         pt_threshold=args.pt_threshold,
         eta_threshold=args.eta_threshold,
-        num_hits_threshold=args.num_hits_threshold
+        num_hits_threshold=args.num_hits_threshold, 
+        max_events=args.max_events,
     )
     
     filter.process_events()
