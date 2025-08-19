@@ -20,7 +20,7 @@ def is_valid_file(path):
 
 class rootFilter:
     def __init__(self, input_dir: str, output_dir: str, num_events_per_file: int,
-                 pt_threshold: float, eta_threshold: float, num_hits_threshold: int
+                 pt_threshold: float, eta_threshold: float, num_hits_threshold: int, max_events: int = -1
                  ):
         self.input_dir = input_dir
         self.output_dir = output_dir
@@ -43,6 +43,7 @@ class rootFilter:
         self.row_indices = []
         self.num_hits_per_event = []
         self.num_tracks_per_event = []
+        self.max_events = max_events
         self.files = self._get_files()
         self.hit_features = [
                         #  "spacePoint_PositionX", 
@@ -171,7 +172,7 @@ class rootFilter:
                     self.valid_event_count += 1
                     print("Number of valid events:", self.valid_event_count, end='\r')  # Print current event count on the same line
 
-                    # Checking if chunk is full and saving to parquet
+                    # Checking if chunk is full and saving to h5
                     if len(self.hits_chunk) == self.num_events_per_file and len(self.tracks_chunk) == self.num_events_per_file:
                         # Save chunk to parquet files
                         print("=" * 80)
@@ -306,6 +307,9 @@ class rootFilter:
             print(f"Processing file: {root_file}")
             # try:
             self.process_root_file(root_file)
+            if self.max_events > 0 and self.valid_event_count >= self.max_events:
+                print(f"Reached maximum event limit of {self.max_events}. Stopping processing.")
+                break
             # except Exception as e:
                 # print(f"Error processing file {root_file}: {e}")
         # Save any remaining data that didn't fill a complete chunk
@@ -317,6 +321,7 @@ class rootFilter:
             self.tracks_chunk.clear()
             self.event_numbers_chunk.clear()
             self.last_saved_event_count = self.valid_event_count
+        
             
         # Save summary information to YAML file at top level
         dataset_info_file = os.path.join(self.output_dir, 'metadata.yaml')
@@ -408,7 +413,7 @@ def main():
         "-n",
         "--num_events_per_file",
         type=int,
-        default=1000,
+        default=10000,
         help="Number of events to save in each parquet file as different row groups."
     )
     parser.add_argument(
@@ -431,6 +436,13 @@ def main():
         type=int,
         default=3,
         help="Minimum number of hits required for tracks to be included."
+    )
+    parser.add_argument(
+        "-max",
+        "--max_events",
+        type=int,
+        default=500000,
+        help="Maximum number of events to process."
     )
     args = parser.parse_args()
     

@@ -11,11 +11,11 @@ data:
   hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=017-val_acc=0.99449_valid_PU200_processed_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
-  num_workers: 20
-  num_train: -1
-  num_test: -1
-  num_val: -1
-  batch_size: 100  # This can easily go up to 200 even for 24 GB vRAM
+  num_workers: 10
+  num_train: 10
+  num_test: 10
+  num_val: 10
+  batch_size: 10  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -62,8 +62,7 @@ trainer:
   # Training stuff here
   max_epochs: 50
   accelerator: gpu
-  # devices: [2, 3]
-  devices: [1]
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 10
   default_root_dir: logs
@@ -115,20 +114,13 @@ model:
   optimizer: Lion
 
   # Learning rate scheduler config
-  # lrs_config:
-  #   initial: 1e-5
-  #   max: 2e-5
-  #   end: 1e-5
-  #   pct_start: 0.01
-  #   skip_scheduler: false
-  #   weight_decay: 1e-5
   lrs_config:
-    initial: 1e-6
-    max: 8e-5
-    end: 1e-6
-    pct_start: 0.05
-    weight_decay: 1e-4
+    initial: 1e-5
+    max: 2e-5
+    end: 1e-5
+    pct_start: 0.01
     skip_scheduler: false
+    weight_decay: 1e-5
 
   # Whether to use multi task learning or not
   mtl: false
@@ -201,50 +193,20 @@ model:
           # window_size: 64
           # window_wrap: true
           # hybrid_norm: true
-          norm: RMSNorm
-      encoder:
-        class_path: hepattn.models.Encoder
-        init_args:
-          num_layers: 6
-          dim: *dim
-          attn_type: flash-varlen
-          hybrid_norm: true
-          value_residual: true
-          # num_register_tokens: 8
-          attn_kwargs:
-            num_heads: 16
-
-      # decoder:
-      #   num_decoder_layers: 4
-      #   num_queries: *num_particles
-      #   mask_attention: true
-      #   use_query_masks: false
-      #   decoder_layer_config:
-      #     dim: *dim
-      #     hybrid_norm: true
-      #     attn_kwargs:
-      #       num_heads: 16
-
-      matcher:
-        class_path: hepattn.models.matcher.Matcher
-        init_args:
-          default_solver: scipy
-          adaptive_solver: false
-          parallel_solver: true
-          n_jobs: 16
+          # norm: RMSNorm
 
       num_decoder_layers: 4
       # intermediate_losses: true
       decoder_layer_config:
         dim: *dim
-        norm: RMSNorm
+        # norm: RMSNorm
         mask_attention: true
-      # matcher:
-      #   class_path: hepattn.models.matcher.Matcher
-      #   init_args:
-      #     default_solver: scipy
-      #     adaptive_solver: false
-      #     adaptive_check_interval: 1000
+      matcher:
+        class_path: hepattn.models.matcher.Matcher
+        init_args:
+          default_solver: scipy
+          adaptive_solver: false
+          adaptive_check_interval: 1000
       tasks:
         class_path: torch.nn.ModuleList
         init_args:
@@ -269,19 +231,10 @@ model:
                 input_object: query
                 output_object: track
                 target_object: particle
-                # pred_threshold: 0.1
-                # logit_scale: 4.0
-                # losses:
-                #   mask_bce: 10.0
-                # costs:
-                #   mask_bce: 10.0
-                # dim: *dim
-                # null_weight: 1.0
                 losses:
-                  mask_bce: 5.0
-                  mask_dice: 1.0
+                  mask_bce: 10.0
                 costs:
-                  # mask_bce: 5.0
-                  mask_dice: 1.0
+                  mask_bce: 10.0
                 dim: *dim
                 null_weight: 1.0
+

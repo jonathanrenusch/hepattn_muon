@@ -100,20 +100,22 @@ class h5TrackVisualizerMDTGeometry:
         num_particles = np.sum(targets["particle_valid"].numpy())
         # print("targets phi", targets["particle_truthMuon_phi"])
         # print("targets eta", targets["particle_truthMuon_eta"])
-        all_high_x = inputs["hit_spacePoint_globEdgeHighX"].numpy() * 1000  # Convert back to mm
-        all_high_y = inputs["hit_spacePoint_globEdgeHighY"].numpy() * 1000
-        all_high_z = inputs["hit_spacePoint_globEdgeHighZ"].numpy() * 1000
-        all_low_x = inputs["hit_spacePoint_globEdgeLowX"].numpy() * 1000
-        all_low_y = inputs["hit_spacePoint_globEdgeLowY"].numpy() * 1000
-        all_low_z = inputs["hit_spacePoint_globEdgeLowZ"].numpy() * 1000
+        all_high_x = inputs["hit_spacePoint_globEdgeHighX"][0].numpy() * 1000  # Convert back to mm
+        all_high_y = inputs["hit_spacePoint_globEdgeHighY"][0].numpy() * 1000
+        all_high_z = inputs["hit_spacePoint_globEdgeHighZ"][0].numpy() * 1000
+        all_low_x = inputs["hit_spacePoint_globEdgeLowX"][0].numpy() * 1000
+        all_low_y = inputs["hit_spacePoint_globEdgeLowY"][0].numpy() * 1000
+        all_low_z = inputs["hit_spacePoint_globEdgeLowZ"][0].numpy() * 1000
 
         print(targets["particle_hit_valid"].shape)
-        truth_links = targets["particle_hit_valid"][:num_particles, :].numpy()
-        
+        truth_links = targets["particle_hit_valid"][0][:num_particles, :].numpy()
+        print(truth_links.shape)
+        print(truth_links)
         all_truth = np.full(len(all_high_x), -1, dtype=int)  # Default to -1 for background
 
         for id, truth_link in enumerate(truth_links):
             indices = np.where(truth_link)[0]
+            print()
             all_truth[indices] = id  # Assign the track ID to the corresponding hits
 
         
@@ -328,17 +330,20 @@ class h5TrackVisualizerMDTGeometry:
                 axes[2].plot([z_low, z_high], [x_low, x_high], color=track_color, alpha=0.9, linewidth=TRACK_LINEWIDTH)
 
             # plotting the line at a fixed angle
-            phi = truthMuon_phi[i]
+            phi = truthMuon_phi[0][i]
             # Calculate end point
             x1 = line_length * np.cos(phi)
             y1 = line_length * np.sin(phi)
             
             # Calculate the Z-X and Z-Y projections
-            eta_value = truthMuon_eta[i]
+            eta_value = truthMuon_eta[0][i]
             theta = 2 * np.arctan(np.exp(-eta_value))
             z1 = line_length_z * np.cos(theta)
             x1_zplane = line_length * np.sin(theta) * np.cos(phi)
             y1_zplane = line_length * np.sin(theta) * np.sin(phi)
+            # ...existing code...
+
+            # ...existing code...
             # plotting the line at a fixed angle
             axes[0].plot([0, x1], [0, y1], color=track_color, linewidth=1, alpha=0.5)
             axes[1].plot([0, z1], [0, y1_zplane], color=track_color, linewidth=1, alpha=0.5)
