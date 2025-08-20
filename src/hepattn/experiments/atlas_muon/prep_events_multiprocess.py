@@ -558,8 +558,8 @@ def main():
     parser.add_argument("-pt", "--pt_threshold", type=float, default=5.0, help="Minimum pT threshold")
     parser.add_argument("-eta", "--eta_threshold", type=float, default=2.7, help="Maximum |eta| threshold")
     parser.add_argument("-nh", "--num_hits_threshold", type=int, default=3, help="Minimum number of hits")
-    parser.add_argument("-max", "--max_events", type=int, default=1000, help="Maximum number of valid events each worker is allowed to process")
-    parser.add_argument("-w", "--num_workers", type=int, default=10, help="Number of worker processes (default: 10)")
+    parser.add_argument("-max", "--max_events", type=int, default=-1, help="Maximum number of valid events each worker is allowed to process")
+    parser.add_argument("-w", "--num_workers", type=int, default=None, help="Number of worker processes (default: 10)")
 
     args = parser.parse_args()
     
