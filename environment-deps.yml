@@ -1,0 +1,35 @@
+name: hepattn
+channels:
+  - https://conda.anaconda.org/nvidia
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12.11
+  - numpy=2.1.2
+  - pandas=2.2.3
+  - pyarrow=17.0.0
+  - scipy=1.15.3
+  - scikit-learn=1.6.1
+  - numba=0.61.2
+  - h5py=3.13.0
+  - awkward=2.8.2
+  - uproot=5.6.1
+  - cmake
+  - ninja=1.12.1
+  - git=2.49.0
+  - git-lfs=3.6.1
+  - ruamel.yaml=0.18.14
+  - pybind11
+  - pip
+  - pip:
+    - packaging
+    - wheel
+    - pytest>=8.3.3,<9
+    - pytest-repeat
+    - ruff==0.8.0
+    - pre-commit>=4.0.1,<5
+    - comet-ml>=3.47.3,<4
+    - jsonargparse[signatures]>=4.34.0,<5
+    - torchjd>=0.5.0
+    - lion-pytorch>=0.2.3,<0.3
+    - particle>=0.25.3
