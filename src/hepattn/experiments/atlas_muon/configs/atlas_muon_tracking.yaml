@@ -9,7 +9,7 @@ data:
   test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/test_PU200_processed
 
   hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_train_PU200_processed_eval.h5
-  hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=017-val_acc=0.99449_valid_PU200_processed_eval.h5
+  hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_valid_PU200_processed_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 20
@@ -193,21 +193,22 @@ model:
                     dim: *dim
                     scale: 0.1
 
-      encoder:
-        class_path: hepattn.models.Encoder
-        init_args:
-          num_layers: 8
-          dim: *dim
-          attn_type: flash-varlen
-          # window_size: 64
-          # window_wrap: true
-          # hybrid_norm: true
-          norm: RMSNorm
+      # encoder:
+      #   class_path: hepattn.models.Encoder
+      #   init_args:
+      #     num_layers: 8
+      #     dim: *dim
+      #     attn_type: flash-varlen
+      #     # window_size: 64
+      #     # window_wrap: true
+      #     # hybrid_norm: true
+      #     norm: RMSNorm
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
           num_layers: 6
           dim: *dim
+          # attn_type: flash
           attn_type: flash-varlen
           hybrid_norm: true
           value_residual: true
@@ -231,6 +232,7 @@ model:
         init_args:
           default_solver: scipy
           adaptive_solver: false
+          adaptive_check_interval: 1000
           parallel_solver: true
           n_jobs: 16
 
