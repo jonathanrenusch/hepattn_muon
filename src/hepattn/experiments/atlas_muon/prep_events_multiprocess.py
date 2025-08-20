@@ -216,11 +216,39 @@ class ParallelRootFilter:
         # Save final metadata
         self._save_final_metadata(processing_time)
 
+    # def _aggregate_results(self, results: List[Dict]):
+    #     """Aggregate results from all worker processes"""
+    #     print("Aggregating results from workers...")
+        
+    #     total_chunk_offset = 0
+        
+    #     for worker_result in results:
+    #         if worker_result is None:
+    #             continue
+                
+    #         # Aggregate counters
+    #         self.excluded_tracks_count += worker_result['excluded_tracks_count']
+    #         self.excluded_events_count += worker_result['excluded_events_count']
+    #         self.valid_events_count += worker_result['valid_events_count']
+    #         self.valid_tracks_count += worker_result['valid_tracks_count']
+            
+    #         # Aggregate event mapping
+    #         self.event_mapping.extend(worker_result['event_mapping'])
+            
+    #         # Aggregate indices with proper offsets
+    #         worker_file_indices = np.array(worker_result['file_indices']) + total_chunk_offset
+    #         self.file_indices.extend(worker_file_indices.tolist())
+    #         self.row_indices.extend(worker_result['row_indices'])
+    #         self.num_hits_per_event.extend(worker_result['num_hits_per_event'])
+    #         self.num_tracks_per_event.extend(worker_result['num_tracks_per_event'])
+            
+    #         total_chunk_offset += len(worker_result['event_mapping'])
     def _aggregate_results(self, results: List[Dict]):
         """Aggregate results from all worker processes"""
         print("Aggregating results from workers...")
         
         total_chunk_offset = 0
+        total_events_seen = 0  # Add this
         
         for worker_result in results:
             if worker_result is None:
@@ -231,18 +259,15 @@ class ParallelRootFilter:
             self.excluded_events_count += worker_result['excluded_events_count']
             self.valid_events_count += worker_result['valid_events_count']
             self.valid_tracks_count += worker_result['valid_tracks_count']
+            total_events_seen += worker_result.get('total_events_seen', 0)  # Add this
             
             # Aggregate event mapping
             self.event_mapping.extend(worker_result['event_mapping'])
             
-            # Aggregate indices with proper offsets
-            worker_file_indices = np.array(worker_result['file_indices']) + total_chunk_offset
-            self.file_indices.extend(worker_file_indices.tolist())
-            self.row_indices.extend(worker_result['row_indices'])
-            self.num_hits_per_event.extend(worker_result['num_hits_per_event'])
-            self.num_tracks_per_event.extend(worker_result['num_tracks_per_event'])
-            
-            total_chunk_offset += len(worker_result['event_mapping'])
+            # ... rest of aggregation logic
+        
+        # Store total events seen
+        self.total_events_seen = total_events_seen
 
     def _save_final_metadata(self, processing_time: float):
         """Save aggregated metadata and index arrays"""
@@ -329,6 +354,167 @@ class ParallelRootFilter:
         print(f"Dataset metadata saved to: {dataset_info_file}")
         print(f"{'='*60}")
 
+# def process_worker_files(args: Tuple) -> Dict:
+#     """Worker function to process a subset of files"""
+#     (worker_id, file_chunk, output_dir, num_events_per_file, pt_threshold, 
+#      eta_threshold, num_hits_threshold, max_events, hit_features, track_features) = args
+    
+#     if not file_chunk:
+#         return None
+    
+#     print(f"Worker {worker_id}: Starting processing of {len(file_chunk)} files")
+    
+#     # Initialize worker-specific counters and data structures
+#     excluded_tracks_count = 0
+#     excluded_events_count = 0
+#     valid_tracks_count = 0
+#     event_mapping = []
+#     file_indices = []
+#     row_indices = []
+#     num_hits_per_event = []
+#     num_tracks_per_event = []
+#     total_valid_events = 0
+    
+#     for file_idx, root_file in enumerate(file_chunk):
+#         print(f"Worker {worker_id}: Processing file {file_idx+1}/{len(file_chunk)}: {root_file.name}")
+        
+#         # Initialize per-file variables
+#         hits_chunk = []
+#         tracks_chunk = []
+#         event_numbers_chunk = []
+        
+#         try:
+#             with uproot.open(root_file) as rf:
+#                 tree_keys = [key for key in rf.keys() if ';' in key]
+#                 if not tree_keys:
+#                     print(f"Worker {worker_id}: No tree found in {root_file.name}")
+#                     continue
+                    
+#                 tree = tree_keys[0].split(';')[0]
+#                 num_events = rf[tree].num_entries
+#                 chunk_size = 1000
+                
+#                 for chunk_start in range(0, num_events, chunk_size):
+#                     chunk_end = min(chunk_start + chunk_size, num_events)
+                    
+#                     # Load chunk data
+#                     hit_features_chunk = {}
+#                     for feature in hit_features:
+#                         hit_features_chunk[feature] = rf[tree][feature].array(
+#                             entry_start=chunk_start, entry_stop=chunk_end, library='np'
+#                         )
+                    
+#                     track_features_chunk = {}
+#                     for feature in track_features:
+#                         track_features_chunk[feature] = rf[tree][feature].array(
+#                             entry_start=chunk_start, entry_stop=chunk_end, library='np'
+#                         )
+                    
+#                     event_numbers_array = rf[tree]['eventNumber'].array(
+#                         entry_start=chunk_start, entry_stop=chunk_end, library='np'
+#                     )
+                    
+#                     # Process each event in chunk
+#                     for event_idx_in_chunk in range(chunk_end - chunk_start):
+#                         # Check if we've reached the global limit (approximate)
+#                         if max_events > 0 and total_valid_events >= max_events:
+#                             print(f"Worker {worker_id}: Reached approximate max_events limit ({max_events})")
+#                             break
+                        
+#                         unique_tracks = np.unique(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk])
+#                         valid_tracks = unique_tracks[unique_tracks != -1]
+                        
+#                         if len(valid_tracks) == 0:
+#                             excluded_events_count += 1
+#                             continue
+                        
+#                         # Apply track filters
+#                         exclude_tracks = []
+#                         for track_idx in valid_tracks:
+#                             if (track_features_chunk['truthMuon_pt'][event_idx_in_chunk][track_idx] < pt_threshold or
+#                                 abs(track_features_chunk['truthMuon_eta'][event_idx_in_chunk][track_idx]) > eta_threshold or
+#                                 np.sum(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk] == track_idx) < num_hits_threshold):
+#                                 exclude_tracks.append(track_idx)
+#                                 excluded_tracks_count += 1
+                        
+#                         remaining_tracks = np.setdiff1d(valid_tracks, exclude_tracks)
+                        
+#                         if len(remaining_tracks) == 0:
+#                             excluded_events_count += 1
+#                             continue
+                        
+#                         valid_tracks_count += len(remaining_tracks)
+                        
+#                         # Build event data
+#                         hit2track_mask = np.isin(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk], remaining_tracks)
+#                         modified_truth_link = hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk].copy()
+#                         modified_truth_link[~hit2track_mask] = -1
+#                         track_mask = np.isin(valid_tracks, remaining_tracks)
+                        
+#                         hits = {branch: hit_features_chunk[branch][event_idx_in_chunk] for branch in hit_features}
+#                         hits["spacePoint_truthLink"] = modified_truth_link
+                        
+#                         tracks = {branch: track_features_chunk[branch][event_idx_in_chunk][track_mask] for branch in track_features}
+                        
+#                         hits_chunk.append(hits)
+#                         tracks_chunk.append(tracks)
+#                         event_numbers_chunk.append(event_numbers_array[event_idx_in_chunk])
+                    
+#                     # Break out of chunk loop if we hit the limit
+#                     if max_events > 0 and total_valid_events >= max_events:
+#                         break
+                
+#                 # Break out of file loop if we hit the limit  
+#                 if max_events > 0 and total_valid_events >= max_events:
+#                     break
+                    
+#         except Exception as e:
+#             print(f"Worker {worker_id}: Error processing file {root_file}: {e}")
+#             continue
+        
+#         # Save file data if we have any valid events
+#         if len(hits_chunk) > 0:
+#             file_valid_events = len(hits_chunk)
+#             print(f"Worker {worker_id}: Saving {file_valid_events} events from {root_file.name}")
+            
+#             chunk_info = save_worker_chunk_to_hdf5(
+#                 hits_chunk, tracks_chunk, event_numbers_chunk,
+#                 output_dir, worker_id, root_file, file_valid_events,
+#                 hit_features, track_features
+#             )
+            
+#             # Update tracking data
+#             current_chunk_idx = len(event_mapping)
+#             for i in range(len(hits_chunk)):
+#                 file_indices.append(current_chunk_idx)
+#                 row_indices.append(i)
+#                 num_hits_per_event.append(len(hits_chunk[i]['spacePoint_time']))
+#                 num_tracks_per_event.append(len(tracks_chunk[i]['truthMuon_pt']))
+            
+#             event_mapping.append(chunk_info)
+#             total_valid_events += file_valid_events
+#         else:
+#             print(f"Worker {worker_id}: No valid events found in {root_file.name}")
+        
+#         # Stop processing more files if we've reached the limit
+#         if max_events > 0 and total_valid_events >= max_events:
+#             print(f"Worker {worker_id}: Reached max_events limit, stopping file processing")
+#             break
+    
+#     print(f"Worker {worker_id}: Completed processing. Valid events: {total_valid_events}")
+    
+#     return {
+#         'excluded_tracks_count': excluded_tracks_count,
+#         'excluded_events_count': excluded_events_count,
+#         'valid_events_count': total_valid_events,
+#         'valid_tracks_count': valid_tracks_count,
+#         'event_mapping': event_mapping,
+#         'file_indices': file_indices,
+#         'row_indices': row_indices,
+#         'num_hits_per_event': num_hits_per_event,
+#         'num_tracks_per_event': num_tracks_per_event
+#     }
+
 def process_worker_files(args: Tuple) -> Dict:
     """Worker function to process a subset of files"""
     (worker_id, file_chunk, output_dir, num_events_per_file, pt_threshold, 
@@ -349,6 +535,7 @@ def process_worker_files(args: Tuple) -> Dict:
     num_hits_per_event = []
     num_tracks_per_event = []
     total_valid_events = 0
+    total_events_seen = 0  # Add this counter
     
     for file_idx, root_file in enumerate(file_chunk):
         print(f"Worker {worker_id}: Processing file {file_idx+1}/{len(file_chunk)}: {root_file.name}")
@@ -391,9 +578,16 @@ def process_worker_files(args: Tuple) -> Dict:
                     
                     # Process each event in chunk
                     for event_idx_in_chunk in range(chunk_end - chunk_start):
+                        total_events_seen += 1  # Count every event we see
+                        
                         # Check if we've reached the global limit (approximate)
                         if max_events > 0 and total_valid_events >= max_events:
                             print(f"Worker {worker_id}: Reached approximate max_events limit ({max_events})")
+                            # Count remaining events as excluded
+                            remaining_events_in_chunk = (chunk_end - chunk_start) - event_idx_in_chunk
+                            remaining_events_in_file = num_events - (chunk_start + event_idx_in_chunk)
+                            excluded_events_count += remaining_events_in_file
+                            total_events_seen += remaining_events_in_file - 1  # -1 because we already counted current event
                             break
                         
                         unique_tracks = np.unique(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk])
@@ -476,20 +670,20 @@ def process_worker_files(args: Tuple) -> Dict:
             print(f"Worker {worker_id}: Reached max_events limit, stopping file processing")
             break
     
-    print(f"Worker {worker_id}: Completed processing. Valid events: {total_valid_events}")
+    print(f"Worker {worker_id}: Completed processing. Valid events: {total_valid_events}, Total events seen: {total_events_seen}")
     
     return {
         'excluded_tracks_count': excluded_tracks_count,
         'excluded_events_count': excluded_events_count,
         'valid_events_count': total_valid_events,
         'valid_tracks_count': valid_tracks_count,
+        'total_events_seen': total_events_seen,  # Add this
         'event_mapping': event_mapping,
         'file_indices': file_indices,
         'row_indices': row_indices,
         'num_hits_per_event': num_hits_per_event,
         'num_tracks_per_event': num_tracks_per_event
     }
-
 def save_worker_chunk_to_hdf5(hits_chunk, tracks_chunk, event_numbers_chunk, 
                              output_dir, worker_id, root_file, valid_events_count,
                              hit_features, track_features):
