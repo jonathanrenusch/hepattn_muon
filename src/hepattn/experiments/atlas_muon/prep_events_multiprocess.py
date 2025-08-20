@@ -87,16 +87,20 @@ class ParallelRootFilter:
                 file_chunks.append([])  # Empty chunk for excess workers
             
             start_idx = end_idx
-        
+        # print("len(self.files)", len(self.files))
+        # non_empty_chunks = sum(1 for chunk in file_chunks if chunk)
+        # print(f"Number of non-empty chunks: {non_empty_chunks}")
         return file_chunks
 
     def _save_final_metadata(self, processing_time: float):
         """Save aggregated metadata and index arrays"""
         print("Saving final metadata...")
-        
+        # print("-" * 30)
         # Save index arrays
+        # print("This is self.file_indices", self.file_indices)
         np.save(os.path.join(self.output_dir, 'event_file_indices.npy'), 
                 np.array(self.file_indices, dtype=np.int16))
+        # print("This is self.row_indices", self.row_indices)
         np.save(os.path.join(self.output_dir, 'event_row_indices.npy'),
                 np.array(self.row_indices, dtype=np.int16))
         
@@ -214,6 +218,8 @@ class ParallelRootFilter:
         self._aggregate_results(results)
         
         # Save final metadata
+        print("These are the self.file_indices", self.file_indices)
+        print("These are the self.row_indices", self.row_indices)
         self._save_final_metadata(processing_time)
 
     # def _aggregate_results(self, results: List[Dict]):
@@ -259,12 +265,22 @@ class ParallelRootFilter:
             self.excluded_events_count += worker_result['excluded_events_count']
             self.valid_events_count += worker_result['valid_events_count']
             self.valid_tracks_count += worker_result['valid_tracks_count']
-            total_events_seen += worker_result.get('total_events_seen', 0)  # Add this
+            # total_events_seen += worker_result.get('total_events_seen', 0)  # Add this
+            total_events_seen += worker_result['total_events_seen']  # Add this
             
             # Aggregate event mapping
             self.event_mapping.extend(worker_result['event_mapping'])
+
+            # Aggregate indices with proper offsets
+            worker_file_indices = np.array(worker_result['file_indices']) + total_chunk_offset
+            # print("Worker file indices:", worker_file_indices)
+            self.file_indices.extend(worker_file_indices.tolist())
+            # print("File indices:", self.file_indices)
+            self.row_indices.extend(worker_result['row_indices'])
+            self.num_hits_per_event.extend(worker_result['num_hits_per_event'])
+            self.num_tracks_per_event.extend(worker_result['num_tracks_per_event'])
             
-            # ... rest of aggregation logic
+            total_chunk_offset += len(worker_result['event_mapping'])
         
         # Store total events seen
         self.total_events_seen = total_events_seen
@@ -275,9 +291,9 @@ class ParallelRootFilter:
         
         # Save index arrays
         np.save(os.path.join(self.output_dir, 'event_file_indices.npy'), 
-                np.array(self.file_indices, dtype=np.int16))
+                np.array(self.file_indices))
         np.save(os.path.join(self.output_dir, 'event_row_indices.npy'),
-                np.array(self.row_indices, dtype=np.int16))
+                np.array(self.row_indices))
         
         # Calculate summary statistics
         total_tracks = self.valid_tracks_count + self.excluded_tracks_count
@@ -299,6 +315,7 @@ class ParallelRootFilter:
                 'excluded_tracks_percentage': excluded_tracks_percent,
                 'total_excluded_events': self.excluded_events_count,
                 'total_events_processed': total_events,
+                'total_events_seen': self.total_events_seen,
                 'excluded_events_percentage': excluded_events_percent,
                 'valid_events': self.valid_events_count,
                 'valid_tracks': self.valid_tracks_count,
@@ -613,7 +630,7 @@ def process_worker_files(args: Tuple) -> Dict:
                             continue
                         
                         valid_tracks_count += len(remaining_tracks)
-                        
+                        total_valid_events += 1  # Count this as a valid event
                         # Build event data
                         hit2track_mask = np.isin(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk], remaining_tracks)
                         modified_truth_link = hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk].copy()
@@ -661,7 +678,6 @@ def process_worker_files(args: Tuple) -> Dict:
                 num_tracks_per_event.append(len(tracks_chunk[i]['truthMuon_pt']))
             
             event_mapping.append(chunk_info)
-            total_valid_events += file_valid_events
         else:
             print(f"Worker {worker_id}: No valid events found in {root_file.name}")
         
@@ -669,9 +685,9 @@ def process_worker_files(args: Tuple) -> Dict:
         if max_events > 0 and total_valid_events >= max_events:
             print(f"Worker {worker_id}: Reached max_events limit, stopping file processing")
             break
-    
-    print(f"Worker {worker_id}: Completed processing. Valid events: {total_valid_events}, Total events seen: {total_events_seen}")
-    
+
+    print(f"Worker {worker_id}: Completed processing. Valid events: {total_valid_events}, Number of excluded events {excluded_events_count}, Total events seen: {total_events_seen}")
+    # print("These are the file indices: ", file_indices)
     return {
         'excluded_tracks_count': excluded_tracks_count,
         'excluded_events_count': excluded_events_count,
