@@ -1,20 +1,24 @@
 seed_everything: 42
 name: ATLAS-Muon-v1
+ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711.ckpt
 # ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711.ckpt
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
+  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
+  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
   # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_multi_processed
   # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
-  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
+  # val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
+  train_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
+  val_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_validation_data_150K_processed
+  test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  num_workers: 10
+  num_workers: 200
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 10  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 20
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -73,7 +77,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project: atlas_muon_filtering
+      project_name: atlas_muon_filtering
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -162,6 +166,7 @@ model:
                     input_name: hit
                     fields:
                       - phi
+                      - r
                     # TODO: Check wether you might want to add more here
                     dim: *dim
                     scale: 0.1
@@ -174,9 +179,7 @@ model:
           window_size: 512  # Smaller window size for fewer hits per event
           window_wrap: true
           hybrid_norm: true
-          # norm: RMSNorm
-          attn_kwargs:
-            num_heads: 16
+          hybrid_norm: true
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -188,5 +191,5 @@ model:
                 input_object: hit
                 target_field: on_valid_particle
                 dim: *dim
-                threshold: 0.05
+                threshold: 0.1
                 loss_fn: bce
