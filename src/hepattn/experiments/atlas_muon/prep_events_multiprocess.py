@@ -129,7 +129,8 @@ class ParallelRootFilter:
                 'valid_tracks': self.valid_tracks_count,
                 'average_tracks_per_event': avg_tracks_per_event,
                 'processing_time_seconds': processing_time,
-                'num_workers': num_active_workers,
+                'num_workers': self.num_workers,
+                'files_per_worker': self.files_per_worker,
                 'processing_status': 'Complete'
             },
             'processing_parameters': {
@@ -322,6 +323,7 @@ class ParallelRootFilter:
                 'average_tracks_per_event': avg_tracks_per_event,
                 'processing_time_seconds': processing_time,
                 'num_workers': num_active_workers,
+                'num_root_files': len(self.files),
                 'processing_status': 'Complete'
             },
             'processing_parameters': {
