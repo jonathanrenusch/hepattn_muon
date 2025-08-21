@@ -219,8 +219,8 @@ class ParallelRootFilter:
         self._aggregate_results(results)
         
         # Save final metadata
-        print("These are the self.file_indices", self.file_indices)
-        print("These are the self.row_indices", self.row_indices)
+        # print("These are the self.file_indices", self.file_indices)
+        # print("These are the self.row_indices", self.row_indices)
         self._save_final_metadata(processing_time)
 
     # def _aggregate_results(self, results: List[Dict]):
