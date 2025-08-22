@@ -451,7 +451,7 @@ class AtlasMuonDataModule(LightningDataModule):
             print(f"Created test dataset with {len(self.test_dataset):,} events")
 
     def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool, 
-    prefetch_factor: int = 6):
+    prefetch_factor: int = 12):
         return DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
