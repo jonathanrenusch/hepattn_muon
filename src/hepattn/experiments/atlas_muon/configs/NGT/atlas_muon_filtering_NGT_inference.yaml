@@ -5,15 +5,19 @@ data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
 
-  # test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
-  test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_validation_data_150K_processed
+  test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
+  # test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_validation_data_150K_processed
+  # test_dir: /shared/tracking/data/ml_test_data_150K_processed
   # test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  num_workers: 100
+  train_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
+  val_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
+
+  num_workers: 200
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 20
+  batch_size: 1
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -63,7 +67,7 @@ trainer:
   accelerator: gpu
   devices: [0]
   precision: bf16-mixed
-  log_every_n_steps: 50
+  log_every_n_steps: 10
   default_root_dir: logs
   gradient_clip_val: 1.0
   enable_progress_bar: True
@@ -93,7 +97,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
-        refresh_rate: 50
+        refresh_rate: 10
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/acc
@@ -161,7 +165,7 @@ model:
                     input_name: hit
                     fields:
                       - phi
-                      - r
+                      # - r
                     # TODO: Check wether you might want to add more here
                     dim: *dim
                     scale: 0.1

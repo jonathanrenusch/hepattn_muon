@@ -4,19 +4,19 @@ name: TRK-v0-full
 
 data:
   
-  train_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
-  val_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_validation_data_150K_processed
+  train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
+  val_dir: /shared/tracking/data/ml_validation_data_150K_processed
   test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  # hit_eval_train: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_train_PU200_processed_eval.h5
-  # hit_eval_val: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_valid_PU200_processed_eval.h5
+  hit_eval_train: /shared/tracking/dat/1_5Mio_test_training/epoch=049-val_acc=0.99711_ml_training_data_1_2Mio_processed_eval.h5
+  hit_eval_val: /shared/tracking/data/1_5Mio_test_training/epoch=049-val_acc=0.99711_ml_validation_data_150K_processed_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
-  num_workers: 50
+  num_workers: 300
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 8  
+  batch_size: 400
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -64,7 +64,7 @@ trainer:
   max_epochs: 50
   accelerator: gpu
   # devices: [2, 3]
-  devices: [0]
+  devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
   default_root_dir: logs
