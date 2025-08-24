@@ -5,13 +5,13 @@ data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
 
-  test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
+  test_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
   # test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_validation_data_150K_processed
   # test_dir: /shared/tracking/data/ml_test_data_150K_processed
   # test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  train_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_training_data_1_2Mio_processed
-  val_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
+  train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
+  val_dir: /shared/tracking/data/ml_test_data_150K_processed
 
   num_workers: 200
   num_train: -1

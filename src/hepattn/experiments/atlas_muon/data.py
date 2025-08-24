@@ -255,6 +255,7 @@ class AtlasMuonDataset(Dataset):
             'spacePoint_stationPhi': hits_dict['spacePoint_stationPhi'],
             'spacePoint_stationEta': hits_dict['spacePoint_stationEta'],
             'spacePoint_technology': hits_dict['spacePoint_technology'],
+            'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'],
             # Add truth information
             'spacePoint_truthLink': hits_dict['spacePoint_truthLink'],
         }
@@ -451,7 +452,7 @@ class AtlasMuonDataModule(LightningDataModule):
             print(f"Created test dataset with {len(self.test_dataset):,} events")
 
     def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool, 
-    prefetch_factor: int = 128):
+    prefetch_factor: int = 8):
         return DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
