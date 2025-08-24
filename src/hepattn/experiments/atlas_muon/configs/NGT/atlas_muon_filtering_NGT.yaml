@@ -14,12 +14,12 @@ data:
   val_dir: /shared/tracking/data/ml_validation_data_150K_processed
   test_dir: /eos/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  num_workers: 200
+  num_workers: 20
   num_train: -1
   num_val: -1
   num_test: -1
   # batch_size: 2
-  batch_size: 80
+  batch_size: 40
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -67,7 +67,7 @@ trainer:
   # Training configuration
   max_epochs: 50
   accelerator: gpu
-  devices: -1
+  devices: [1]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -159,7 +159,7 @@ model:
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 22  # Number of input features for ATLAS muon data
+                    input_size: 22 # Number of input features for ATLAS muon data
                     output_size: &dim 256
                     norm_input: true
                 posenc:
@@ -181,7 +181,8 @@ model:
           window_size: 512  # Smaller window size for fewer hits per event
           window_wrap: true
           hybrid_norm: true
-          hybrid_norm: true
+          attn_kwargs:
+            num_heads: 16
 
       tasks:
         class_path: torch.nn.ModuleList
