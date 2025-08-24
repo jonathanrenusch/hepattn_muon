@@ -255,7 +255,8 @@ class AtlasMuonDataset(Dataset):
             'spacePoint_stationPhi': hits_dict['spacePoint_stationPhi'],
             'spacePoint_stationEta': hits_dict['spacePoint_stationEta'],
             'spacePoint_technology': hits_dict['spacePoint_technology'],
-            'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'],
+            'spacePoint_technology': hits_dict['spacePoint_technology'],
+            # 'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'],
             # Add truth information
             'spacePoint_truthLink': hits_dict['spacePoint_truthLink'],
         }

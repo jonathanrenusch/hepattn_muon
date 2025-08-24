@@ -14,7 +14,7 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 40  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 10  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -42,7 +42,7 @@ data:
       - spacePoint_layer
       - spacePoint_stationPhi
       - spacePoint_stationEta
-      - spacePoint_stationIndex
+      # - spacePoint_stationIndex
       - spacePoint_technology
       # Add derived hit fields
       - r  # Radial distance
@@ -62,8 +62,8 @@ trainer:
   # Training configuration
   max_epochs: 50
   accelerator: gpu
-  # devices: [1]
-  devices: -1
+  devices: [1]
+  # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -146,7 +146,7 @@ model:
                   - spacePoint_stationPhi
                   - spacePoint_stationEta
                   - spacePoint_technology
-                  - spacePoint_stationIndex
+                  # - spacePoint_stationIndex
                   # Add derived hit fields
                   - r  # Radial distance
                   - s  # 3D distance
@@ -155,7 +155,7 @@ model:
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 22  # Number of input features for ATLAS muon data
+                    input_size: 21  # Number of input features for ATLAS muon data
                     output_size: &dim 256
                     norm_input: true
                 posenc:
