@@ -20,12 +20,12 @@ def is_valid_file(path):
     return path.is_file() and path.stat().st_size > 0
 
 class ParallelRootFilter:
-    def __init__(self, input_dir: str, output_dir: str, num_events_per_file: int,
+    def __init__(self, input_dir: str, output_dir: str, expected_num_events_per_file: int,
                  pt_threshold: float, eta_threshold: float, num_hits_threshold: int, 
                  max_events: int = -1, num_workers: int = None):
         self.input_dir = input_dir
         self.output_dir = output_dir
-        self.num_events_per_file = num_events_per_file
+        self.expected_num_events_per_file = expected_num_events_per_file
         self.pt_threshold = pt_threshold
         self.eta_threshold = eta_threshold
         self.num_hits_threshold = num_hits_threshold
@@ -137,7 +137,7 @@ class ParallelRootFilter:
                 'pt_threshold': self.pt_threshold,
                 'eta_threshold': self.eta_threshold,
                 'num_hits_threshold': self.num_hits_threshold,
-                'num_events_per_file': self.num_events_per_file,
+                'expected_num_events_per_file': self.expected_num_events_per_file,
                 'max_events': self.max_events
             },
             'processed_files': [str(file_path) for file_path in self.files],
@@ -201,7 +201,7 @@ class ParallelRootFilter:
         for worker_id, file_chunk in enumerate(file_chunks):
             if file_chunk:  # Only create args for workers with files
                 args = (
-                    worker_id, file_chunk, self.output_dir, self.num_events_per_file,
+                    worker_id, file_chunk, self.output_dir, self.expected_num_events_per_file,
                     self.pt_threshold, self.eta_threshold, self.num_hits_threshold,
                     self.max_events, self.hit_features, self.track_features
                 )
@@ -330,7 +330,7 @@ class ParallelRootFilter:
                 'pt_threshold': self.pt_threshold,
                 'eta_threshold': self.eta_threshold,
                 'num_hits_threshold': self.num_hits_threshold,
-                'num_events_per_file': self.num_events_per_file,
+                'expected_number_of_events_per_file': self.expected_num_events_per_file,
                 'max_events': self.max_events
             },
             'processed_files': [str(file_path) for file_path in self.files],
@@ -375,7 +375,7 @@ class ParallelRootFilter:
 
 # def process_worker_files(args: Tuple) -> Dict:
 #     """Worker function to process a subset of files"""
-#     (worker_id, file_chunk, output_dir, num_events_per_file, pt_threshold, 
+#     (worker_id, file_chunk, output_dir, expected_num_events_per_file, pt_threshold, 
 #      eta_threshold, num_hits_threshold, max_events, hit_features, track_features) = args
     
 #     if not file_chunk:
@@ -536,7 +536,7 @@ class ParallelRootFilter:
 
 def process_worker_files(args: Tuple) -> Dict:
     """Worker function to process a subset of files"""
-    (worker_id, file_chunk, output_dir, num_events_per_file, pt_threshold, 
+    (worker_id, file_chunk, output_dir, expected_num_events_per_file, pt_threshold, 
      eta_threshold, num_hits_threshold, max_events, hit_features, track_features) = args
     
     if not file_chunk:
@@ -658,6 +658,7 @@ def process_worker_files(args: Tuple) -> Dict:
                     
         except Exception as e:
             print(f"Worker {worker_id}: Error processing file {root_file}: {e}")
+            excluded_events_count += expected_num_events_per_file  # Count this file as an excluded event
             continue
         
         # Save file data if we have any valid events
@@ -766,7 +767,7 @@ def main():
     parser = argparse.ArgumentParser(description="Prefilter ATLAS muon events into batched HDF5 files using parallel processing.")
     parser.add_argument("-i", "--input_dir", type=str, required=True, help="Directory containing input root files")
     parser.add_argument("-o", "--output_dir", type=str, required=True, help="Directory to save output HDF5 files")
-    parser.add_argument("-n", "--num_events_per_file", type=int, default=10000, help="Number of events per file")
+    parser.add_argument("-n", "--expected_num_events_per_file", type=int, default=2500, help="Expected number of events per root file")
     parser.add_argument("-pt", "--pt_threshold", type=float, default=5.0, help="Minimum pT threshold")
     parser.add_argument("-eta", "--eta_threshold", type=float, default=2.7, help="Maximum |eta| threshold")
     parser.add_argument("-nh", "--num_hits_threshold", type=int, default=3, help="Minimum number of hits")
@@ -781,7 +782,7 @@ def main():
     filter = ParallelRootFilter(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
-        num_events_per_file=args.num_events_per_file,
+        expected_num_events_per_file=args.expected_num_events_per_file,
         pt_threshold=args.pt_threshold,
         eta_threshold=args.eta_threshold,
         num_hits_threshold=args.num_hits_threshold,
