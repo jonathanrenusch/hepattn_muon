@@ -115,7 +115,7 @@ def generate_plots_for_file(
     # Generate 10 random event displays: 
     print("\n--- Generating random event displays ---")
     # picking 10 random numbers from the range of available events
-    random_indices = np.random.choice(num_events, size=100, replace=False)
+    random_indices = np.random.choice(num_events, size=10, replace=False)
     # make new directory for random events
     (file_output_dir / "events").mkdir(parents=True, exist_ok=True)
     for idx in random_indices:
@@ -204,7 +204,7 @@ def main() -> None:
         # ... any other kwargs
     )
     dataset = AtlasMuonDataset(
-        dataset_dir=H5_FILEPATH[0],
+        dirpath=H5_FILEPATH[0],
         inputs=inputs,
         targets=targets,
     )
