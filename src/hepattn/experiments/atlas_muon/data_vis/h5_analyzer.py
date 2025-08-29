@@ -354,7 +354,7 @@ class h5Analyzer:
                     valid_values = value[valid_mask]
                     if len(valid_values) > 0:
                         collected_data[key].extend(valid_values.cpu().numpy().flatten())
-            
+
             # Process targets (fix the typo "tragets" -> "targets")
             for key, value in targets.items():
                 if key.endswith('_valid') or key not in HISTOGRAM_SETTINGS["tragets"]:
@@ -420,7 +420,26 @@ class h5Analyzer:
             # except Exception as e:
             #     print(f"ERROR processing feature '{feature_name}': {str(e)}")
             #     results[feature_name] = False
-                
+
+        # if "particle_truthMuon_pt" in collected_data and "particle_truthMuon_q" in collected_data:
+        #     feature_name = "q over p_t"
+        #     pt_values = np.array(collected_data["particle_truthMuon_pt"])
+        #     q_values = np.array(collected_data["particle_truthMuon_q"])
+            # data_array = q_values / pt_values
+            # print(data_array)
+            # print(data_array.shape)
+            # print(np.unique(data_array))
+            # success = self._create_hep_style_histogram(
+            #     data_array,
+            #     feature_name,
+            #     {"bins": 50,
+            #     "range": (np.min(data_array), np.max(data_array)),
+            #     "log_y": True},
+            #     output_path
+            # )
+            # # Process pt and q values together
+            # pass
+
         return results
     
     def _create_hep_style_histogram(

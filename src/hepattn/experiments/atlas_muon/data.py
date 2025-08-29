@@ -256,7 +256,11 @@ class AtlasMuonDataset(Dataset):
             'spacePoint_stationEta': hits_dict['spacePoint_stationEta'],
             'spacePoint_technology': hits_dict['spacePoint_technology'],
             'spacePoint_technology': hits_dict['spacePoint_technology'],
+<<<<<<< HEAD
             'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'],
+=======
+            'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'] * 0.1,
+>>>>>>> db8c427296a1b1cd727efc9ad69d22e20846fbda
             # Add truth information
             'spacePoint_truthLink': hits_dict['spacePoint_truthLink'],
         }
@@ -325,6 +329,7 @@ class AtlasMuonDataset(Dataset):
             'truthMuon_eta': tracks_dict['truthMuon_eta'],
             'truthMuon_phi': tracks_dict['truthMuon_phi'],
             'truthMuon_q': tracks_dict['truthMuon_q'],
+            "truthMuon_qpt": tracks_dict['truthMuon_q'] / tracks_dict['truthMuon_pt'],
         }
         return hits, particles, num_hits, num_tracks 
     
