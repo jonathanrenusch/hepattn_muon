@@ -40,6 +40,7 @@ data:
       - spacePoint_layer
       - spacePoint_stationPhi
       - spacePoint_stationEta
+      - spacePoint_stationIndex
       - spacePoint_technology
       # Add derived hit fields
       - r  # Radial distance
@@ -142,6 +143,7 @@ model:
                   - spacePoint_layer
                   - spacePoint_stationPhi
                   - spacePoint_stationEta
+                  - spacePoint_stationIndex
                   - spacePoint_technology
                   # Add derived hit fields
                   - r  # Radial distance
