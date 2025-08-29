@@ -18,7 +18,7 @@ class AtlasMuonFilter(ModelWrapper):
     ):
         super().__init__(name, model, lrs_config, optimizer)
 
-    def log_custom_metrics(self, preds, targets, stage):
+    def log_custom_metrics(self, preds, targets, stage, outputs=None):
         batch_size = targets["hit_on_valid_particle"].shape[0]
         # print("This is batch_size,", batch_size)
         pred = preds["final"]["hit_filter"]["hit_on_valid_particle"][targets["hit_valid"]]
@@ -29,19 +29,21 @@ class AtlasMuonFilter(ModelWrapper):
         # true = targets["hit_valid"]
         # print("num of true particles:", true.sum())
         # print("num of false particles:", (~true).sum())
-        # print("num of predicted particles:", pred.sum())
+        # print("num of predicted predictions:", pred.sum())
         # print("target keys:", targets.keys())
 
-        # # Get the raw probabilities for AUC calculation
-        # pred_probs = preds["final"]["hit_filter"]["hit_on_valid_particle_logits"]
-        
         tp = (pred * true).sum()
         tn = ((~pred) * (~true)).sum()
 
-        # # Calculate AUC
-        # auc = auroc(pred_probs.flatten(), true.flatten().long(), task="binary")
-        # print("pred.shape", pred.shape)
-        # print("true.shape", true.shape)
+        # Calculate AUC if we have access to outputs (raw logits)
+        auc = None
+        if outputs is not None:
+            # Get the raw logits from outputs
+            pred_logits = outputs["final"]["hit_filter"]["hit_logit"][targets["hit_valid"]]
+            # Convert logits to probabilities
+            pred_probs = torch.sigmoid(pred_logits)
+            # Calculate AUC
+            auc = auroc(pred_probs.flatten(), true.flatten().long(), task="binary")
 
         metrics = {
             # Log quantities based on the number of hits
@@ -59,8 +61,12 @@ class AtlasMuonFilter(ModelWrapper):
             "valid_precision": tp / pred.sum(),
             "noise_recall": tn / (~true).sum(),
             "noise_precision": tn / (~pred).sum(),
-            # "auc": auc,
         }
+        
+        # Add AUC if calculated
+        if auc is not None:
+            metrics["auc"] = auc
+        
         # print("Batch size:", pred.shape[0])
         # Now actually log the metrics
         for metric_name, metric_value in metrics.items():

@@ -1,20 +1,22 @@
 seed_everything: 42
-name: ATLAS-Muon-1H100
-ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-v1_20250825-T222903/ckpts/epoch=022-val_acc=0.99710.ckpt
+name: ATLAS-Muon-6H100-600K
+# ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-v1_20250825-T222903/ckpts/epoch=022-val_acc=0.99710.ckpt
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
   # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
   # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
   # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_multi_processed
-  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
-  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
+  # train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
+  # val_dir: /shared/tracking/data/ml_validation_data_150K_processed
+  train_dir: /scratch/ml_training_1_35Mio_hdf5
+  val_dir: /scratch/ml_validation_data_75K_hdf5
 
   num_workers: 100
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 10  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 60  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -42,7 +44,7 @@ data:
       - spacePoint_layer
       - spacePoint_stationPhi
       - spacePoint_stationEta
-      # - spacePoint_stationIndex
+      - spacePoint_stationIndex
       - spacePoint_technology
       # Add derived hit fields
       - r  # Radial distance
@@ -61,9 +63,10 @@ data:
 trainer:
   # Training configuration
   max_epochs: 50
+  num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [1]
-  # devices: -1
+  # devices: [0]
+  devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -74,7 +77,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project: atlas_muon_filtering
+      project_name: atlas_muon_filtering
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -82,9 +85,9 @@ trainer:
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
       init_args:
-        monitor: val/acc
+        monitor: val/auc
         mode: max
-        save_top_k: 1
+        save_top_k: 5
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
@@ -98,7 +101,7 @@ trainer:
         refresh_rate: 50
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
-        monitor: val/acc
+        monitor: val/auc
         patience: 15 
         min_delta: 0.0
         mode: max
@@ -146,7 +149,7 @@ model:
                   - spacePoint_stationPhi
                   - spacePoint_stationEta
                   - spacePoint_technology
-                  # - spacePoint_stationIndex
+                  - spacePoint_stationIndex
                   # Add derived hit fields
                   - r  # Radial distance
                   - s  # 3D distance
@@ -155,7 +158,7 @@ model:
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 21  # Number of input features for ATLAS muon data
+                    input_size: 22  # Number of input features for ATLAS muon data
                     output_size: &dim 256
                     norm_input: true
                 posenc:
@@ -190,5 +193,5 @@ model:
                 input_object: hit
                 target_field: on_valid_particle
                 dim: *dim
-                threshold: 0.05
+                threshold: 0.01
                 loss_fn: bce

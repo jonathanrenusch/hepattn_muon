@@ -67,13 +67,19 @@ class ModelWrapper(LightningModule):
             if task_metrics:
                 self.log_dict({f"{stage}/final_{task.name}_{k}": v for k, v in task_metrics.items()})
 
-    def log_metrics(self, preds, targets, stage):
+    def log_metrics(self, preds, targets, stage, outputs=None):
         # First log any task metrics
         self.log_task_metrics(preds, targets, stage)
 
         # Log any custom metrics implemented by subclass
         if hasattr(self, "log_custom_metrics"):
-            self.log_custom_metrics(preds, targets, stage)
+            # Try to pass outputs if the method accepts it
+            import inspect
+            sig = inspect.signature(self.log_custom_metrics)
+            if 'outputs' in sig.parameters:
+                self.log_custom_metrics(preds, targets, stage, outputs)
+            else:
+                self.log_custom_metrics(preds, targets, stage)
 
     def training_step(self, batch, batch_idx):
         inputs, targets = batch
@@ -88,7 +94,7 @@ class ModelWrapper(LightningModule):
         # Get the predictions from the model
         if batch_idx % self.trainer.log_every_n_steps == 0:  # avoid calling predict if possible
             preds = self.predict(outputs)
-            self.log_metrics(preds, targets, "train")
+            self.log_metrics(preds, targets, "train", outputs)
 
         # Use Jacobian Descent for Multi Task Learning https://arxiv.org/abs/2406.16232
         if self.mtl:
@@ -109,7 +115,7 @@ class ModelWrapper(LightningModule):
 
         # Get the predictions from the model
         preds = self.model.predict(outputs)
-        self.log_metrics(preds, targets, "val")
+        self.log_metrics(preds, targets, "val", outputs)
 
         return total_loss
 
