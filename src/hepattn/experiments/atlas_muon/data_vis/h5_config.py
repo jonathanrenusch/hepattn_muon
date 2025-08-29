@@ -8,8 +8,8 @@ from networkx import hits
 
 H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/gut_check_test_data"
 # H5_FILEPATH = None
-HIT_EVAL_FILEPATH = None
-# HIT_EVAL_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_gut_check_test_data_eval.h5"
+# HIT_EVAL_FILEPATH = None
+HIT_EVAL_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_gut_check_test_data_eval.h5"
 # H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed",
 # HIT_EVAL_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_valid_PU200_processed_eval.h5"
 # H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed",
@@ -124,7 +124,8 @@ HISTOGRAM_SETTINGS = {"hits":
                          "particle_truthMuon_pt": {"bins": 100, "range": (0, 200), "scale_factor": 1.0},
                          "particle_truthMuon_eta": {"bins": 100, "range": (-3, 3), "scale_factor": 1.0},
                          "particle_truthMuon_phi": {"bins": 100, "range": (-3.2, 3.2), "scale_factor": 1.0},
-                         "particle_truthMuon_q": {"bins": None, "range": (-2, 2), "scale_factor": 1.0}
+                         "particle_truthMuon_q": {"bins": None, "range": (-2, 2), "scale_factor": 1.0},
+                         "particle_truthMuon_qpt": {"bins": 100, "range": (-0.25, 0.25), "scale_factor": 1.0}
                         },
 }
 

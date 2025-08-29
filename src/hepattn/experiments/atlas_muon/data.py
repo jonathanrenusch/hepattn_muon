@@ -325,6 +325,7 @@ class AtlasMuonDataset(Dataset):
             'truthMuon_eta': tracks_dict['truthMuon_eta'],
             'truthMuon_phi': tracks_dict['truthMuon_phi'],
             'truthMuon_q': tracks_dict['truthMuon_q'],
+            "truthMuon_qpt": tracks_dict['truthMuon_q'] / tracks_dict['truthMuon_pt'],
         }
         return hits, particles, num_hits, num_tracks 
     

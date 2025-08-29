@@ -54,6 +54,7 @@ data:
       - truthMuon_eta
       - truthMuon_phi
       - truthMuon_q
+      - truthMuon_qpt
 
 trainer:
   # Training configuration
