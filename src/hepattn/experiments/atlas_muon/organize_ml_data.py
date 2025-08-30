@@ -34,11 +34,11 @@ def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Organize HEP ROOT files for machine learning training.')
     parser.add_argument('--source-dir', '-s', type=str,
-                        default='/eos/user/j/jorenusc/tracking/data_gen/PU200FullData_preMDTTrack',
+                        default='/eos/project/e/end-to-end-muon-tracking/tracking/data/PU200_full_data/',
                         help='Source directory containing the ROOT files')
     parser.add_argument('--dry-run', action='store_true',
                         help="Don't move files; just print actions")
-    parser.add_argument('--events-per-file', '-e', type=int, default=2500,
+    parser.add_argument('--events-per-file', '-e', type=int, default=2000,
                         help='Number of events per ROOT file (integrated into target directory names)')
     args = parser.parse_args()
 

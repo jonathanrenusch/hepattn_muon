@@ -767,7 +767,7 @@ def main():
     parser = argparse.ArgumentParser(description="Prefilter ATLAS muon events into batched HDF5 files using parallel processing.")
     parser.add_argument("-i", "--input_dir", type=str, required=True, help="Directory containing input root files")
     parser.add_argument("-o", "--output_dir", type=str, required=True, help="Directory to save output HDF5 files")
-    parser.add_argument("-n", "--expected_num_events_per_file", type=int, default=2500, help="Expected number of events per root file")
+    parser.add_argument("-n", "--expected_num_events_per_file", type=int, default=2000, help="Expected number of events per root file")
     parser.add_argument("-pt", "--pt_threshold", type=float, default=5.0, help="Minimum pT threshold")
     parser.add_argument("-eta", "--eta_threshold", type=float, default=2.7, help="Maximum |eta| threshold")
     parser.add_argument("-nh", "--num_hits_threshold", type=int, default=3, help="Minimum number of hits")

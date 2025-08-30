@@ -255,16 +255,10 @@ class AtlasMuonDataset(Dataset):
             'spacePoint_stationPhi': hits_dict['spacePoint_stationPhi'],
             'spacePoint_stationEta': hits_dict['spacePoint_stationEta'],
             'spacePoint_technology': hits_dict['spacePoint_technology'],
-            'spacePoint_technology': hits_dict['spacePoint_technology'],
-<<<<<<< HEAD
-            'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'],
-=======
             'spacePoint_stationIndex': hits_dict['spacePoint_stationIndex'] * 0.1,
->>>>>>> db8c427296a1b1cd727efc9ad69d22e20846fbda
             # Add truth information
             'spacePoint_truthLink': hits_dict['spacePoint_truthLink'],
         }
-        
         # Add derived hit fields (vectorized numpy operations)
         hits["r"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2)
 
