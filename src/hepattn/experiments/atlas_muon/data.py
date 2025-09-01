@@ -173,6 +173,7 @@ class AtlasMuonDataset(Dataset):
         # for key in targets.keys():
         #     print(key, targets[key])
         # print("sample_id", targets["sample_id"])
+        # inputs["spacePoint_truthLink"] = torch.from_numpy(hits["spacePoint_truthLink"]).unsqueeze(0)
         return inputs, targets
 
     def load_event(self, idx):

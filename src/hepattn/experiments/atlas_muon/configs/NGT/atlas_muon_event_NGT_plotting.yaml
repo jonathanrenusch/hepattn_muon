@@ -1,22 +1,22 @@
 seed_everything: 42
-name: ATLAS-Muon-6H100-600K
-# ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-v1_20250825-T222903/ckpts/epoch=022-val_acc=0.99710.ckpt
+name: ATLAS-Muon-Inference
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-6H100-600K_20250831-T195418/ckpts/epoch=021-val_auc=0.99969.ckpt
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
-  # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_multi_processed
-  # train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
-  # val_dir: /shared/tracking/data/ml_validation_data_150K_processed
+  test_dir: /scratch/ml_training_data_2694000_hdf5
+  # test_dir: /scratch/ml_validation_data_144000_hdf5
+  # test_dir: /scratch/ml_test_data_156000_hdf5
+
+
   train_dir: /scratch/ml_training_data_2694000_hdf5
   val_dir: /scratch/ml_validation_data_144000_hdf5
 
-  num_workers: 100
+  num_workers: 10
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 50  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 1  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -51,22 +51,24 @@ data:
       - s  # 3D distance
       - theta  # Polar angle
       - phi  # Azimuthal angle
+    plotting:
+      - spacePoint_truthLink
   targets:
     hit:
       - on_valid_particle
-    # particle:
-    #   - truthMuon_pt
-    #   - truthMuon_eta
-    #   - truthMuon_phi
-    #   - truthMuon_q
+    particle:
+      - truthMuon_pt
+      - truthMuon_eta
+      - truthMuon_phi
+      - truthMuon_q
 
 trainer:
   # Training configuration
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  # devices: [0]
-  devices: -1
+  devices: [0]
+  # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -91,7 +93,7 @@ trainer:
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
-        write_outputs: false
+        write_outputs: true
         write_preds: True
         write_targets: false
         write_losses: false

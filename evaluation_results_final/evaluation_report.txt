@@ -1,0 +1,35 @@
+ATLAS Muon Hit Filter Evaluation Report
+==================================================
+
+Total hits analyzed: 6,828,399
+True muon hits: 52,562 (0.8%)
+Noise hits: 6,775,837 (99.2%)
+
+ROC AUC Score: 0.9992
+
+Target Efficiency Summary:
+------------------------------
+Target Efficiency 0.96:
+  Threshold used: -0.9844
+  Achieved Efficiency: 0.960
+  Overall Purity: 0.794
+
+Target Efficiency 0.97:
+  Threshold used: -1.6094
+  Achieved Efficiency: 0.970
+  Overall Purity: 0.756
+
+Target Efficiency 0.98:
+  Threshold used: -2.5312
+  Achieved Efficiency: 0.980
+  Overall Purity: 0.681
+
+Target Efficiency 0.99:
+  Threshold used: -4.1875
+  Achieved Efficiency: 0.990
+  Overall Purity: 0.535
+
+Target Efficiency 0.995:
+  Threshold used: -5.9062
+  Achieved Efficiency: 0.995
+  Overall Purity: 0.407
