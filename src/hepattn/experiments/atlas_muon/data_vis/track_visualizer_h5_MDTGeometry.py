@@ -476,28 +476,32 @@ class h5TrackVisualizerMDTGeometry:
         --------
         matplotlib.figure.Figure : The figure object
         """
-        # ...existing code...
-        fig = self.plot_muon_tracks(event_index)
+        try:
+            # Plot the main figure
+            fig = self.plot_muon_tracks(event_index)
 
-        if fig is not None and save_path is not None:
-            fig.savefig(save_path, dpi=300, bbox_inches="tight")
-            print(f"Figure saved to: {save_path}")
-        # Background plots
-        fig_background = self.plot_muon_tracks(event_index, just_background=True)
-        # Save background plot if requested
-        # if fig_background is not None and save_path is not None:
-        #     print("This is save path!", save_path)
-        #     save_path = save_path.replace(".png", "_background.png")
-        #     fig_background.savefig(save_path, dpi=300, bbox_inches="tight")
-        #     # Modify save path for background plot
-        #     print(f"Figure saved to: {save_path}")
-        if fig_background is not None and save_path is not None:
-            save_path_bg = str(save_path).replace(".png", "_background.png")
-            fig_background.savefig(save_path_bg, dpi=300, bbox_inches="tight")
-            print(f"Figure saved to: {save_path_bg}")
+            if fig is not None and save_path is not None:
+                fig.savefig(save_path, dpi=300, bbox_inches="tight")
+                print(f"Figure saved to: {save_path}")
+                # Close the figure to free memory
+                plt.close(fig)
+            
+            # Background plots
+            fig_background = self.plot_muon_tracks(event_index, just_background=True)
+            
+            # Save background plot if requested
+            if fig_background is not None and save_path is not None:
+                save_path_bg = str(save_path).replace(".png", "_background.png")
+                fig_background.savefig(save_path_bg, dpi=300, bbox_inches="tight")
+                print(f"Background figure saved to: {save_path_bg}")
+                # Close the background figure to free memory
+                plt.close(fig_background)
 
-
-        return fig
+            return fig
+            
+        except Exception as e:
+            print(f"Error in plot_and_save_event: {e}")
+            return None
 
     # ...existing code...
 

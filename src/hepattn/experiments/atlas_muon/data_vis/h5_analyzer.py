@@ -124,6 +124,9 @@ class h5Analyzer:
         if output_plot_path:
             plt.savefig(output_plot_path, dpi=300, bbox_inches="tight")
             print(f"Plot saved to: {output_plot_path}")
+        
+        # Close the figure to free memory
+        plt.close()
 
         # plt.show()
 
@@ -297,6 +300,9 @@ class h5Analyzer:
         if output_plot_path:
             plt.savefig(output_plot_path, dpi=300, bbox_inches="tight")
             print(f"Plot saved to: {output_plot_path}")
+        
+        # Close the figure to free memory
+        plt.close()
 
         # plt.show()
 

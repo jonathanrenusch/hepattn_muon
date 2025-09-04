@@ -1,0 +1,13 @@
+nh_total_pre: 6900.52445
+nh_total_post: 79.507625
+nh_pred_true: 79.507625
+nh_pred_false: 6821.016825
+nh_valid_pre: 39.609475
+nh_valid_post: 39.38185
+nh_noise_pre: 6860.914975
+nh_noise_post: 40.125775
+acc: 0.9940597697272897
+valid_recall: 0.9948277342522517
+valid_precision: 0.5438671066029982
+noise_recall: 0.994054043957591
+noise_precision: 0.9999656691715121

@@ -454,6 +454,9 @@ class AtlasMuonDataModule(LightningDataModule):
 
     def get_dataloader(self, stage: str, dataset: AtlasMuonDataset, shuffle: bool, 
     prefetch_factor: int = 8):
+        # Set prefetch_factor to None when num_workers=0 to avoid ValueError
+        actual_prefetch_factor = None if self.num_workers == 0 else prefetch_factor
+        
         return DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
@@ -464,7 +467,7 @@ class AtlasMuonDataModule(LightningDataModule):
             ),
             sampler=None,
             num_workers=self.num_workers,
-            prefetch_factor=prefetch_factor,
+            prefetch_factor=actual_prefetch_factor,
             shuffle=shuffle,
             pin_memory=self.pin_memory,
         )

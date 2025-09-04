@@ -126,10 +126,21 @@ def generate_plots_for_file(
     (file_output_dir / "events").mkdir(parents=True, exist_ok=True)
     for idx in random_indices:
         print(f"Processing random event {idx + 1}/{num_events}")
-        track_analyzer.plot_and_save_event(
-            event_index=idx,
-            save_path=file_output_dir / "events" / f"{config_key}_random_event_{idx}.png",
-        )
+        try:
+            track_analyzer.plot_and_save_event(
+                event_index=idx,
+                save_path=file_output_dir / "events" / f"{config_key}_random_event_{idx}.png",
+            )
+            # Force matplotlib cleanup after each event
+            import matplotlib.pyplot as plt
+            plt.close('all')
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+        except Exception as e:
+            print(f"Error processing event {idx}: {e}")
+            continue
 
 
 
@@ -193,17 +204,17 @@ def main() -> None:
         targets_eval = {k: list(v) for k, v in targets.items()}  # Deep copy
         
         datamodule_eval = AtlasMuonDataModule(
-            train_dir=H5_FILEPATH,
-            val_dir=H5_FILEPATH,
-            test_dir=H5_FILEPATH,
-            num_workers=10,  # Enable multiprocessing for eval
-            num_train=args.num_events,
-            num_val=-args.num_events,
-            num_test=args.num_events,
-            batch_size=1,
-            inputs=inputs_eval,
-            targets=targets_eval,
-        )
+        train_dir=H5_FILEPATH,
+        val_dir=H5_FILEPATH,
+        test_dir=H5_FILEPATH,
+        num_workers=10,  # Use multiprocessing for better performance
+        num_train=args.num_events,
+        num_val=-args.num_events,
+        num_test=args.num_events,
+        batch_size=1,
+        inputs=inputs_eval,
+        targets=targets_eval,
+    )
         datamodule_eval.setup("test")
         test_dataloader_eval = datamodule_eval.test_dataloader()
 
@@ -226,37 +237,80 @@ def main() -> None:
             "noise_precision": [],
         }
 
-        for idx, batch in tqdm(enumerate(test_dataloader_eval), total=args.num_events, desc="Collecting feature data"):
-            inputs_batch, targets_batch = batch
-
-            with h5py.File(HIT_EVAL_FILEPATH, "r") as hit_eval_file:
-                pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
-                pred = torch.from_numpy(pred).to(targets_batch["hit_on_valid_particle"].device)
-                if pred.dtype != torch.bool:
-                    pred = pred.bool()
-
-            true = targets_batch["hit_on_valid_particle"][targets_batch["hit_valid"]]
-            tp = (pred & true).sum()
-            tn = ((~pred) & (~true)).sum()
-
+        # Process metrics in smaller batches to avoid memory accumulation
+        batch_size_metrics = 1000  # Process 1000 events at a time
+        
+        for batch_start in range(0, args.num_events, batch_size_metrics):
+            batch_end = min(batch_start + batch_size_metrics, args.num_events)
+            print(f"Processing metrics batch {batch_start}-{batch_end}/{args.num_events}")
+            
+            # Temporary storage for this batch
             batch_metrics = {
-                "nh_total_pre": float(pred.numel()),
-                "nh_total_post": float(pred.sum().item()),
-                "nh_pred_true": pred.float().sum().item(),
-                "nh_pred_false": (~pred).float().sum().item(),
-                "nh_valid_pre": true.float().sum().item(),
-                "nh_valid_post": (pred & true).float().sum().item(),
-                "nh_noise_pre": (~true).float().sum().item(),
-                "nh_noise_post": (pred & ~true).float().sum().item(),
-                "acc": (pred == true).float().mean().item(),
-                "valid_recall": (tp / true.sum()).item() if true.sum() > 0 else float('nan'),
-                "valid_precision": (tp / pred.sum()).item() if pred.sum() > 0 else float('nan'),
-                "noise_recall": (tn / (~true).sum()).item() if (~true).sum() > 0 else float('nan'),
-                "noise_precision": (tn / (~pred).sum()).item() if (~pred).sum() > 0 else float('nan'),
+                "nh_total_pre": [],
+                "nh_total_post": [],
+                "nh_pred_true": [],
+                "nh_pred_false": [],
+                "nh_valid_pre": [],
+                "nh_valid_post": [],
+                "nh_noise_pre": [],
+                "nh_noise_post": [],
+                "acc": [],
+                "valid_recall": [],
+                "valid_precision": [],
+                "noise_recall": [],
+                "noise_precision": [],
             }
 
+            # Pre-open the H5 file to avoid repeated opening/closing
+            with h5py.File(HIT_EVAL_FILEPATH, "r") as hit_eval_file:
+                for idx, batch in enumerate(tqdm(test_dataloader_eval, 
+                                                total=batch_end - batch_start, 
+                                                desc=f"Processing batch {batch_start//batch_size_metrics + 1}")):
+                    
+                    if idx < batch_start:
+                        continue
+                    if idx >= batch_end:
+                        break
+                        
+                    inputs_batch, targets_batch = batch
+
+                    pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
+                    pred = torch.from_numpy(pred).to(targets_batch["hit_on_valid_particle"].device)
+                    if pred.dtype != torch.bool:
+                        pred = pred.bool()
+
+                    true = targets_batch["hit_on_valid_particle"][targets_batch["hit_valid"]]
+                    tp = (pred & true).sum()
+                    tn = ((~pred) & (~true)).sum()
+
+                    event_metrics = {
+                        "nh_total_pre": float(pred.numel()),
+                        "nh_total_post": float(pred.sum().item()),
+                        "nh_pred_true": pred.float().sum().item(),
+                        "nh_pred_false": (~pred).float().sum().item(),
+                        "nh_valid_pre": true.float().sum().item(),
+                        "nh_valid_post": (pred & true).float().sum().item(),
+                        "nh_noise_pre": (~true).float().sum().item(),
+                        "nh_noise_post": (pred & ~true).float().sum().item(),
+                        "acc": (pred == true).float().mean().item(),
+                        "valid_recall": (tp / true.sum()).item() if true.sum() > 0 else float('nan'),
+                        "valid_precision": (tp / pred.sum()).item() if pred.sum() > 0 else float('nan'),
+                        "noise_recall": (tn / (~true).sum()).item() if (~true).sum() > 0 else float('nan'),
+                        "noise_precision": (tn / (~pred).sum()).item() if (~pred).sum() > 0 else float('nan'),
+                    }
+
+                    for k, v in event_metrics.items():
+                        batch_metrics[k].append(v)
+            
+            # Compute batch averages and add to global metrics
             for k, v in batch_metrics.items():
-                metrics_lists[k].append(v)
+                if k not in metrics_lists:
+                    metrics_lists[k] = []
+                metrics_lists[k].extend(v)
+            
+            # Force garbage collection after each batch
+            import gc
+            gc.collect()
 
         averages = {k: float(np.nanmean(v)) for k, v in metrics_lists.items()}
 
@@ -284,7 +338,7 @@ def main() -> None:
         train_dir=H5_FILEPATH,
         val_dir=H5_FILEPATH,
         test_dir=H5_FILEPATH,
-        num_workers=10,  # Enable multiprocessing for eval
+        num_workers=10,  # Use multiprocessing for better performance
         num_train=args.num_events,
         num_val=args.num_events,
         num_test=args.num_events,

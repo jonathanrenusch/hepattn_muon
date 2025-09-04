@@ -21,7 +21,7 @@ data:
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: &num_objects 6  # Typically fewer particles per event in muon data
+  event_max_num_particles: &num_objects 3  # Typically fewer particles per event in muon data
 
   inputs:
     hit:
@@ -66,7 +66,7 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0,1,2]
+  devices: [3,4,5]
   # devices: [0]
   # devices: -1
   precision: bf16-mixed
