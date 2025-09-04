@@ -249,8 +249,8 @@ class h5TrackVisualizerMDTGeometry:
 
         plt.tight_layout()
 
-        if show_plot:
-            plt.show()
+        # if show_plot:
+        #     plt.show()
 
         return fig
 
@@ -603,8 +603,8 @@ class h5TrackVisualizerMDTGeometry:
                 print(f"Histogram saved to: {save_path}")
 
             # Show plot if requested
-            if show_plot:
-                plt.show()
+            # if show_plot:
+            #     plt.show()
 
             return fig
 

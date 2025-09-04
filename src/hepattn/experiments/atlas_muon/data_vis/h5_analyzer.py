@@ -125,7 +125,7 @@ class h5Analyzer:
             plt.savefig(output_plot_path, dpi=300, bbox_inches="tight")
             print(f"Plot saved to: {output_plot_path}")
 
-        plt.show()
+        # plt.show()
 
     def analyze_tracks_and_lengths(
         self, output_plot_path: Optional[str] = None
@@ -186,6 +186,7 @@ class h5Analyzer:
             if event_count >= self.max_events:
                 break
             # Create visualization
+        
         self._plot_tracks_analysis(
             tracks_per_event, all_event_track_lengths, output_plot_path
         )
@@ -221,6 +222,8 @@ class h5Analyzer:
         else:
             bins_tracks = np.arange(-0.5, 1.5, 1)
 
+        # Save track statistics to file
+        self._save_track_statistics(track_counts, all_event_track_lengths, output_plot_path)
         ax1.hist(
             track_counts,
             bins=bins_tracks,
@@ -253,7 +256,7 @@ class h5Analyzer:
             max_length = max(all_event_track_lengths)
             # Create bins that are properly aligned with integer values
             bins_lengths = np.arange(min_length - 0.5, max_length + 1.5, 1)
-
+            # Note: Track length statistics are already saved in _save_track_statistics method
             ax2.hist(
                 all_event_track_lengths,
                 bins=bins_lengths,
@@ -295,7 +298,101 @@ class h5Analyzer:
             plt.savefig(output_plot_path, dpi=300, bbox_inches="tight")
             print(f"Plot saved to: {output_plot_path}")
 
-        plt.show()
+        # plt.show()
+
+    def _save_track_statistics(self, track_counts: List[int], all_event_track_lengths: List[int], output_plot_path: Optional[str] = None) -> None:
+        """
+        Save comprehensive track statistics to a text file.
+        
+        Parameters:
+        -----------
+        track_counts : List[int]
+            Number of tracks per event
+        all_event_track_lengths : List[int]
+            Length of each individual track
+        output_plot_path : str, optional
+            Path where the plot is saved, used to determine where to save the statistics file
+        """
+        from datetime import datetime
+        
+        # Determine output directory and filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if output_plot_path:
+            # If plot path is provided, save the txt file in the same directory
+            plot_path = Path(output_plot_path)
+            output_dir = plot_path.parent
+            # Create filename based on plot name but with .txt extension and timestamp
+            base_name = plot_path.stem
+            filename = output_dir / f"{base_name}_statistics_{timestamp}.txt"
+        else:
+            # Default to current directory if no plot path provided
+            filename = f"track_statistics_{timestamp}.txt"
+        
+        with open(filename, 'w') as f:
+            f.write("=" * 60 + "\n")
+            f.write("TRACK ANALYSIS STATISTICS\n")
+            f.write("=" * 60 + "\n")
+            f.write(f"Analysis timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Max events analyzed: {self.max_events}\n\n")
+            
+            # Event statistics
+            total_events = len(track_counts)
+            f.write("EVENT STATISTICS:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Total events analyzed: {total_events}\n\n")
+            
+            # Tracks per event statistics
+            f.write("TRACKS PER EVENT DISTRIBUTION:\n")
+            f.write("-" * 40 + "\n")
+            track_counter = Counter(track_counts)
+            
+            # Calculate percentages and write detailed breakdown
+            for num_tracks in sorted(track_counter.keys()):
+                count = track_counter[num_tracks]
+                percentage = (count / total_events) * 100
+                f.write(f"{num_tracks} tracks: {count} events ({percentage:.2f}%)\n")
+            
+            f.write(f"\nMean tracks per event: {np.mean(track_counts):.2f}\n")
+            f.write(f"Standard deviation: {np.std(track_counts):.2f}\n")
+            f.write(f"Min tracks per event: {min(track_counts)}\n")
+            f.write(f"Max tracks per event: {max(track_counts)}\n\n")
+            
+            # Track length statistics
+            f.write("TRACK LENGTH STATISTICS:\n")
+            f.write("-" * 35 + "\n")
+            total_tracks = len(all_event_track_lengths)
+            tracks_short = np.sum(np.array(all_event_track_lengths) < 3)
+            tracks_short_percentage = (tracks_short / total_tracks) * 100
+            
+            f.write(f"Total number of tracks: {total_tracks}\n")
+            f.write(f"Tracks with length < 3 hits: {tracks_short}\n")
+            f.write(f"Percentage of tracks with < 3 hits: {tracks_short_percentage:.2f}%\n")
+            f.write(f"Tracks with length > 3 hits: {total_tracks - tracks_short}\n")
+            f.write(f"Percentage of tracks with > 3 hits: {100 - tracks_short_percentage:.2f}%\n\n")
+            
+            f.write(f"Mean track length: {np.mean(all_event_track_lengths):.2f} hits\n")
+            f.write(f"Standard deviation: {np.std(all_event_track_lengths):.2f} hits\n")
+            f.write(f"Min track length: {min(all_event_track_lengths)} hits\n")
+            f.write(f"Max track length: {max(all_event_track_lengths)} hits\n\n")
+            
+            # Track length distribution
+            f.write("TRACK LENGTH DISTRIBUTION:\n")
+            f.write("-" * 35 + "\n")
+            length_counter = Counter(all_event_track_lengths)
+            for length in sorted(length_counter.keys()):
+                count = length_counter[length]
+                percentage = (count / total_tracks) * 100
+                f.write(f"{length} hits: {count} tracks ({percentage:.2f}%)\n")
+            
+            f.write("\n" + "=" * 60 + "\n")
+        
+        print(f"\nTrack statistics saved to: {filename}")
+        print(f"Summary:")
+        print(f"  - Total events: {total_events}")
+        print(f"  - Total tracks: {total_tracks}")
+        print(f"  - Tracks with ≤3 hits: {tracks_short} ({tracks_short_percentage:.1f}%)")
+        print(f"  - Events with each track count: {dict(track_counter)}")
 
     def generate_feature_histograms(
         self, 

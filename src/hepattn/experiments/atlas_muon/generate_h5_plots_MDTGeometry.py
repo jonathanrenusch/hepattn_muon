@@ -133,10 +133,6 @@ def generate_plots_for_file(
 
 
 
-
-
-
-
 def main() -> None:
     """Main function to process all ROOT files."""
     parser = argparse.ArgumentParser(
@@ -162,8 +158,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--num-events",
+        "-n",
         type=int,
-        default=1000,
+        default=86520,
         help="number of events to use for statistics",
     )
     parser.add_argument(
@@ -184,7 +181,7 @@ def main() -> None:
     output_dir = create_output_directory(args.output_dir)
     print(f"Output directory: {output_dir}")
 
-    config_path = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
+    config_path = "./hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
 
     # Load inputs and targets fresh each time to avoid corruption
     inputs, targets = load_inputs_targets_from_config(config_path)

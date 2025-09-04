@@ -6,8 +6,11 @@ Configuration and constants for muon tracking analysis.
 from networkx import hits
 
 
-H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/gut_check_test_data"
+# H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/gut_check_test_data"
+H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5"
 # H5_FILEPATH = None
+
+# HIT_EVAL_FILEPATH = "/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5"
 HIT_EVAL_FILEPATH = None
 # HIT_EVAL_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/ATLAS-Muon-v1_20250814-T223545/ckpts/epoch=049-val_acc=0.99711_gut_check_test_data_eval.h5"
 # H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed",

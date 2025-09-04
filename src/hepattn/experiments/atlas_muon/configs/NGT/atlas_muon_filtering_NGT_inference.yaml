@@ -4,9 +4,9 @@ ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-6H100-600K_20250831
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  # test_dir: /scratch/ml_training_data_2694000_hdf5
+  test_dir: /scratch/ml_training_data_2694000_hdf5
   # test_dir: /scratch/ml_validation_data_144000_hdf5
-  test_dir: /scratch/ml_test_data_156000_hdf5
+  # test_dir: /scratch/ml_test_data_156000_hdf5
 
 
   train_dir: /scratch/ml_training_data_2694000_hdf5
