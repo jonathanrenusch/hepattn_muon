@@ -4,6 +4,8 @@ Track visualization utilities for muon tracking data.
 import typing
 from typing import Optional
 
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.utils.data import DataLoader
@@ -504,6 +506,85 @@ class h5TrackVisualizerMDTGeometry:
             return None
 
     # ...existing code...
+
+    def calculate_detector_technology_statistics(
+        self, 
+        dataloader: DataLoader, 
+        num_events: int = 1000
+    ) -> dict:
+        """
+        Calculate detector technology statistics from the dataset.
+        
+        Returns:
+        --------
+        dict: Statistics for each detector technology including counts and percentages
+        """
+        technology_mapping = {"MDT": 0, "RPC": 2, "TGC": 3, "STGC": 4, "MM": 5}
+        
+        # Initialize counters
+        tech_true_hits = {tech: 0 for tech in technology_mapping.keys()}
+        tech_total_hits = {tech: 0 for tech in technology_mapping.keys()}
+        total_true_hits = 0
+        total_hits = 0
+        
+        try:
+            for i, batch in tqdm(enumerate(dataloader), desc="Processing technology statistics", total=num_events):
+                if i >= num_events:
+                    break
+                    
+                inputs, targets = batch
+                
+                # Get hit technology information
+                hit_technologies = inputs["hit_spacePoint_technology"][0].numpy()
+                hit_valid = targets["hit_valid"][0].numpy()
+                hit_on_valid_particle = targets["hit_on_valid_particle"][0].numpy()
+                
+                # Only consider valid hits
+                valid_hit_mask = hit_valid.astype(bool)
+                hit_technologies = hit_technologies[valid_hit_mask]
+                hit_on_valid_particle = hit_on_valid_particle[valid_hit_mask]
+                
+                total_hits += len(hit_technologies)
+                total_true_hits += np.sum(hit_on_valid_particle)
+                
+                # Count hits per technology
+                for tech_name, tech_value in technology_mapping.items():
+                    tech_mask = hit_technologies == tech_value
+                    tech_total_hits[tech_name] += np.sum(tech_mask)
+                    tech_true_hits[tech_name] += np.sum(hit_on_valid_particle & tech_mask)
+            
+            # Calculate statistics
+            stats = {}
+            for tech_name in technology_mapping.keys():
+                true_count = tech_true_hits[tech_name]
+                total_count = tech_total_hits[tech_name]
+                
+                # Percentage of total true hits
+                true_percentage = (true_count / total_true_hits * 100) if total_true_hits > 0 else 0.0
+                # Percentage of total hits
+                total_percentage = (total_count / total_hits * 100) if total_hits > 0 else 0.0
+                
+                stats[tech_name] = {
+                    'true_hits': int(true_count),
+                    'total_hits': int(total_count),
+                    'true_hits_percentage': true_percentage,
+                    'total_hits_percentage': total_percentage
+                }
+            
+            # Add overall statistics
+            stats['overall'] = {
+                'total_true_hits': int(total_true_hits),
+                'total_hits': int(total_hits),
+                'events_processed': min(num_events, i + 1)
+            }
+            
+            return stats
+            
+        except Exception as e:
+            print(f"Error calculating detector technology statistics: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
 
     def plot_and_save_true_hits_histogram(
         self,

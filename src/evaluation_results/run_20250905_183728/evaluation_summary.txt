@@ -1,0 +1,19 @@
+============================================================
+ATLAS MUON HIT FILTER EVALUATION SUMMARY
+============================================================
+Timestamp: 2025-09-05 18:37:47
+Max events processed: 1000
+Total hits analyzed: 6,828,399
+True hits: 52,562
+AUC Score: 0.9992
+
+PLOTS GENERATED:
+- ROC curve
+- Efficiency vs pT (main)
+- Working point performance
+- Track lengths
+- Efficiency vs eta/phi (SKIPPED)
+- Technology-specific plots (SKIPPED)
+- Individual working point plots (SKIPPED)
+
+Outputs saved to: evaluation_results/run_20250905_183728

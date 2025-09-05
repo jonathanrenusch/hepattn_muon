@@ -1,0 +1,157 @@
+============================================================
+TRACK ANALYSIS STATISTICS
+============================================================
+Analysis timestamp: 2025-09-05 16:40:57
+Max events analyzed: 86520
+
+EVENT STATISTICS:
+------------------------------
+Total events analyzed: 86520
+
+TRACKS PER EVENT DISTRIBUTION:
+----------------------------------------
+1 tracks: 40866 events (47.23%)
+2 tracks: 43535 events (50.32%)
+3 tracks: 1925 events (2.22%)
+4 tracks: 188 events (0.22%)
+5 tracks: 6 events (0.01%)
+
+Mean tracks per event: 1.55
+Standard deviation: 0.55
+Min tracks per event: 1
+Max tracks per event: 5
+
+TRACK LENGTH STATISTICS:
+-----------------------------------
+Total number of tracks: 134493
+Tracks with length < 3 hits: 0
+Percentage of tracks with < 3 hits: 0.00%
+Tracks with length > 3 hits: 134493
+Percentage of tracks with > 3 hits: 100.00%
+
+Mean track length: 25.86 hits
+Standard deviation: 8.42 hits
+Min track length: 3 hits
+Max track length: 85 hits
+
+TRACK LENGTH DISTRIBUTION:
+-----------------------------------
+3 hits: 24 tracks (0.02%)
+4 hits: 62 tracks (0.05%)
+5 hits: 213 tracks (0.16%)
+6 hits: 350 tracks (0.26%)
+7 hits: 228 tracks (0.17%)
+8 hits: 402 tracks (0.30%)
+9 hits: 259 tracks (0.19%)
+10 hits: 365 tracks (0.27%)
+11 hits: 640 tracks (0.48%)
+12 hits: 857 tracks (0.64%)
+13 hits: 1157 tracks (0.86%)
+14 hits: 1811 tracks (1.35%)
+15 hits: 2387 tracks (1.77%)
+16 hits: 3014 tracks (2.24%)
+17 hits: 4983 tracks (3.71%)
+18 hits: 8333 tracks (6.20%)
+19 hits: 9611 tracks (7.15%)
+20 hits: 6716 tracks (4.99%)
+21 hits: 5474 tracks (4.07%)
+22 hits: 4762 tracks (3.54%)
+23 hits: 4701 tracks (3.50%)
+24 hits: 5454 tracks (4.06%)
+25 hits: 6558 tracks (4.88%)
+26 hits: 7132 tracks (5.30%)
+27 hits: 6876 tracks (5.11%)
+28 hits: 6498 tracks (4.83%)
+29 hits: 6151 tracks (4.57%)
+30 hits: 5705 tracks (4.24%)
+31 hits: 5200 tracks (3.87%)
+32 hits: 4535 tracks (3.37%)
+33 hits: 3870 tracks (2.88%)
+34 hits: 3160 tracks (2.35%)
+35 hits: 2537 tracks (1.89%)
+36 hits: 2125 tracks (1.58%)
+37 hits: 1720 tracks (1.28%)
+38 hits: 1326 tracks (0.99%)
+39 hits: 1125 tracks (0.84%)
+40 hits: 992 tracks (0.74%)
+41 hits: 790 tracks (0.59%)
+42 hits: 705 tracks (0.52%)
+43 hits: 690 tracks (0.51%)
+44 hits: 648 tracks (0.48%)
+45 hits: 564 tracks (0.42%)
+46 hits: 464 tracks (0.34%)
+47 hits: 449 tracks (0.33%)
+48 hits: 406 tracks (0.30%)
+49 hits: 359 tracks (0.27%)
+50 hits: 309 tracks (0.23%)
+51 hits: 276 tracks (0.21%)
+52 hits: 237 tracks (0.18%)
+53 hits: 207 tracks (0.15%)
+54 hits: 155 tracks (0.12%)
+55 hits: 164 tracks (0.12%)
+56 hits: 121 tracks (0.09%)
+57 hits: 122 tracks (0.09%)
+58 hits: 100 tracks (0.07%)
+59 hits: 91 tracks (0.07%)
+60 hits: 74 tracks (0.06%)
+61 hits: 71 tracks (0.05%)
+62 hits: 43 tracks (0.03%)
+63 hits: 32 tracks (0.02%)
+64 hits: 35 tracks (0.03%)
+65 hits: 26 tracks (0.02%)
+66 hits: 9 tracks (0.01%)
+67 hits: 11 tracks (0.01%)
+68 hits: 10 tracks (0.01%)
+69 hits: 3 tracks (0.00%)
+70 hits: 3 tracks (0.00%)
+71 hits: 1 tracks (0.00%)
+72 hits: 3 tracks (0.00%)
+74 hits: 1 tracks (0.00%)
+85 hits: 1 tracks (0.00%)
+
+============================================================
+DETECTOR TECHNOLOGY STATISTICS
+============================================================
+Events processed: 86520
+Total hits: 596,656,376
+Total true hits: 3,477,707
+
+TECHNOLOGY DISTRIBUTION (ABSOLUTE NUMBERS):
+--------------------------------------------------
+MDT:
+  Total hits: 348,149,354
+  True hits: 2,397,273
+
+RPC:
+  Total hits: 27,204,202
+  True hits: 479,004
+
+TGC:
+  Total hits: 15,124,147
+  True hits: 570,363
+
+STGC:
+  Total hits: 96,614,154
+  True hits: 17,219
+
+MM:
+  Total hits: 109,564,519
+  True hits: 13,848
+
+TECHNOLOGY DISTRIBUTION (PERCENTAGES):
+--------------------------------------------------
+Percentage of total hits by technology:
+  MDT: 58.35%
+  RPC: 4.56%
+  TGC: 2.53%
+  STGC: 16.19%
+  MM: 18.36%
+
+Percentage of true hits by technology:
+  MDT: 68.93%
+  RPC: 13.77%
+  TGC: 16.40%
+  STGC: 0.50%
+  MM: 0.40%
+
+============================================================

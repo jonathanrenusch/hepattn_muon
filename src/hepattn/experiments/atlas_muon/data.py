@@ -479,5 +479,5 @@ class AtlasMuonDataModule(LightningDataModule):
         return self.get_dataloader(dataset=self.val_dataset, stage="test", shuffle=False)
 
     def test_dataloader(self):
-        return self.get_dataloader(dataset=self.test_dataset, stage="test", shuffle=False)
+        return self.get_dataloader(dataset=self.test_dataset, stage="test", shuffle=True)
 

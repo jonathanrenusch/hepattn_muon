@@ -5,6 +5,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
 import torch
 from tqdm import tqdm
@@ -306,6 +308,83 @@ class h5Analyzer:
 
         # plt.show()
 
+    def _calculate_detector_technology_statistics(self) -> dict:
+        """
+        Calculate detector technology statistics from the dataset.
+        
+        Returns:
+        --------
+        dict: Statistics for each detector technology including counts and percentages
+        """
+        technology_mapping = {"MDT": 0, "RPC": 2, "TGC": 3, "STGC": 4, "MM": 5}
+
+        # Initialize counters
+        tech_true_hits = {tech: 0 for tech in technology_mapping.keys()}
+        tech_total_hits = {tech: 0 for tech in technology_mapping.keys()}
+        total_true_hits = 0
+        total_hits = 0
+        
+        try:
+            test_dataloader = self.data_module.test_dataloader()
+            
+            for i, batch in tqdm(enumerate(test_dataloader), desc="Processing technology statistics", total=self.max_events):
+                if i >= self.max_events:
+                    break
+                    
+                inputs, targets = batch
+                
+                # Get hit technology information
+                hit_technologies = inputs["hit_spacePoint_technology"][0].numpy()
+                hit_valid = targets["hit_valid"][0].numpy()
+                hit_on_valid_particle = targets["hit_on_valid_particle"][0].numpy()
+                
+                # Only consider valid hits
+                valid_hit_mask = hit_valid.astype(bool)
+                hit_technologies = hit_technologies[valid_hit_mask]
+                hit_on_valid_particle = hit_on_valid_particle[valid_hit_mask]
+                
+                total_hits += len(hit_technologies)
+                total_true_hits += np.sum(hit_on_valid_particle)
+                
+                # Count hits per technology
+                for tech_name, tech_value in technology_mapping.items():
+                    tech_mask = hit_technologies == tech_value
+                    tech_total_hits[tech_name] += np.sum(tech_mask)
+                    tech_true_hits[tech_name] += np.sum(hit_on_valid_particle & tech_mask)
+            
+            # Calculate statistics
+            stats = {}
+            for tech_name in technology_mapping.keys():
+                true_count = tech_true_hits[tech_name]
+                total_count = tech_total_hits[tech_name]
+                
+                # Percentage of total true hits
+                true_percentage = (true_count / total_true_hits * 100) if total_true_hits > 0 else 0.0
+                # Percentage of total hits
+                total_percentage = (total_count / total_hits * 100) if total_hits > 0 else 0.0
+                
+                stats[tech_name] = {
+                    'true_hits': int(true_count),
+                    'total_hits': int(total_count),
+                    'true_hits_percentage': true_percentage,
+                    'total_hits_percentage': total_percentage
+                }
+            
+            # Add overall statistics
+            stats['overall'] = {
+                'total_true_hits': int(total_true_hits),
+                'total_hits': int(total_hits),
+                'events_processed': min(self.max_events, i + 1)
+            }
+            
+            return stats
+            
+        except Exception as e:
+            print(f"Error calculating detector technology statistics: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+
     def _save_track_statistics(self, track_counts: List[int], all_event_track_lengths: List[int], output_plot_path: Optional[str] = None) -> None:
         """
         Save comprehensive track statistics to a text file.
@@ -392,6 +471,45 @@ class h5Analyzer:
                 f.write(f"{length} hits: {count} tracks ({percentage:.2f}%)\n")
             
             f.write("\n" + "=" * 60 + "\n")
+            
+            # Add detector technology statistics
+            print("Calculating detector technology statistics...")
+            tech_stats = self._calculate_detector_technology_statistics()
+            
+            if tech_stats and 'overall' in tech_stats:
+                f.write("DETECTOR TECHNOLOGY STATISTICS\n")
+                f.write("=" * 60 + "\n")
+                f.write(f"Events processed: {tech_stats['overall']['events_processed']}\n")
+                f.write(f"Total hits: {tech_stats['overall']['total_hits']:,}\n")
+                f.write(f"Total true hits: {tech_stats['overall']['total_true_hits']:,}\n\n")
+                
+                f.write("TECHNOLOGY DISTRIBUTION (ABSOLUTE NUMBERS):\n")
+                f.write("-" * 50 + "\n")
+                for tech_name in ["MDT", "RPC", "TGC", "STGC", "MM"]:
+                    if tech_name in tech_stats:
+                        stats = tech_stats[tech_name]
+                        f.write(f"{tech_name}:\n")
+                        f.write(f"  Total hits: {stats['total_hits']:,}\n")
+                        f.write(f"  True hits: {stats['true_hits']:,}\n\n")
+                
+                f.write("TECHNOLOGY DISTRIBUTION (PERCENTAGES):\n")
+                f.write("-" * 50 + "\n")
+                f.write("Percentage of total hits by technology:\n")
+                for tech_name in ["MDT", "RPC", "TGC", "STGC", "MM"]:
+                    if tech_name in tech_stats:
+                        stats = tech_stats[tech_name]
+                        f.write(f"  {tech_name}: {stats['total_hits_percentage']:.2f}%\n")
+                
+                f.write("\nPercentage of true hits by technology:\n")
+                for tech_name in ["MDT", "RPC", "TGC", "STGC", "MM"]:
+                    if tech_name in tech_stats:
+                        stats = tech_stats[tech_name]
+                        f.write(f"  {tech_name}: {stats['true_hits_percentage']:.2f}%\n")
+                
+                f.write("\n" + "=" * 60 + "\n")
+            else:
+                f.write("DETECTOR TECHNOLOGY STATISTICS: Failed to calculate\n")
+                f.write("=" * 60 + "\n")
         
         print(f"\nTrack statistics saved to: {filename}")
         print(f"Summary:")

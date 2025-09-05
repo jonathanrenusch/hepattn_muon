@@ -16,6 +16,10 @@ import numpy as np
 from tqdm import tqdm
 import torch
 
+# Set matplotlib backend before any other matplotlib imports
+import matplotlib
+matplotlib.use('Agg')
+
 from .data_vis.h5_config import DEFAULT_TREE_NAME, H5_FILEPATH, HISTOGRAM_SETTINGS, HIT_EVAL_FILEPATH
 from .data import AtlasMuonDataModule, AtlasMuonDataset
 
@@ -316,10 +320,60 @@ def main() -> None:
 
         output_metrics_path = output_dir / "hit_filter_performance_metrics.txt"
         with open(output_metrics_path, "w") as f:
+            f.write("=" * 80 + "\n")
+            f.write("HIT FILTER PERFORMANCE METRICS\n")
+            f.write("=" * 80 + "\n")
             for k, v in averages.items():
                 f.write(f"{k}: {v}\n")
+            f.write("\n")
 
         print(f"Saved average metrics to {output_metrics_path}")
+
+        # Calculate and save detector technology statistics for the filtered dataset
+        print("\n--- Calculating detector technology statistics for filtered dataset ---")
+        track_analyzer_eval = h5TrackVisualizerMDTGeometry(dataset=dataset)
+        tech_stats = track_analyzer_eval.calculate_detector_technology_statistics(
+            test_dataloader_eval, args.num_events
+        )
+        print("=" * 80)
+        print(tech_stats)
+        print("=" * 80) 
+        if tech_stats:
+            tech_stats_path = output_dir / "detector_technology_statistics_filtered.txt"
+            with open(tech_stats_path, 'w') as f:
+                f.write("=" * 80 + "\n")
+                f.write("DETECTOR TECHNOLOGY STATISTICS (FILTERED DATASET)\n")
+                f.write("=" * 80 + "\n")
+                f.write(f"Events processed: {tech_stats['overall']['events_processed']}\n")
+                f.write(f"Total hits: {tech_stats['overall']['total_hits']:,}\n")
+                f.write(f"Total true hits: {tech_stats['overall']['total_true_hits']:,}\n\n")
+                
+                f.write("TECHNOLOGY DISTRIBUTION (ABSOLUTE NUMBERS):\n")
+                f.write("-" * 50 + "\n")
+                for tech_name in ["MDT", "RPC", "TGC", "STGC", "MM"]:
+                    if tech_name in tech_stats:
+                        stats = tech_stats[tech_name]
+                        f.write(f"{tech_name}:\n")
+                        f.write(f"  Total hits: {stats['total_hits']:,}\n")
+                        f.write(f"  True hits: {stats['true_hits']:,}\n\n")
+                
+                f.write("TECHNOLOGY DISTRIBUTION (PERCENTAGES):\n")
+                f.write("-" * 50 + "\n")
+                f.write("Percentage of total hits by technology:\n")
+                for tech_name in ["MDT", "RPC", "TGC", "STGC", "MM"]:
+                    if tech_name in tech_stats:
+                        stats = tech_stats[tech_name]
+                        f.write(f"  {tech_name}: {stats['total_hits_percentage']:.2f}%\n")
+                
+                f.write("\nPercentage of true hits by technology:\n")
+                for tech_name in ["MDT", "RPC", "TGC", "STGC", "MM"]:
+                    if tech_name in tech_stats:
+                        stats = tech_stats[tech_name]
+                        f.write(f"  {tech_name}: {stats['true_hits_percentage']:.2f}%\n")
+                
+                f.write("\n" + "=" * 80 + "\n")
+            
+            print(f"Saved detector technology statistics to {tech_stats_path}")
 
         # IMPORTANT: Properly clean up the eval datamodule
         del test_dataloader_eval
