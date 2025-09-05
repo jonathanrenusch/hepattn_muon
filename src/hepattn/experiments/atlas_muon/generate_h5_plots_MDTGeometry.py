@@ -175,7 +175,8 @@ def main() -> None:
         "--num-events",
         "-n",
         type=int,
-        default=86520,
+        # default=86520,
+        default=9742,
         help="number of events to use for statistics",
     )
     parser.add_argument(

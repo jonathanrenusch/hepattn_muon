@@ -7,7 +7,8 @@ from networkx import hits
 
 
 # H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/gut_check_test_data"
-H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5"
+# H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5"
+H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
 # H5_FILEPATH = None
 
 # HIT_EVAL_FILEPATH = "/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5"

@@ -4,19 +4,19 @@ name: TRK-ATLAS-Muon-smallModel
 
 data:
 
-  train_dir: /scratch/ml_training_data_2694000_hdf5
-  val_dir: /scratch/ml_validation_data_144000_hdf5
+  train_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  val_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  hit_eval_train: /scratch/epoch=021-val_auc=0.99969_ml_training_data_2694000_hdf5_eval.h5
-  hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
+  # hit_eval_train: /scratch/epoch=021-val_auc=0.99969_ml_training_data_2694000_hdf5_eval.h5
+  # hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 100
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 500
+  batch_size: 200
   # batch_size: 32
   # use_smart_batching: false  # Disable smart batching as requested
 
@@ -66,9 +66,9 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0,1,2]
+  # devices: [0,1,2]
   # devices: [0]
-  # devices: -1
+  devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
   default_root_dir: logs

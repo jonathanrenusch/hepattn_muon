@@ -57,7 +57,7 @@ class TrackMLTracker(ModelWrapper):
 
         # Calculate the efficiency and purity at differnt matching working points
         both_valid = true_valid & pred_valid
-        for wp in [0.5, 0.75, 1.0]:
+        for wp in [0.25, 0.5, 0.75, 1.0]:
             # print("both_valid.shape", both_valid.shape)
             # print("both_valid", both_valid)
             effs = (hit_tp / hit_t >= wp) & both_valid
