@@ -1,27 +1,26 @@
 seed_everything: 42
-name: TRK-v0-full
+name: TRK-ATLAS-Muon-BigModel-2track
 # ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
 
-  train_dir: /scratch/ml_training_data_1_2Mio_processed
-  val_dir: /scratch/ml_validation_data_150K_processed
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  hit_eval_train: /scratch/epoch=049-val_acc=0.99711_ml_training_data_1_2Mio_processed_eval.h5
-  hit_eval_val: /scratch/epoch=049-val_acc=0.99711_ml_validation_data_150K_processed_eval.h5
+
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 100
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 300
+  batch_size: 500
   # batch_size: 32
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: &num_objects 6  # Typically fewer particles per event in muon data
+  event_max_num_particles: &num_objects 2  # Typically fewer particles per event in muon data
 
   inputs:
     hit:
@@ -64,9 +63,10 @@ data:
 trainer:
   # Training stuff here
   max_epochs: 50
+  num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0]
-  # devices: -1
+  # devices: [4]
+  devices: [3]
   precision: bf16-mixed
   log_every_n_steps: 50 
   default_root_dir: logs
@@ -78,7 +78,10 @@ trainer:
   #  init_args:
   #    dirpath: ./profile_logs/
   #    filename: profile.json
-
+  strategy:
+    class_path: lightning.pytorch.strategies.DDPStrategy
+    init_args:
+      find_unused_parameters: true
   # Specify loggers here
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
@@ -93,7 +96,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 1
+        save_top_k: 5
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
@@ -127,7 +130,7 @@ model:
   #   weight_decay: 1e-5
   lrs_config:
     initial: 1e-6
-    max: 8e-5
+    max: 4e-5
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-4
@@ -244,6 +247,7 @@ model:
       decoder_layer_config:
         dim: *dim
         norm: RMSNorm
+        # hybrid_norm: true
         mask_attention: true
       # matcher:
       #   class_path: hepattn.models.matcher.Matcher
@@ -262,7 +266,7 @@ model:
                 output_object: track
                 target_object: particle
                 losses:
-                  object_bce: 0.1
+                  object_bce: 1.0
                 costs:
                   object_bce: 10.0
                 dim: *dim
@@ -284,10 +288,10 @@ model:
                 # dim: *dim
                 # null_weight: 1.0
                 losses:
-                  mask_bce: 5.0
-                  mask_dice: 1.0
+                  mask_bce: 1.0
+                  # mask_dice: 1.0
                 costs:
-                  # mask_bce: 5.0
-                  mask_dice: 1.0
+                  mask_bce: 1.0
+                  # mask_dice: 1.0
                 dim: *dim
                 null_weight: 1.0

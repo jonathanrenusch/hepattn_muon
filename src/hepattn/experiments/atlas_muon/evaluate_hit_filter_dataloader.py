@@ -2402,13 +2402,13 @@ class AtlasMuonEvaluatorDataLoader:
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate ATLAS muon hit filter using DataLoader (OPTIMIZED)')
-    parser.add_argument('--eval_path', type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
                        help='Path to evaluation HDF5 file')
-    parser.add_argument('--data_dir', type=str, default="/scratch/ml_test_data_156000_hdf5",
+    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
                        help='Path to processed test data directory')
-    parser.add_argument('--config_path', type=str, default="./hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml",
+    parser.add_argument('--config_path', "-c",type=str, default="./hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml",
                        help='Path to config YAML file')
-    parser.add_argument('--output_dir', type=str, default='./evaluation_results',
+    parser.add_argument('--output_dir', "-o", type=str, default='./evaluation_results',
                        help='Output directory for plots and results')
     parser.add_argument('--max_events', '-m', type=int, default=-1,
                        help='Maximum number of events to process (for testing)')

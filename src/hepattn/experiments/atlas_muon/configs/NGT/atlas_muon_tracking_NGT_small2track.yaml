@@ -4,8 +4,10 @@ name: TRK-ATLAS-Muon-smallModel
 
 data:
 
-  train_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
-  val_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
   # hit_eval_train: /scratch/epoch=021-val_auc=0.99969_ml_training_data_2694000_hdf5_eval.h5
@@ -16,7 +18,7 @@ data:
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 200
+  batch_size: 1000
   # batch_size: 32
   # use_smart_batching: false  # Disable smart batching as requested
 
@@ -67,17 +69,17 @@ trainer:
   num_sanity_val_steps: 1
   accelerator: gpu
   # devices: [0,1,2]
-  # devices: [0]
-  devices: -1
+  devices: [2]
+  # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
   default_root_dir: logs
   gradient_clip_val: 0.1
   enable_progress_bar: true
-  strategy:
-    class_path: lightning.pytorch.strategies.DDPStrategy
-    init_args:
-      find_unused_parameters: true
+  #strategy:
+   # class_path: lightning.pytorch.strategies.DDPStrategy
+    #init_args:
+     # find_unused_parameters: true
 
   #profiler:
   #  class_path: lightning.pytorch.profilers.PyTorchProfiler
@@ -133,10 +135,10 @@ model:
   #   weight_decay: 1e-5
   lrs_config:
     initial: 1e-6
-    max: 8e-5
+    max: 1e-5
     end: 1e-6
-    pct_start: 0.05
-    weight_decay: 1e-4
+    pct_start: 0.2
+    weight_decay: 5e-4
     skip_scheduler: false
 
   # Whether to use multi task learning or not
@@ -270,7 +272,7 @@ model:
                 output_object: track
                 target_object: particle
                 losses:
-                  object_bce: 0.1
+                  object_bce: 1.0
                 costs:
                   object_bce: 10.0
                 dim: *dim
@@ -292,10 +294,10 @@ model:
                 # dim: *dim
                 # null_weight: 1.0
                 losses:
-                  mask_bce: 5.0
-                  mask_dice: 1.0
+                  mask_bce: 1.0
+                  # mask_dice: 1.0
                 costs:
-                  # mask_bce: 5.0
-                  mask_dice: 1.0
+                  mask_bce: 1.0
+                  # mask_dice: 1.0
                 dim: *dim
                 null_weight: 1.0

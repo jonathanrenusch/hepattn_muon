@@ -139,10 +139,10 @@ class HitFilterDatasetReducer:
             train_dir=str(self.input_dir),
             val_dir=str(self.input_dir),
             test_dir=str(self.input_dir),
-            num_workers=4,  # Use fewer workers for threshold calculation
-            num_train=1000,  # Small sample
-            num_val=1000,
-            num_test=1000,  # Use only 1000 events for threshold calculation
+            num_workers=50,  # Use fewer workers for threshold calculation
+            num_train=-1,  # Small sample
+            num_val=-1,
+            num_test=-1,  # Use only 1000 events for threshold calculation
             batch_size=1,
             inputs=inputs,
             targets=targets,
@@ -183,7 +183,7 @@ class HitFilterDatasetReducer:
                     all_true_labels.extend(true_labels)
                     
                     # Stop after collecting enough data for threshold calculation
-                    if len(all_logits) > 100000:  # 100K hits should be enough
+                    if len(all_logits) > 500000000:  # 100 Mio hits should be enough
                         break
                         
                 except KeyError as e:
@@ -340,8 +340,12 @@ class HitFilterDatasetReducer:
                     all_num_hits[i] = hits_len
                     all_num_tracks[i] = tracks_len
                 
-                f.create_dataset('hits', data=all_hits, compression='gzip')
-                f.create_dataset('tracks', data=all_tracks, compression='gzip')
+                # Use row-based chunking for better random access performance, no compression
+                chunk_size_hits = (1, max_hits, len(self.hit_features))
+                chunk_size_tracks = (1, max_tracks, len(self.track_features))
+                
+                f.create_dataset('hits', data=all_hits, chunks=chunk_size_hits)
+                f.create_dataset('tracks', data=all_tracks, chunks=chunk_size_tracks)
                 f.create_dataset('event_numbers', data=all_event_numbers)
                 f.create_dataset('num_hits', data=all_num_hits)
                 f.create_dataset('num_tracks', data=all_num_tracks)

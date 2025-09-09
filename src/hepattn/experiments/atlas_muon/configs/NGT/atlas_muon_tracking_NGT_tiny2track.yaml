@@ -1,27 +1,29 @@
 seed_everything: 42
-name: TRK-v0-full
+name: TRK-ATLAS-Muon-smallModel
 # ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
 
-  train_dir: /scratch/ml_training_data_1_2Mio_processed
-  val_dir: /scratch/ml_validation_data_150K_processed
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  hit_eval_train: /scratch/epoch=049-val_acc=0.99711_ml_training_data_1_2Mio_processed_eval.h5
-  hit_eval_val: /scratch/epoch=049-val_acc=0.99711_ml_validation_data_150K_processed_eval.h5
+  # hit_eval_train: /scratch/epoch=021-val_auc=0.99969_ml_training_data_2694000_hdf5_eval.h5
+  # hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 100
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 300
+  batch_size: 1000
   # batch_size: 32
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: &num_objects 6  # Typically fewer particles per event in muon data
+  event_max_num_particles: &num_objects 2  # Typically fewer particles per event in muon data
 
   inputs:
     hit:
@@ -64,14 +66,20 @@ data:
 trainer:
   # Training stuff here
   max_epochs: 50
+  num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0]
+  # devices: [0,1,2]
+  devices: [3]
   # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
   default_root_dir: logs
   gradient_clip_val: 0.1
   enable_progress_bar: true
+  #strategy:
+   # class_path: lightning.pytorch.strategies.DDPStrategy
+    #init_args:
+     # find_unused_parameters: true
 
   #profiler:
   #  class_path: lightning.pytorch.profilers.PyTorchProfiler
@@ -93,7 +101,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 1
+        save_top_k: 5
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
@@ -109,7 +117,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 25 
+        patience: 15 
         min_delta: 0.0
         mode: min
         verbose: True
@@ -139,7 +147,7 @@ model:
   model:
     class_path: hepattn.models.MaskFormer
     init_args:
-      dim: &dim 256
+      dim: &dim 128
       num_queries: *num_objects
       input_sort_field: phi
       # record_intermediate_embeddings: false
@@ -209,15 +217,16 @@ model:
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 6
+          num_layers: 3
           dim: *dim
           # attn_type: flash
           attn_type: flash-varlen
           hybrid_norm: true
+
           value_residual: true
           # num_register_tokens: 8
           attn_kwargs:
-            num_heads: 16
+            num_heads: 8
 
       # decoder:
       #   num_decoder_layers: 4
@@ -239,11 +248,12 @@ model:
           parallel_solver: true
           n_jobs: 16
 
-      num_decoder_layers: 4
+      num_decoder_layers: 3
       # intermediate_losses: true
       decoder_layer_config:
         dim: *dim
         norm: RMSNorm
+        # hybrid_norm: true
         mask_attention: true
       # matcher:
       #   class_path: hepattn.models.matcher.Matcher

@@ -4,19 +4,18 @@ name: TRK-ATLAS-Muon-BigModel
 
 data:
 
-  train_dir: /scratch/ml_training_data_2694000_hdf5
-  val_dir: /scratch/ml_validation_data_144000_hdf5
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
 
-  hit_eval_train: /scratch/epoch=021-val_auc=0.99969_ml_training_data_2694000_hdf5_eval.h5
-  hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
+
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 100
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 200
+  batch_size: 500
   # batch_size: 32
   # use_smart_batching: false  # Disable smart batching as requested
 
