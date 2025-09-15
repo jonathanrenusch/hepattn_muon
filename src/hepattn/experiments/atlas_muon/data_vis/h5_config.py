@@ -71,7 +71,7 @@ ANALYSIS_SETTINGS = {
 #                          "hit_spacePoint_globEdgeLowY": {"bins": 100, "range": (-15000, 15000)},
 #                          "hit_spacePoint_globEdgeLowZ": {"bins": 100, "range": (-25000, 25000)},
 #                          "hit_spacePoint_time": {"bins": 100, "range": (-1000, 20000)},
-#                          "hit_spacePoint_driftR": {"bins": None, "range": (0, 15)},
+#                          "hit_spacePoint_driftR": {"bins": 100, "range": (0, 15)},
 #                          "hit_spacePoint_readOutSide": {"bins": None, "range": (-2, 2)},
 #                         #  "hit_spacePoint_covXX": {"bins": 100, "range": (-1000, 10000000), "scale_factor": 1.0},
 #                         #  "hit_spacePoint_covXY": {"bins": 100, "range": (-300000, 300000), "scale_factor": 1.0},
