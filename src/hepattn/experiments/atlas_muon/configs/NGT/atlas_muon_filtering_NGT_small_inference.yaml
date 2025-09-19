@@ -1,7 +1,7 @@
 seed_everything: 42
 name: ATLAS-Muon-small
 # ckpt_path: /eos/project/e/end-to-end-muon-tracking/tracking/data/epoch=041-val_loss=0.00402.ckpt
-ckpt_path: /scratch/epoch=041-val_loss=0.00402.ckpt
+ckpt_path: /eos/project/e/end-to-end-muon-tracking/tracking/data/bestfiltermodel/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=041-val_loss=0.00402.ckpt
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
@@ -17,11 +17,11 @@ data:
   train_dir: /scratch/ml_test_data_156000_hdf5
   val_dir: /scratch/ml_test_data_156000_hdf5
 
-  num_workers: 100
+  num_workers: 10
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 1024  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 1  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -70,7 +70,7 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [1]
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs

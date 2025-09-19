@@ -1,0 +1,76 @@
+baseline_filtering_stats:
+  baseline_tracks: 0
+  rejected_tracks: 10
+  total_tracks: 10
+data_directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+evaluation_file: /eos/project/e/end-to-end-muon-tracking/tracking/data/best2tracktracking/TRK-ATLAS-Muon-smallModel_20250915-T192111/ckpts/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5
+evaluation_timestamp: '2025-09-19 16:38:23'
+max_events: 5
+results_by_region:
+  all_tracks:
+    task1_hit_track_assignment:
+      average_efficiency: 0.2293029595015576
+      average_fake_rate: 0.04010217511423884
+      efficiency_std: 0.40038722804087085
+      fake_rate_std: 0.09957124931218772
+      roc_auc: 0.9224092371323529
+      total_hits: 912
+      true_assignments: 272
+    task2_track_validity:
+      average_efficiency: 0.25
+      average_fake_rate: 0.0
+      efficiency_std: 0.4330127018922193
+      fake_rate_std: 0.0
+      roc_auc: .nan
+      total_tracks: 10
+      valid_tracks: 10
+    task3_regression:
+      eta:
+        mean_residual: .nan
+        n_predictions: 0
+        outliers_removed: 10
+        std_residual: .nan
+      phi:
+        mean_residual: .nan
+        n_predictions: 0
+        outliers_removed: 10
+        std_residual: .nan
+      qpt:
+        mean_residual: -0.045867919921875
+        n_predictions: 10
+        outliers_removed: 0
+        std_residual: 0.05828857421875
+  baseline_filtered: {}
+  rejected_tracks:
+    task1_hit_track_assignment:
+      average_efficiency: 0.17083333333333334
+      average_fake_rate: 0.027398408043569335
+      efficiency_std: 0.35985625988410674
+      fake_rate_std: 0.0810421352652192
+      roc_auc: 0.9378644478334979
+      total_hits: 456
+      true_assignments: 142
+    task2_track_validity:
+      average_efficiency: 0.2
+      average_fake_rate: 0.0
+      efficiency_std: 0.4000000000000001
+      fake_rate_std: 0.0
+      roc_auc: .nan
+      total_tracks: 5
+      valid_tracks: 5
+    task3_regression:
+      eta:
+        mean_residual: .nan
+        n_predictions: 0
+        outliers_removed: 5
+        std_residual: .nan
+      phi:
+        mean_residual: .nan
+        n_predictions: 0
+        outliers_removed: 5
+        std_residual: .nan
+      qpt:
+        mean_residual: -0.05657958984375
+        n_predictions: 5
+        outliers_removed: 0
+        std_residual: 0.040283203125

@@ -430,7 +430,7 @@ class AtlasMuonDataModule(LightningDataModule):
                 **self.kwargs,
             )
 
-        if stage == "fit":
+        if stage == "fit" or stage == "validate":
             self.val_dataset = AtlasMuonDataset(
                 dirpath=self.val_dir,
                 num_events=self.num_val,

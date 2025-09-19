@@ -1,0 +1,44 @@
+baseline_filtering_stats:
+  baseline_tracks: 0
+  rejected_tracks: 6
+  total_tracks: 6
+data_directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+evaluation_file: /eos/project/e/end-to-end-muon-tracking/tracking/data/best2tracktracking/TRK-ATLAS-Muon-smallModel_20250915-T192111/ckpts/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5
+evaluation_timestamp: '2025-09-19 16:55:25'
+max_events: 3
+results_by_region:
+  all_tracks:
+    task1_hit_track_assignment:
+      average_efficiency: 0.13679187192118228
+      average_fake_rate: 0.013812344867342225
+      efficiency_std: 0.3266469944592141
+      fake_rate_std: 0.034494624387579255
+      roc_auc: 0.9556781689729666
+      total_hits: 668
+      true_assignments: 173
+    task2_track_validity:
+      average_efficiency: 0.15
+      average_fake_rate: 0.0
+      efficiency_std: 0.3570714214271425
+      fake_rate_std: 0.0
+      roc_auc: .nan
+      total_tracks: 6
+      valid_tracks: 6
+  baseline_filtered: {}
+  rejected_tracks:
+    task1_hit_track_assignment:
+      average_efficiency: 0.13666666666666666
+      average_fake_rate: 0.01154217125709999
+      efficiency_std: 0.3289545730205176
+      fake_rate_std: 0.029451720151649617
+      roc_auc: 0.9679202017885806
+      total_hits: 334
+      true_assignments: 89
+    task2_track_validity:
+      average_efficiency: 0.15
+      average_fake_rate: 0.0
+      efficiency_std: 0.3570714214271425
+      fake_rate_std: 0.0
+      roc_auc: .nan
+      total_tracks: 3
+      valid_tracks: 3

@@ -21,16 +21,15 @@ def is_valid_file(path):
 
 class ParallelRootFilter:
     def __init__(self, input_dir: str, output_dir: str, expected_num_events_per_file: int,
-                 pt_threshold: float, eta_threshold: float, num_hits_threshold: int, 
-                 max_events: int = -1, num_workers: int = None):
+                 max_events: int = -1, num_workers: int = None, 
+                 no_nsm: bool = False, no_rpc: bool = False):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.expected_num_events_per_file = expected_num_events_per_file
-        self.pt_threshold = pt_threshold
-        self.eta_threshold = eta_threshold
-        self.num_hits_threshold = num_hits_threshold
         self.max_events = max_events
         self.num_workers = num_workers or mp.cpu_count()
+        self.no_nsm = no_nsm
+        self.no_rpc = no_rpc
         
         # Global counters (will be aggregated from workers)
         self.excluded_tracks_count = 0
@@ -92,94 +91,6 @@ class ParallelRootFilter:
         # print(f"Number of non-empty chunks: {non_empty_chunks}")
         return file_chunks
 
-    def _save_final_metadata(self, processing_time: float):
-        """Save aggregated metadata and index arrays"""
-        print("Saving final metadata...")
-        # print("-" * 30)
-        # Save index arrays
-        # print("This is self.file_indices", self.file_indices)
-        np.save(os.path.join(self.output_dir, 'event_file_indices.npy'), 
-                np.array(self.file_indices, dtype=np.int16))
-        # print("This is self.row_indices", self.row_indices)
-        np.save(os.path.join(self.output_dir, 'event_row_indices.npy'),
-                np.array(self.row_indices, dtype=np.int16))
-        
-        # Calculate summary statistics
-        total_tracks = self.valid_tracks_count + self.excluded_tracks_count
-        total_events = self.valid_events_count + self.excluded_events_count
-        excluded_tracks_percent = (self.excluded_tracks_count / total_tracks * 100) if total_tracks > 0 else 0
-        excluded_events_percent = (self.excluded_events_count / total_events * 100) if total_events > 0 else 0
-        avg_tracks_per_event = (self.valid_tracks_count / self.valid_events_count) if self.valid_events_count > 0 else 0
-        
-        # Count number of workers that actually processed files
-        num_active_workers = len(self.event_mapping)
-        
-        # Create metadata
-        dataset_info = {
-            'hit_features': self.hit_features,
-            'track_features': self.track_features,
-            'processing_summary': {
-                'total_excluded_tracks': self.excluded_tracks_count,
-                'total_tracks_processed': total_tracks,
-                'excluded_tracks_percentage': excluded_tracks_percent,
-                'total_excluded_events': self.excluded_events_count,
-                'total_events_processed': total_events,
-                'excluded_events_percentage': excluded_events_percent,
-                'valid_events': self.valid_events_count,
-                'valid_tracks': self.valid_tracks_count,
-                'average_tracks_per_event': avg_tracks_per_event,
-                'processing_time_seconds': processing_time,
-                'num_workers': self.num_workers,
-                'files_per_worker': self.files_per_worker,
-                'processing_status': 'Complete'
-            },
-            'processing_parameters': {
-                'pt_threshold': self.pt_threshold,
-                'eta_threshold': self.eta_threshold,
-                'num_hits_threshold': self.num_hits_threshold,
-                'expected_num_events_per_file': self.expected_num_events_per_file,
-                'max_events': self.max_events
-            },
-            'processed_files': [str(file_path) for file_path in self.files],
-            'event_mapping': {
-                'description': 'Event indices stored in separate numpy files for efficient access',
-                'total_events': self.valid_events_count,
-                'total_chunks': len(self.event_mapping),
-                'index_files': {
-                    'file_indices': 'event_file_indices.npy',
-                    'row_indices': 'event_row_indices.npy',
-                },
-                'chunk_summary': [
-                    {
-                        'h5_file': chunk['h5_file'],
-                        'source_root_file': chunk['source_root_file'],
-                        'event_count': chunk['event_range']['count'],
-                        'worker_id': chunk['worker_id']
-                    } for chunk in self.event_mapping
-                ]
-            }
-        }
-        
-        # Save metadata
-        dataset_info_file = os.path.join(self.output_dir, 'metadata.yaml')
-        with open(dataset_info_file, 'w') as f:
-            yaml.dump(dataset_info, f, default_flow_style=False, sort_keys=False)
-        
-        # Print summary
-        print(f"\n{'='*60}")
-        print(f"PROCESSING SUMMARY")
-        print(f"{'='*60}")
-        print(f"Processing time: {processing_time:.2f} seconds")
-        print(f"Workers used: {num_active_workers}")
-        print(f"Total excluded tracks: {self.excluded_tracks_count:,} out of {total_tracks:,} ({excluded_tracks_percent:.2f}%)")
-        print(f"Total excluded events: {self.excluded_events_count:,} out of {total_events:,} ({excluded_events_percent:.2f}%)")
-        print(f"Valid events: {self.valid_events_count:,}")
-        print(f"Valid tracks: {self.valid_tracks_count:,}")
-        print(f"Average tracks per event: {avg_tracks_per_event:.2f}")
-        print(f"Total chunks created: {len(self.event_mapping)}")
-        print(f"Dataset metadata saved to: {dataset_info_file}")
-        print(f"{'='*60}")
-
     def process_events(self):
         """Main method to process events in parallel"""
         print(f"Starting parallel processing with {self.num_workers} workers...")
@@ -202,8 +113,8 @@ class ParallelRootFilter:
             if file_chunk:  # Only create args for workers with files
                 args = (
                     worker_id, file_chunk, self.output_dir, self.expected_num_events_per_file,
-                    self.pt_threshold, self.eta_threshold, self.num_hits_threshold,
-                    self.max_events, self.hit_features, self.track_features
+                    self.max_events, self.hit_features, self.track_features,
+                    self.no_nsm, self.no_rpc
                 )
                 worker_args.append(args)
         
@@ -327,11 +238,10 @@ class ParallelRootFilter:
                 'processing_status': 'Complete'
             },
             'processing_parameters': {
-                'pt_threshold': self.pt_threshold,
-                'eta_threshold': self.eta_threshold,
-                'num_hits_threshold': self.num_hits_threshold,
                 'expected_number_of_events_per_file': self.expected_num_events_per_file,
-                'max_events': self.max_events
+                'max_events': self.max_events,
+                'no_nsm': self.no_nsm,
+                'no_rpc': self.no_rpc
             },
             'processed_files': [str(file_path) for file_path in self.files],
             'event_mapping': {
@@ -536,8 +446,8 @@ class ParallelRootFilter:
 
 def process_worker_files(args: Tuple) -> Dict:
     """Worker function to process a subset of files"""
-    (worker_id, file_chunk, output_dir, expected_num_events_per_file, pt_threshold, 
-     eta_threshold, num_hits_threshold, max_events, hit_features, track_features) = args
+    (worker_id, file_chunk, output_dir, expected_num_events_per_file, 
+     max_events, hit_features, track_features, no_nsm, no_rpc) = args
     
     if not file_chunk:
         return None
@@ -609,40 +519,42 @@ def process_worker_files(args: Tuple) -> Dict:
                             total_events_seen += remaining_events_in_file - 1  # -1 because we already counted current event
                             break
                         
+                        # Get all tracks for this event (including -1 for unassigned hits)
                         unique_tracks = np.unique(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk])
                         valid_tracks = unique_tracks[unique_tracks != -1]
                         
-                        if len(valid_tracks) == 0:
+                        # Apply technology filtering if requested
+                        hits = {branch: hit_features_chunk[branch][event_idx_in_chunk].copy() for branch in hit_features}
+                        technology_values = hits['spacePoint_technology']
+                        
+                        # Create mask for hits to keep
+                        keep_mask = np.ones(len(technology_values), dtype=bool)
+                        
+                        if no_nsm:
+                            # Remove STGC (4) and MM (5) hits
+                            keep_mask &= ~np.isin(technology_values, [4, 5])
+                        
+                        if no_rpc:
+                            # Remove RPC (2) hits
+                            keep_mask &= (technology_values != 2)
+                        
+                        # Filter all hit features based on the keep mask
+                        for branch in hit_features:
+                            hits[branch] = hits[branch][keep_mask]
+                        
+                        # Check if we have any hits left after filtering
+                        if len(hits['spacePoint_time']) == 0:
+                            # Skip events with no hits after technology filtering
                             excluded_events_count += 1
                             continue
                         
-                        # Apply track filters
-                        exclude_tracks = []
-                        for track_idx in valid_tracks:
-                            if (track_features_chunk['truthMuon_pt'][event_idx_in_chunk][track_idx] < pt_threshold or
-                                abs(track_features_chunk['truthMuon_eta'][event_idx_in_chunk][track_idx]) > eta_threshold or
-                                np.sum(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk] == track_idx) < num_hits_threshold):
-                                exclude_tracks.append(track_idx)
-                                excluded_tracks_count += 1
-                        
-                        remaining_tracks = np.setdiff1d(valid_tracks, exclude_tracks)
-                        
-                        if len(remaining_tracks) == 0:
-                            excluded_events_count += 1
-                            continue
-                        
-                        valid_tracks_count += len(remaining_tracks)
+                        # Count all tracks as valid (no cuts on pt, eta, or hit count)
+                        valid_tracks_count += len(valid_tracks)
                         total_valid_events += 1  # Count this as a valid event
-                        # Build event data
-                        hit2track_mask = np.isin(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk], remaining_tracks)
-                        modified_truth_link = hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk].copy()
-                        modified_truth_link[~hit2track_mask] = -1
-                        track_mask = np.isin(valid_tracks, remaining_tracks)
                         
-                        hits = {branch: hit_features_chunk[branch][event_idx_in_chunk] for branch in hit_features}
-                        hits["spacePoint_truthLink"] = modified_truth_link
-                        
-                        tracks = {branch: track_features_chunk[branch][event_idx_in_chunk][track_mask] for branch in track_features}
+                        # For tracks, we keep all tracks regardless of technology filtering
+                        # since technology filtering only affects hits, not tracks themselves
+                        tracks = {branch: track_features_chunk[branch][event_idx_in_chunk] for branch in track_features}
                         
                         hits_chunk.append(hits)
                         tracks_chunk.append(tracks)
@@ -768,13 +680,22 @@ def main():
     parser.add_argument("-i", "--input_dir", type=str, required=True, help="Directory containing input root files")
     parser.add_argument("-o", "--output_dir", type=str, required=True, help="Directory to save output HDF5 files")
     parser.add_argument("-n", "--expected_num_events_per_file", type=int, default=2000, help="Expected number of events per root file")
-    parser.add_argument("-pt", "--pt_threshold", type=float, default=5.0, help="Minimum pT threshold")
-    parser.add_argument("-eta", "--eta_threshold", type=float, default=2.7, help="Maximum |eta| threshold")
-    parser.add_argument("-nh", "--num_hits_threshold", type=int, default=3, help="Minimum number of hits")
     parser.add_argument("-max", "--max_events", type=int, default=-1, help="Maximum number of valid events each worker is allowed to process")
     parser.add_argument("-w", "--num_workers", type=int, default=None, help="Number of worker processes (default: 10)")
+    parser.add_argument("--no-NSM", action="store_true", default=False, help="Remove STGC and MM technology hits from dataset")
+    parser.add_argument("--no-RPC", action="store_true", default=False, help="Remove RPC technology hits from dataset")
 
     args = parser.parse_args()
+    
+    # Modify output directory path based on technology filtering flags
+    if getattr(args, 'no_NSM', False) or getattr(args, 'no_RPC', False):
+        base_output_dir = args.output_dir
+        suffix = ""
+        if getattr(args, 'no_NSM', False):
+            suffix += "_no-NSM"
+        if getattr(args, 'no_RPC', False):
+            suffix += "_no-RPC"
+        args.output_dir = base_output_dir + suffix
     
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -783,11 +704,10 @@ def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         expected_num_events_per_file=args.expected_num_events_per_file,
-        pt_threshold=args.pt_threshold,
-        eta_threshold=args.eta_threshold,
-        num_hits_threshold=args.num_hits_threshold,
         max_events=args.max_events,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        no_nsm=getattr(args, 'no_NSM', False),
+        no_rpc=getattr(args, 'no_RPC', False)
     )
     
     filter.process_events()

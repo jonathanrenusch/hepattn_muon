@@ -1,0 +1,15 @@
+TASK 2: TRACK VALIDITY CLASSIFICATION EVALUATION SUMMARY
+============================================================
+
+Evaluation file: /eos/project/e/end-to-end-muon-tracking/tracking/data/best2tracktracking/TRK-ATLAS-Muon-smallModel_20250915-T192111/ckpts/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+Number of track slots processed: 20000
+True valid tracks: 16677
+Predicted valid tracks: 17984
+Correctly predicted: 16139
+Overall accuracy: 0.8809
+Overall efficiency: 0.9677
+Overall purity: 0.8974
+ROC AUC: 0.8190
+
+Generated at: 2025-09-19 15:52:15.174725

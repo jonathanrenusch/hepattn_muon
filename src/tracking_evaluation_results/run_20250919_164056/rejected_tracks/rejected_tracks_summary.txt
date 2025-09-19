@@ -1,0 +1,40 @@
+# Rejected Tracks Evaluation Summary
+
+Generated at: 2025-09-19 16:41:13
+
+## Task 1: Hit-Track Assignment
+
+- ROC AUC: 0.9425
+- Total hits: 7,825
+- True assignments: 2,405
+- Average efficiency: 0.4585
+- Average fake rate: 0.0736
+
+## Task 2: Track Validity Classification
+
+- ROC AUC: nan
+- Total tracks: 93
+- Valid tracks: 93
+- Average efficiency: 0.5000
+- Average fake rate: 0.0000
+
+## Task 3: Regression Outputs
+
+### eta
+- Mean residual: nan
+- Std residual: nan
+- Predictions: 0
+- Outliers removed: 93
+
+### phi
+- Mean residual: nan
+- Std residual: nan
+- Predictions: 0
+- Outliers removed: 93
+
+### qpt
+- Mean residual: -0.039156
+- Std residual: 0.061119
+- Predictions: 93
+- Outliers removed: 0
+
