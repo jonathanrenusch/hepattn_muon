@@ -46,7 +46,11 @@ class HitFilterDatasetReducer:
                  max_tracks_per_event: int = 3,
                  max_hits_per_event: int = 500,
                  max_events: int = -1,
-                 num_workers: int = None):
+                 num_workers: int = None,
+                 disable_track_filtering: bool = False,
+                 pt_threshold: float = 5.0,
+                 eta_threshold: float = 2.7,
+                 num_hits_threshold: int = 3):
         
         self.input_dir = Path(input_dir)
         self.eval_file = Path(eval_file)
@@ -57,6 +61,10 @@ class HitFilterDatasetReducer:
         self.max_hits_per_event = max_hits_per_event
         self.max_events = max_events
         self.num_workers = num_workers or mp.cpu_count()
+        self.disable_track_filtering = disable_track_filtering
+        self.pt_threshold = pt_threshold
+        self.eta_threshold = eta_threshold
+        self.num_hits_threshold = num_hits_threshold
         
         # Load original metadata
         self.load_original_metadata()
@@ -74,14 +82,23 @@ class HitFilterDatasetReducer:
             'events_passed_hit_filter': 0,
             'events_failed_no_hits_after_filter': 0,
             'events_failed_max_tracks': 0,
+            'events_failed_min_tracks': 0,
             'events_failed_max_hits': 0,
+            'events_failed_min_hits': 0,
             'events_failed_eval_data_missing': 0,
             'events_failed_data_loading': 0,
+            'events_failed_track_filtering': 0,
             'events_final_output': 0,
             'total_hits_before': 0,
             'total_hits_after': 0,
             'total_tracks_before': 0,
-            'total_tracks_after': 0
+            'total_tracks_after': 0,
+            'excluded_tracks_count': 0,
+            # Detailed track filtering statistics
+            'tracks_excluded_pt': 0,
+            'tracks_excluded_eta': 0,
+            'tracks_excluded_hits': 0,
+            'tracks_excluded_no_true_hits': 0
         }
         
         # Data storage
@@ -183,7 +200,7 @@ class HitFilterDatasetReducer:
                     all_true_labels.extend(true_labels)
                     
                     # Stop after collecting enough data for threshold calculation
-                    if len(all_logits) > 500000000:  # 100 Mio hits should be enough
+                    if len(all_logits) > 50000000:  # 100 Mio hits should be enough
                         break
                         
                 except KeyError as e:
@@ -258,7 +275,11 @@ class HitFilterDatasetReducer:
                 self.max_hits_per_event,
                 self.hit_features,
                 self.track_features,
-                self.original_metadata['event_mapping']['chunk_summary']
+                self.original_metadata['event_mapping']['chunk_summary'],
+                self.disable_track_filtering,
+                self.pt_threshold,
+                self.eta_threshold,
+                self.num_hits_threshold
             )
             worker_args.append(args)
         
@@ -411,7 +432,14 @@ class HitFilterDatasetReducer:
                 'events_failed_min_tracks': int(self.stats['events_failed_min_tracks']),
                 'events_failed_max_hits': int(self.stats['events_failed_max_hits']),
                 'events_failed_min_hits': int(self.stats['events_failed_min_hits']),
+                'events_failed_track_filtering': int(self.stats['events_failed_track_filtering']),
                 'events_final_output': int(self.stats['events_final_output']),
+                'excluded_tracks_count': int(self.stats['excluded_tracks_count']),
+                # Detailed track filtering statistics
+                'tracks_excluded_pt': int(self.stats['tracks_excluded_pt']),
+                'tracks_excluded_eta': int(self.stats['tracks_excluded_eta']),
+                'tracks_excluded_hits': int(self.stats['tracks_excluded_hits']),
+                'tracks_excluded_no_true_hits': int(self.stats['tracks_excluded_no_true_hits']),
                 'hit_filter_pass_rate_percent': float(hit_filter_pass_rate),
                 'max_tracks_fail_rate_percent': float(max_tracks_fail_rate),
                 'max_hits_fail_rate_percent': float(max_hits_fail_rate),
@@ -429,6 +457,10 @@ class HitFilterDatasetReducer:
                 'detection_threshold': float(self.detection_threshold),
                 'max_tracks_per_event': int(self.max_tracks_per_event),
                 'max_hits_per_event': int(self.max_hits_per_event),
+                'disable_track_filtering': bool(self.disable_track_filtering),
+                'pt_threshold': float(self.pt_threshold),
+                'eta_threshold': float(self.eta_threshold),
+                'num_hits_threshold': int(self.num_hits_threshold),
                 'eval_file': str(self.eval_file),
                 'source_dataset': str(self.input_dir)
             },
@@ -467,6 +499,13 @@ class HitFilterDatasetReducer:
         print(f"Detection threshold: {self.detection_threshold:.6f}")
         print(f"Max tracks per event: {self.max_tracks_per_event}")
         print(f"Max hits per event: {self.max_hits_per_event}")
+        if not self.disable_track_filtering:
+            print(f"Track filtering enabled:")
+            print(f"  pT threshold: {self.pt_threshold} GeV")
+            print(f"  |eta| threshold: {self.eta_threshold}")
+            print(f"  Min hits per track: {self.num_hits_threshold}")
+        else:
+            print(f"Track filtering: DISABLED")
         print(f"")
         print(f"EVENT STATISTICS:")
         print(f"  Total events processed: {self.stats['total_events_processed']:,}")
@@ -486,18 +525,29 @@ class HitFilterDatasetReducer:
               f"({self.stats['events_failed_max_hits']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"  Events failed min hits cut: {self.stats['events_failed_min_hits']:,} "
               f"({self.stats['events_failed_min_hits']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
+        if not self.disable_track_filtering:
+            print(f"  Events failed track filtering: {self.stats['events_failed_track_filtering']:,} "
+                  f"({self.stats['events_failed_track_filtering']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"  Final events output: {self.stats['events_final_output']:,} "
               f"({self.stats['events_final_output']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"")
-        print(f"HIT STATISTICS:")
+        print(f"HIT/TRACK STATISTICS:")
         print(f"  Total hits before: {self.stats['total_hits_before']:,}")
         print(f"  Total hits after: {self.stats['total_hits_after']:,}")
         print(f"  Hit reduction: {(1-self.stats['total_hits_after']/max(1,self.stats['total_hits_before']))*100:.2f}%")
-        print(f"")
-        print(f"TRACK STATISTICS:")
         print(f"  Total tracks before: {self.stats['total_tracks_before']:,}")
         print(f"  Total tracks after: {self.stats['total_tracks_after']:,}")
+        print(f"  Track reduction: {(1-self.stats['total_tracks_after']/max(1,self.stats['total_tracks_before']))*100:.2f}%")
+        if not self.disable_track_filtering:
+            print(f"  Tracks excluded by filtering: {self.stats['excluded_tracks_count']:,}")
+            total_tracks = self.stats['total_tracks_before']
+            if total_tracks > 0:
+                print(f"    - Excluded due to pT < {self.pt_threshold} GeV: {self.stats['tracks_excluded_pt']:,} ({self.stats['tracks_excluded_pt']/total_tracks*100:.2f}%)")
+                print(f"    - Excluded due to |eta| > {self.eta_threshold}: {self.stats['tracks_excluded_eta']:,} ({self.stats['tracks_excluded_eta']/total_tracks*100:.2f}%)")
+                print(f"    - Excluded due to < {self.num_hits_threshold} hits: {self.stats['tracks_excluded_hits']:,} ({self.stats['tracks_excluded_hits']/total_tracks*100:.2f}%)")
+                print(f"    - Excluded due to no true hits after hit filtering: {self.stats['tracks_excluded_no_true_hits']:,} ({self.stats['tracks_excluded_no_true_hits']/total_tracks*100:.2f}%)")
         print(f"")
+        print(f"OUTPUT SUMMARY:")
         print(f"Output directory: {self.output_dir}")
         print(f"{'='*80}")
 
@@ -506,7 +556,8 @@ def process_worker_events(args: Tuple) -> Dict:
     """Worker function to process a range of events."""
     (worker_id, start_idx, end_idx, input_dir, eval_file, output_dir,
      detection_threshold, max_tracks_per_event, max_hits_per_event,
-     hit_features, track_features, chunk_summary) = args
+     hit_features, track_features, chunk_summary, disable_track_filtering,
+     pt_threshold, eta_threshold, num_hits_threshold) = args
     
     print(f"Worker {worker_id}: Processing events {start_idx} to {end_idx-1}")
     
@@ -521,16 +572,23 @@ def process_worker_events(args: Tuple) -> Dict:
         'events_passed_hit_filter': 0,
         'events_failed_no_hits_after_filter': 0,
         'events_failed_max_tracks': 0,
-        'events_failed_max_tracks': 0,
+        'events_failed_min_tracks': 0,
         'events_failed_max_hits': 0,
         'events_failed_min_hits': 0,
         'events_failed_eval_data_missing': 0,
         'events_failed_data_loading': 0,
+        'events_failed_track_filtering': 0,
         'events_final_output': 0,
         'total_hits_before': 0,
         'total_hits_after': 0,
         'total_tracks_before': 0,
-        'total_tracks_after': 0
+        'total_tracks_after': 0,
+        'excluded_tracks_count': 0,
+        # Detailed track filtering statistics
+        'tracks_excluded_pt': 0,
+        'tracks_excluded_eta': 0,
+        'tracks_excluded_hits': 0,
+        'tracks_excluded_no_true_hits': 0
     }
     
     filtered_events = []
@@ -622,12 +680,105 @@ def process_worker_events(args: Tuple) -> Dict:
                 
                 worker_stats['events_passed_hit_filter'] += 1
                 
-                # TODO: You will have to integrate track level filtering here if you really wanne have a good dataset
-                # Similar to other scripts live filter evaluation or the filter preperation script
-
-                # Count tracks after hit filtering
+                # Apply track-level filtering similar to the preprocessing script
                 unique_track_ids = np.unique(hits_dict['spacePoint_truthLink'])
                 valid_track_ids = unique_track_ids[unique_track_ids >= 0]
+                
+                if len(valid_track_ids) == 0:
+                    worker_stats['events_failed_no_hits_after_filter'] += 1
+                    continue
+                
+                # ALWAYS filter tracks that have zero hits after hit filtering
+                # This ensures consistency between hit and track data
+                exclude_tracks = []
+                
+                if not disable_track_filtering:
+                    # Apply track filters based on pT, eta, and hit count
+                    for track_idx in valid_track_ids:
+                        # Get track index in the tracks array (valid_track_ids contains truthLink values)
+                        track_array_idx = int(track_idx)  # truthLink values correspond to track indices
+                        
+                        # Check if track index is valid
+                        if track_array_idx >= len(tracks_dict['truthMuon_pt']):
+                            exclude_tracks.append(track_idx)
+                            continue
+                        
+                        track_excluded = False
+                        exclude_reasons = []
+                        
+                        # Check if track has any true hits left after hit filtering
+                        true_hits_count = np.sum(hits_dict['spacePoint_truthLink'] == track_idx)
+                        if true_hits_count == 0:
+                            exclude_reasons.append('no_true_hits')
+                            worker_stats['tracks_excluded_no_true_hits'] += 1
+                            track_excluded = True
+                        
+                        # Check pT threshold
+                        if tracks_dict['truthMuon_pt'][track_array_idx] < pt_threshold:
+                            exclude_reasons.append('pt')
+                            worker_stats['tracks_excluded_pt'] += 1
+                            track_excluded = True
+                        
+                        # Check eta threshold
+                        if abs(tracks_dict['truthMuon_eta'][track_array_idx]) > eta_threshold:
+                            exclude_reasons.append('eta')
+                            worker_stats['tracks_excluded_eta'] += 1
+                            track_excluded = True
+                        
+                        # Check minimum hits threshold (only if track has true hits)
+                        if true_hits_count > 0 and true_hits_count < num_hits_threshold:
+                            exclude_reasons.append('hits')
+                            worker_stats['tracks_excluded_hits'] += 1
+                            track_excluded = True
+                        
+                        if track_excluded:
+                            exclude_tracks.append(track_idx)
+                            worker_stats['excluded_tracks_count'] += 1
+                else:
+                    # Even when track filtering is disabled, we must remove tracks with no hits
+                    for track_idx in valid_track_ids:
+                        # Get track index in the tracks array
+                        track_array_idx = int(track_idx)
+                        
+                        # Check if track index is valid
+                        if track_array_idx >= len(tracks_dict['truthMuon_pt']):
+                            exclude_tracks.append(track_idx)
+                            continue
+                            
+                        # Check if track has any true hits left after hit filtering
+                        true_hits_count = np.sum(hits_dict['spacePoint_truthLink'] == track_idx)
+                        if true_hits_count == 0:
+                            worker_stats['tracks_excluded_no_true_hits'] += 1
+                            exclude_tracks.append(track_idx)
+                            worker_stats['excluded_tracks_count'] += 1
+                
+                remaining_tracks = np.setdiff1d(valid_track_ids, exclude_tracks)
+                
+                if len(remaining_tracks) == 0:
+                    worker_stats['events_failed_track_filtering'] += 1
+                    continue
+                
+                # Filter hits to only keep those from remaining tracks
+                hit2track_mask = np.isin(hits_dict['spacePoint_truthLink'], remaining_tracks)
+                modified_truth_link = hits_dict['spacePoint_truthLink'].copy()
+                modified_truth_link[~hit2track_mask] = -1
+                
+                # Apply the mask to all hit features
+                for feature in hit_features:
+                    if feature == 'spacePoint_truthLink':
+                        hits_dict[feature] = modified_truth_link
+                    else:
+                        hits_dict[feature] = hits_dict[feature]  # Keep all hits but modify truthLink
+                
+                # Filter tracks to only keep remaining tracks
+                track_mask = np.isin(np.arange(len(tracks_dict['truthMuon_pt'])), remaining_tracks.astype(int))
+                for feature in track_features:
+                    tracks_dict[feature] = tracks_dict[feature][track_mask]
+                
+                valid_track_ids = remaining_tracks
+                
+                # Update counts after track filtering
+                filtered_num_hits = len(hits_dict[hit_features[0]])
                 filtered_num_tracks = len(valid_track_ids)
                 
                 # Apply max tracks cut
@@ -647,14 +798,7 @@ def process_worker_events(args: Tuple) -> Dict:
                 if filtered_num_hits < 9: 
                     worker_stats['events_failed_min_hits'] += 1
                     continue               
-
-                # Filter tracks to only keep those that have hits
-                track_mask = np.isin(np.arange(len(tracks_dict[track_features[0]])), valid_track_ids)
-                for feature in track_features:
-                    tracks_dict[feature] = tracks_dict[feature][track_mask]
-
-                
-                # Convert back to arrays
+                # Convert back to arrays (tracks have already been filtered above)
                 filtered_hits_array = np.column_stack([hits_dict[feature] for feature in hit_features])
                 filtered_tracks_array = np.column_stack([tracks_dict[feature] for feature in track_features])
                 
@@ -670,7 +814,7 @@ def process_worker_events(args: Tuple) -> Dict:
                 
                 worker_stats['events_final_output'] += 1
                 worker_stats['total_hits_after'] += filtered_num_hits
-                worker_stats['total_tracks_after'] += len(valid_track_ids)
+                worker_stats['total_tracks_after'] += filtered_num_tracks
                 
             except Exception as e:
                 print(f"Worker {worker_id}: Error processing event {global_event_idx}: {e}")
@@ -728,6 +872,14 @@ def main():
                        help="Maximum number of events to process (default: -1 for all events)")
     parser.add_argument("--num_workers", "-w", type=int, default=None,
                        help="Number of worker processes (default: CPU count)")
+    parser.add_argument("--disable-track-filtering", action="store_true", default=False,
+                       help="Disable track filtering based on pt, eta, and hit count")
+    parser.add_argument("--pt-threshold", type=float, default=5.0,
+                       help="Minimum pT threshold for tracks (GeV, default: 5.0)")
+    parser.add_argument("--eta-threshold", type=float, default=2.7,
+                       help="Maximum |eta| threshold for tracks (default: 2.7)")
+    parser.add_argument("--num-hits-threshold", type=int, default=3,
+                       help="Minimum number of hits per track (default: 3)")
     
     args = parser.parse_args()
     
@@ -750,6 +902,11 @@ def main():
     print(f"Max hits per event: {args.max_hits_per_event}")
     print(f"Max events: {args.max_events if args.max_events > 0 else 'ALL'}")
     print(f"Number of workers: {args.num_workers if args.num_workers else 'Auto'}")
+    print(f"Disable track filtering: {args.disable_track_filtering}")
+    if not args.disable_track_filtering:
+        print(f"pT threshold: {args.pt_threshold} GeV")
+        print(f"Eta threshold: {args.eta_threshold}")
+        print(f"Min hits per track: {args.num_hits_threshold}")
     print("="*80)
     
     # Create and run the filter
@@ -762,7 +919,11 @@ def main():
         max_tracks_per_event=args.max_tracks_per_event,
         max_hits_per_event=args.max_hits_per_event,
         max_events=args.max_events,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        disable_track_filtering=args.disable_track_filtering,
+        pt_threshold=args.pt_threshold,
+        eta_threshold=args.eta_threshold,
+        num_hits_threshold=args.num_hits_threshold
     )
     
     filter_processor.process_events()

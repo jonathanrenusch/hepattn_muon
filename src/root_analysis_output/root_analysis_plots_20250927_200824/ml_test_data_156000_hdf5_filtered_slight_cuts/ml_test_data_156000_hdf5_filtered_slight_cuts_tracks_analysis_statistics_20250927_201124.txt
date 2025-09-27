@@ -1,0 +1,148 @@
+============================================================
+TRACK ANALYSIS STATISTICS
+============================================================
+Analysis timestamp: 2025-09-27 20:11:24
+Max events analyzed: 10000
+
+EVENT STATISTICS:
+------------------------------
+Total events analyzed: 10000
+
+TRACKS PER EVENT DISTRIBUTION:
+----------------------------------------
+0 tracks: 302 events (3.02%)
+1 tracks: 2713 events (27.13%)
+2 tracks: 6985 events (69.85%)
+
+Mean tracks per event: 1.67
+Standard deviation: 0.53
+Min tracks per event: 0
+Max tracks per event: 2
+
+TRACK LENGTH STATISTICS:
+-----------------------------------
+Total number of tracks: 16683
+Tracks with length < 3 hits: 0
+Percentage of tracks with < 3 hits: 0.00%
+Tracks with length > 3 hits: 16683
+Percentage of tracks with > 3 hits: 100.00%
+
+Mean track length: 26.35 hits
+Standard deviation: 8.30 hits
+Min track length: 3 hits
+Max track length: 68 hits
+
+TRACK LENGTH DISTRIBUTION:
+-----------------------------------
+3 hits: 18 tracks (0.11%)
+4 hits: 11 tracks (0.07%)
+5 hits: 26 tracks (0.16%)
+6 hits: 44 tracks (0.26%)
+7 hits: 30 tracks (0.18%)
+8 hits: 54 tracks (0.32%)
+9 hits: 32 tracks (0.19%)
+10 hits: 27 tracks (0.16%)
+11 hits: 38 tracks (0.23%)
+12 hits: 60 tracks (0.36%)
+13 hits: 107 tracks (0.64%)
+14 hits: 134 tracks (0.80%)
+15 hits: 232 tracks (1.39%)
+16 hits: 327 tracks (1.96%)
+17 hits: 522 tracks (3.13%)
+18 hits: 908 tracks (5.44%)
+19 hits: 1069 tracks (6.41%)
+20 hits: 798 tracks (4.78%)
+21 hits: 702 tracks (4.21%)
+22 hits: 665 tracks (3.99%)
+23 hits: 652 tracks (3.91%)
+24 hits: 782 tracks (4.69%)
+25 hits: 896 tracks (5.37%)
+26 hits: 916 tracks (5.49%)
+27 hits: 910 tracks (5.45%)
+28 hits: 848 tracks (5.08%)
+29 hits: 796 tracks (4.77%)
+30 hits: 724 tracks (4.34%)
+31 hits: 663 tracks (3.97%)
+32 hits: 553 tracks (3.31%)
+33 hits: 509 tracks (3.05%)
+34 hits: 420 tracks (2.52%)
+35 hits: 327 tracks (1.96%)
+36 hits: 282 tracks (1.69%)
+37 hits: 208 tracks (1.25%)
+38 hits: 174 tracks (1.04%)
+39 hits: 132 tracks (0.79%)
+40 hits: 136 tracks (0.82%)
+41 hits: 94 tracks (0.56%)
+42 hits: 98 tracks (0.59%)
+43 hits: 101 tracks (0.61%)
+44 hits: 82 tracks (0.49%)
+45 hits: 67 tracks (0.40%)
+46 hits: 67 tracks (0.40%)
+47 hits: 59 tracks (0.35%)
+48 hits: 49 tracks (0.29%)
+49 hits: 56 tracks (0.34%)
+50 hits: 51 tracks (0.31%)
+51 hits: 49 tracks (0.29%)
+52 hits: 23 tracks (0.14%)
+53 hits: 19 tracks (0.11%)
+54 hits: 21 tracks (0.13%)
+55 hits: 18 tracks (0.11%)
+56 hits: 19 tracks (0.11%)
+57 hits: 19 tracks (0.11%)
+58 hits: 14 tracks (0.08%)
+59 hits: 12 tracks (0.07%)
+60 hits: 11 tracks (0.07%)
+61 hits: 10 tracks (0.06%)
+62 hits: 2 tracks (0.01%)
+63 hits: 4 tracks (0.02%)
+64 hits: 1 tracks (0.01%)
+65 hits: 3 tracks (0.02%)
+67 hits: 1 tracks (0.01%)
+68 hits: 1 tracks (0.01%)
+
+============================================================
+DETECTOR TECHNOLOGY STATISTICS
+============================================================
+Events processed: 10000
+Total hits: 842,620
+Total true hits: 455,365
+
+TECHNOLOGY DISTRIBUTION (ABSOLUTE NUMBERS):
+--------------------------------------------------
+MDT:
+  Total hits: 467,877
+  True hits: 313,142
+
+RPC:
+  Total hits: 114,359
+  True hits: 64,691
+
+TGC:
+  Total hits: 116,893
+  True hits: 75,079
+
+STGC:
+  Total hits: 76,813
+  True hits: 1,430
+
+MM:
+  Total hits: 66,678
+  True hits: 1,023
+
+TECHNOLOGY DISTRIBUTION (PERCENTAGES):
+--------------------------------------------------
+Percentage of total hits by technology:
+  MDT: 55.53%
+  RPC: 13.57%
+  TGC: 13.87%
+  STGC: 9.12%
+  MM: 7.91%
+
+Percentage of true hits by technology:
+  MDT: 68.77%
+  RPC: 14.21%
+  TGC: 16.49%
+  STGC: 0.31%
+  MM: 0.22%
+
+============================================================
