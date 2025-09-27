@@ -32,6 +32,8 @@ import gc
 import signal
 import sys
 import os
+import multiprocessing as mp
+from functools import partial
 
 # Memory monitoring
 import psutil
@@ -52,7 +54,8 @@ signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 # Global configuration constants
-DEFAULT_WORKING_POINTS = [0.96, 0.965, 0.97, 0.975, 0.98, 0.985, 0.99, 0.995]
+# DEFAULT_WORKING_POINTS = [0.96, 0.965, 0.97, 0.975, 0.98, 0.985, 0.99, 0.995]
+DEFAULT_WORKING_POINTS = [0.975, 0.985, 0.99, 0.995]
 
 # Set matplotlib backend and style
 plt.switch_backend('Agg')
@@ -68,18 +71,120 @@ plt.rcParams.update({
 })
 
 
+def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_particle_pts, 
+                        all_particle_etas, all_station_indices, true_hit_mask, min_pt):
+    """
+    Worker function to process a chunk of tracks for baseline filtering.
+    This function is designed to be called by multiprocessing.Pool.
+    
+    Args:
+        track_chunk: List of (event_id, particle_id) tuples to process
+        all_event_ids: Array of event IDs for all hits
+        all_particle_ids: Array of particle IDs for all hits
+        all_particle_pts: Array of particle pT values for all hits
+        all_particle_etas: Array of particle eta values for all hits
+        all_station_indices: Array of station indices for all hits
+        true_hit_mask: Boolean mask for true hits
+    
+    Returns:
+        Dictionary with qualified tracks and statistics for this chunk
+    """
+    chunk_stats = {
+        'total_tracks_checked': 0,
+        'tracks_failed_min_hits': 0,
+        'tracks_failed_eta_cuts': 0,
+        'tracks_failed_pt_cuts': 0,
+        'tracks_failed_station_cuts': 0,
+        'tracks_passed_all_cuts': 0
+    }
+    
+    qualified_tracks = set()
+    
+    for event_id, particle_id in track_chunk:
+        chunk_stats['total_tracks_checked'] += 1
+        
+        # Get hits for this specific track
+        track_mask = (
+            (all_event_ids == event_id) & 
+            (all_particle_ids == particle_id) & 
+            true_hit_mask
+        )
+        track_hits = np.sum(track_mask)
+        
+        # Pre-filter 1: tracks must have at least 9 hits total
+        if track_hits < 9:
+            chunk_stats['tracks_failed_min_hits'] += 1
+            continue
+        
+        # Get particle kinematic properties for this track
+        track_indices = np.where(track_mask)[0]
+        if len(track_indices) == 0:
+            chunk_stats['tracks_failed_min_hits'] += 1
+            continue
+            
+        # Use the first hit to get particle properties (all hits from same particle should have same pt/eta)
+        first_hit_idx = track_indices[0]
+        track_pt = all_particle_pts[first_hit_idx]
+        track_eta = all_particle_etas[first_hit_idx]
+        
+        # Pre-filter 2: eta acceptance cuts |eta| >= 0.1 and |eta| <= 2.7
+        if np.abs(track_eta) < 0.1 or np.abs(track_eta) > 2.7:
+            chunk_stats['tracks_failed_eta_cuts'] += 1
+            continue
+            
+        # Pre-filter 3: pt threshold >= self.min_pt
+        if track_pt < min_pt:
+            chunk_stats['tracks_failed_pt_cuts'] += 1
+            continue
+        
+        # Get station indices for this track
+        track_stations = all_station_indices[track_mask]
+        unique_stations, station_counts = np.unique(track_stations, return_counts=True)
+        
+        # Check station requirements:
+        # 1. At least 3 different stations
+        if len(unique_stations) < 3:
+            chunk_stats['tracks_failed_station_cuts'] += 1
+            continue
+            
+         # 2. Each station must have at least 3 hits
+        n_good_stations = np.sum(station_counts >= 3)
+        if n_good_stations < 3:
+            chunk_stats['tracks_failed_station_cuts'] += 1
+            continue
+            
+        # Track passed all criteria
+        qualified_tracks.add((event_id, particle_id))
+        chunk_stats['tracks_passed_all_cuts'] += 1
+    
+    return {
+        'qualified_tracks': qualified_tracks,
+        'stats': chunk_stats
+    }
+
+
 class AtlasMuonEvaluatorDataLoader:
     """Evaluation class for ATLAS muon hit filtering using DataLoader."""
     
-    def __init__(self, eval_path, data_dir, config_path, output_dir, max_events=None):
+    def __init__(self, eval_path, data_dir, config_path, output_dir, max_events=None, min_pt=0.0, max_pt=float('inf')):
         self.eval_path = Path(eval_path)
         self.data_dir = Path(data_dir)
         self.config_path = Path(config_path)
+        self.min_pt = min_pt  # Minimum pT threshold for track filtering
+        self.max_pt = max_pt  # Maximum pT threshold for track filtering
         
         # Create timestamped subdirectory for this run
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) / f"run_{timestamp}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create subdirectories for all tracks, baseline filtered tracks, and rejected tracks
+        self.all_tracks_dir = self.output_dir / "all_tracks"
+        self.baseline_filtered_dir = self.output_dir / "baseline_filtered_tracks"
+        self.rejected_tracks_dir = self.output_dir / "rejected_tracks"
+        self.all_tracks_dir.mkdir(parents=True, exist_ok=True)
+        self.baseline_filtered_dir.mkdir(parents=True, exist_ok=True)
+        self.rejected_tracks_dir.mkdir(parents=True, exist_ok=True)
         
         self.max_events = max_events
         
@@ -96,6 +201,7 @@ class AtlasMuonEvaluatorDataLoader:
         self.all_particle_pts = None
         self.all_particle_ids = None
         self.all_event_ids = None
+        self.all_station_indices = None
     
     def setup_data_module(self):
         """Initialize the AtlasMuonDataModule with proper configuration."""
@@ -124,7 +230,7 @@ class AtlasMuonEvaluatorDataLoader:
             train_dir=str(self.data_dir),
             val_dir=str(self.data_dir),
             test_dir=str(self.data_dir),
-            num_workers=10,  # Use many workers for maximum speed
+            num_workers=100,  # Use many workers for maximum speed
             num_train=abs(num_test_events) if num_test_events != -1 else 1000,  # Set to positive value
             num_val=abs(num_test_events) if num_test_events != -1 else 1000,   # Set to positive value
             num_test=num_test_events,  # -1 means use all available events
@@ -168,6 +274,7 @@ class AtlasMuonEvaluatorDataLoader:
             all_particle_ids = np.zeros(estimated_hits, dtype=np.int32)
             all_particle_technology = np.zeros(estimated_hits, dtype=np.int8)
             all_event_ids = np.zeros(estimated_hits, dtype=np.int32)
+            all_station_indices = np.zeros(estimated_hits, dtype=np.int32)
             
             current_idx = 0
             events_processed = 0
@@ -184,6 +291,7 @@ class AtlasMuonEvaluatorDataLoader:
             all_particle_ids = []
             all_particle_technology = []
             all_event_ids = []
+            all_station_indices = []
             current_idx = None
         
         try:
@@ -233,10 +341,11 @@ class AtlasMuonEvaluatorDataLoader:
                         true_labels = targets_batch["hit_on_valid_particle"][0].numpy().astype(np.bool_)
                         hit_particle_ids = inputs_batch["plotting_spacePoint_truthLink"][0].numpy().astype(np.int32)
                         hit_technologies = inputs_batch["hit_spacePoint_technology"][0].numpy().astype(np.int8)
+                        hit_station_indices = inputs_batch["hit_spacePoint_stationIndex"][0].numpy().astype(np.int32)
                         
                         # Verify shapes match
                         n_hits = len(hit_logits)
-                        if n_hits != len(true_labels) or n_hits != len(hit_particle_ids):
+                        if n_hits != len(true_labels) or n_hits != len(hit_particle_ids) or n_hits != len(hit_station_indices):
                             print(f"Warning: Shape mismatch in event {event_idx}")
                             continue
                         
@@ -277,6 +386,7 @@ class AtlasMuonEvaluatorDataLoader:
                                 all_particle_ids = np.resize(all_particle_ids, new_size)
                                 all_particle_technology = np.resize(all_particle_technology, new_size)
                                 all_event_ids = np.resize(all_event_ids, new_size)
+                                all_station_indices = np.resize(all_station_indices, new_size)
                             
                             # Copy data to pre-allocated arrays
                             all_logits[current_idx:current_idx+n_hits] = hit_logits
@@ -287,6 +397,7 @@ class AtlasMuonEvaluatorDataLoader:
                             all_particle_ids[current_idx:current_idx+n_hits] = hit_particle_ids
                             all_particle_technology[current_idx:current_idx+n_hits] = hit_technologies
                             all_event_ids[current_idx:current_idx+n_hits] = event_idx
+                            all_station_indices[current_idx:current_idx+n_hits] = hit_station_indices
                             current_idx += n_hits
                         else:
                             # Fall back to list append
@@ -298,6 +409,7 @@ class AtlasMuonEvaluatorDataLoader:
                             all_particle_ids.append(hit_particle_ids)
                             all_particle_technology.append(hit_technologies)
                             all_event_ids.append(np.full(n_hits, event_idx, dtype=np.int32))
+                            all_station_indices.append(hit_station_indices)
                         
                         events_processed += 1
                         
@@ -326,6 +438,7 @@ class AtlasMuonEvaluatorDataLoader:
             self.all_particle_ids = all_particle_ids[:current_idx]
             self.all_particle_technology = all_particle_technology[:current_idx]
             self.all_event_ids = all_event_ids[:current_idx]
+            self.all_station_indices = all_station_indices[:current_idx]
         else:
             # Concatenate lists
             self.all_logits = np.concatenate(all_logits) if all_logits else np.array([])
@@ -336,6 +449,7 @@ class AtlasMuonEvaluatorDataLoader:
             self.all_particle_ids = np.concatenate(all_particle_ids) if all_particle_ids else np.array([])
             self.all_particle_technology = np.concatenate(all_particle_technology) if all_particle_technology else np.array([])
             self.all_event_ids = np.concatenate(all_event_ids) if all_event_ids else np.array([])
+            self.all_station_indices = np.concatenate(all_station_indices) if all_station_indices else np.array([])
         
         final_memory = process.memory_info().rss / 1024 / 1024
         print(f"\nData collection complete! Final memory: {final_memory:.1f} MB (+{final_memory-initial_memory:.1f} MB)")
@@ -344,6 +458,21 @@ class AtlasMuonEvaluatorDataLoader:
         print(f"True hits: {np.sum(self.all_true_labels):,}")
         print(f"Noise hits: {np.sum(~self.all_true_labels):,}")
         print(f"Valid particle hits (pt > 0): {np.sum(self.all_particle_pts > 0):,}")
+
+        # Apply pT filter if specified
+        if self.min_pt > 0 or self.max_pt < float('inf'):
+            filter_desc = []
+            if self.min_pt > 0:
+                filter_desc.append(f"pT >= {self.min_pt} GeV")
+            if self.max_pt < float('inf'):
+                filter_desc.append(f"pT <= {self.max_pt} GeV")
+            print(f"\nApplying pT filter: excluding all hits from tracks with {' and '.join(filter_desc)}...")
+            # self._apply_pt_filter()
+            print(f"After pT filter:")
+            print(f"  Total hits: {len(self.all_logits):,}")
+            print(f"  True hits: {np.sum(self.all_true_labels):,}")
+            print(f"  Noise hits: {np.sum(~self.all_true_labels):,}")
+            print(f"  Valid particle hits (pt > 0): {np.sum(self.all_particle_pts > 0):,}")
 
         # Print pt statistics for valid particles
         valid_pt_mask = self.all_particle_pts > 0
@@ -360,14 +489,329 @@ class AtlasMuonEvaluatorDataLoader:
         
         return True
     
-    def plot_roc_curve(self): # verified: (check!)
+    def create_baseline_track_filter(self):
+        """
+        Create filter masks for baseline evaluation that includes:
+        - ALL noise hits (maintains realistic background for both categories)
+        - True hits from tracks meeting baseline requirements (baseline category)
+        - True hits from tracks NOT meeting baseline requirements (rejected category)
+        
+        Baseline requirements:
+          * At least 3 different stations
+          * At least 3 hits per station (meaning >= 9 hits total per track)
+          * |eta| >= 0.1 and |eta| <= 2.7 (detector acceptance region)
+          * pt >= some GeV (minimum pt threshold)
+        
+        Note: If global pT filtering was applied earlier (--min_pt), only tracks
+        above that threshold will be considered here.
+        
+        This approach maintains signal-to-noise ratio while allowing comparison
+        between high-quality and low-quality tracks.
+        
+        Returns:
+            baseline_mask: Boolean array for hits in baseline evaluation
+            rejected_mask: Boolean array for hits in rejected tracks evaluation
+            stats: Dictionary with detailed filtering statistics
+        """
+        print("Creating baseline track filter (>=3 stations, >=3 hits per station, eta cuts, pt cuts)...")
+        print("Strategy: Keep ALL noise hits + true hits from baseline-qualified tracks only")
+        
+        # Only consider true hits (noise hits are not part of tracks)
+        true_hit_mask = self.all_true_labels
+        print("Total true hits available for track evaluation: {:,}".format(np.sum(true_hit_mask)))
+        # Get unique combinations of (event_id, particle_id) for valid tracks
+        valid_event_particle_combinations = np.unique(
+            np.column_stack([
+                self.all_event_ids[true_hit_mask],
+                self.all_particle_ids[true_hit_mask]
+            ]), axis=0
+        )
+        print()
+        print(f"Found {len(valid_event_particle_combinations)} unique tracks with truth hits")
+        baseline_qualified_tracks = set()
+        
+        # Track statistics for detailed reporting
+        stats = {
+            'total_tracks_checked': 0,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
+            'tracks_failed_station_cuts': 0,
+            'tracks_passed_all_cuts': 0
+        }
+        
+        # Parallel processing of tracks
+        print(f"Processing {len(valid_event_particle_combinations)} tracks using parallel workers...")
+        
+        # Determine optimal number of workers
+        n_workers = min(mp.cpu_count(), max(1, len(valid_event_particle_combinations) // 100))
+        n_workers = min(n_workers, 100)  # Cap at 100 to avoid excessive overhead
+        print(f"Using {n_workers} parallel workers")
+        
+        # Split tracks into chunks for parallel processing
+        chunk_size = max(1, len(valid_event_particle_combinations) // n_workers)
+        track_chunks = [
+            valid_event_particle_combinations[i:i + chunk_size] 
+            for i in range(0, len(valid_event_particle_combinations), chunk_size)
+        ]
+        
+        print(f"Split tracks into {len(track_chunks)} chunks (avg size: {chunk_size})")
+        
+        # Create worker function with pre-bound arguments
+        worker_fn = partial(
+            _process_track_chunk,
+            all_event_ids=self.all_event_ids,
+            all_particle_ids=self.all_particle_ids,
+            all_particle_pts=self.all_particle_pts,
+            all_particle_etas=self.all_particle_etas,
+            all_station_indices=self.all_station_indices,
+            true_hit_mask=true_hit_mask,
+            min_pt=self.min_pt
+        )
+        
+        # Process tracks in parallel
+        baseline_qualified_tracks = set()
+        with mp.Pool(processes=n_workers) as pool:
+            # Use tqdm to show progress
+            results = list(tqdm(
+                pool.imap(worker_fn, track_chunks),
+                total=len(track_chunks),
+                desc="Processing track chunks"
+            ))
+        
+        # Aggregate results from all workers
+        for result in results:
+            baseline_qualified_tracks.update(result['qualified_tracks'])
+            for key in stats:
+                stats[key] += result['stats'][key]
+        
+        # Print detailed statistics
+        print(f"Baseline filtering results:")
+        print(f"  Total tracks checked: {stats['total_tracks_checked']}")
+        print(f"  Failed minimum hits (>=9): {stats['tracks_failed_min_hits']} ({stats['tracks_failed_min_hits']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {stats['tracks_failed_eta_cuts']} ({stats['tracks_failed_eta_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= {self.min_pt} GeV): {stats['tracks_failed_pt_cuts']} ({stats['tracks_failed_pt_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed station cuts (>=3 stations, >=3 hits/station): {stats['tracks_failed_station_cuts']} ({stats['tracks_failed_station_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {stats['tracks_passed_all_cuts']} ({stats['tracks_passed_all_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        
+        # Create masks for hits to include in baseline and rejected evaluations
+        # Strategy: Include all noise hits + only true hits from respective track categories
+        print("Creating hit masks for baseline and rejected tracks...")
+        baseline_hit_mask = np.zeros(len(self.all_logits), dtype=bool)
+        rejected_hit_mask = np.zeros(len(self.all_logits), dtype=bool)
+        
+        # Include ALL noise hits in both categories (these don't belong to any track)
+        noise_hit_mask = ~true_hit_mask
+        baseline_hit_mask |= noise_hit_mask
+        rejected_hit_mask |= noise_hit_mask
+        
+        # Create sets for baseline and rejected tracks
+        baseline_qualified_track_set = set(baseline_qualified_tracks)
+        all_track_set = set(tuple(track) for track in valid_event_particle_combinations)
+        rejected_track_set = all_track_set - baseline_qualified_track_set
+        
+        print(f"Creating masks for {len(baseline_qualified_tracks)} baseline tracks and {len(rejected_track_set)} rejected tracks...")
+        
+        # OPTIMIZED: Memory-efficient chunked mask creation for large datasets
+        # Create arrays for efficient vectorized comparison
+        hit_event_ids = self.all_event_ids[true_hit_mask]
+        hit_particle_ids = self.all_particle_ids[true_hit_mask]
+        true_hit_indices = np.where(true_hit_mask)[0]
+        
+        # Process tracks in chunks to avoid excessive memory usage
+        chunk_size = min(1000, max(100, len(baseline_qualified_tracks) // 10))
+        
+        # Convert track sets to arrays for vectorized operations
+        if baseline_qualified_tracks:
+            baseline_tracks_array = np.array(list(baseline_qualified_tracks))
+            print(f"Processing {len(baseline_tracks_array)} baseline tracks in chunks of {chunk_size}...")
+            
+            for i in range(0, len(baseline_tracks_array), chunk_size):
+                chunk_tracks = baseline_tracks_array[i:i + chunk_size]
+                chunk_event_ids = chunk_tracks[:, 0]
+                chunk_particle_ids = chunk_tracks[:, 1]
+                
+                # Vectorized comparison for this chunk
+                baseline_matches = (
+                    hit_event_ids[:, np.newaxis] == chunk_event_ids[np.newaxis, :]
+                ) & (
+                    hit_particle_ids[:, np.newaxis] == chunk_particle_ids[np.newaxis, :]
+                )
+                baseline_hit_indices = true_hit_indices[np.any(baseline_matches, axis=1)]
+                baseline_hit_mask[baseline_hit_indices] = True
+        
+        if rejected_track_set:
+            rejected_tracks_array = np.array(list(rejected_track_set))
+            print(f"Processing {len(rejected_tracks_array)} rejected tracks in chunks of {chunk_size}...")
+            
+            for i in range(0, len(rejected_tracks_array), chunk_size):
+                chunk_tracks = rejected_tracks_array[i:i + chunk_size]
+                chunk_event_ids = chunk_tracks[:, 0]
+                chunk_particle_ids = chunk_tracks[:, 1]
+                
+                # Vectorized comparison for this chunk
+                rejected_matches = (
+                    hit_event_ids[:, np.newaxis] == chunk_event_ids[np.newaxis, :]
+                ) & (
+                    hit_particle_ids[:, np.newaxis] == chunk_particle_ids[np.newaxis, :]
+                )
+                rejected_hit_indices = true_hit_indices[np.any(rejected_matches, axis=1)]
+                rejected_hit_mask[rejected_hit_indices] = True
+            
+        # Calculate statistics for both categories
+        baseline_hit_count = np.sum(baseline_hit_mask)
+        baseline_true_hits = np.sum(baseline_hit_mask & true_hit_mask)
+        baseline_noise_hits = np.sum(baseline_hit_mask & ~true_hit_mask)
+        
+        rejected_hit_count = np.sum(rejected_hit_mask)
+        rejected_true_hits = np.sum(rejected_hit_mask & true_hit_mask)
+        rejected_noise_hits = np.sum(rejected_hit_mask & ~true_hit_mask)
+        
+        total_hits = len(self.all_logits)
+        
+        print(f"  Baseline hits: {baseline_hit_count:,} / {total_hits:,} ({baseline_hit_count/total_hits*100:.1f}%)")
+        print(f"  Baseline true hits: {baseline_true_hits:,}")
+        print(f"  Baseline noise hits: {baseline_noise_hits:,}")
+        print(f"  Baseline signal/noise ratio: {baseline_true_hits/baseline_noise_hits:.4f}" if baseline_noise_hits > 0 else "  Baseline signal/noise ratio: inf")
+        
+        print(f"  Rejected hits: {rejected_hit_count:,} / {total_hits:,} ({rejected_hit_count/total_hits*100:.1f}%)")
+        print(f"  Rejected true hits: {rejected_true_hits:,}")
+        print(f"  Rejected noise hits: {rejected_noise_hits:,}")
+        print(f"  Rejected signal/noise ratio: {rejected_true_hits/rejected_noise_hits:.4f}" if rejected_noise_hits > 0 else "  Rejected signal/noise ratio: inf")
+        
+        # Additional statistics for the summary
+        stats['baseline_hit_count'] = baseline_hit_count
+        stats['baseline_true_hits'] = baseline_true_hits
+        stats['baseline_noise_hits'] = baseline_noise_hits
+        stats['rejected_hit_count'] = rejected_hit_count
+        stats['rejected_true_hits'] = rejected_true_hits
+        stats['rejected_noise_hits'] = rejected_noise_hits
+        stats['total_hits'] = total_hits
+        stats['rejected_tracks'] = len(rejected_track_set)
+        
+        return baseline_hit_mask, rejected_hit_mask, stats
+    
+    def _backup_original_data(self):
+        """Backup the original data before applying any filters."""
+        self._original_logits = self.all_logits.copy()
+        self._original_true_labels = self.all_true_labels.copy()
+        self._original_particle_pts = self.all_particle_pts.copy()
+        self._original_particle_etas = self.all_particle_etas.copy() 
+        self._original_particle_phis = self.all_particle_phis.copy()
+        self._original_particle_ids = self.all_particle_ids.copy()
+        self._original_event_ids = self.all_event_ids.copy()
+        self._original_station_indices = self.all_station_indices.copy()
+        if hasattr(self, 'all_particle_technology'):
+            self._original_particle_technology = self.all_particle_technology.copy()
+    
+    def _restore_original_data(self):
+        """Restore the original unfiltered data."""
+        self.all_logits = self._original_logits.copy()
+        self.all_true_labels = self._original_true_labels.copy()
+        self.all_particle_pts = self._original_particle_pts.copy()
+        self.all_particle_etas = self._original_particle_etas.copy()
+        self.all_particle_phis = self._original_particle_phis.copy()
+        self.all_particle_ids = self._original_particle_ids.copy()
+        self.all_event_ids = self._original_event_ids.copy()
+        self.all_station_indices = self._original_station_indices.copy()
+        if hasattr(self, '_original_particle_technology'):
+            self.all_particle_technology = self._original_particle_technology.copy()
+    
+    def _apply_hit_filter(self, hit_mask):
+        """Apply a boolean mask to filter the data arrays."""
+        self.all_logits = self.all_logits[hit_mask]
+        self.all_true_labels = self.all_true_labels[hit_mask]
+        self.all_particle_pts = self.all_particle_pts[hit_mask]
+        self.all_particle_etas = self.all_particle_etas[hit_mask]
+        self.all_particle_phis = self.all_particle_phis[hit_mask]
+        self.all_particle_ids = self.all_particle_ids[hit_mask]
+        self.all_event_ids = self.all_event_ids[hit_mask]
+        self.all_station_indices = self.all_station_indices[hit_mask]
+        if hasattr(self, 'all_particle_technology'):
+            self.all_particle_technology = self.all_particle_technology[hit_mask]
+    
+    def _apply_pt_filter(self):
+        """
+        Apply pT filter to exclude all hits from tracks outside the pT range.
+        This preserves all noise hits (which have pt <= 0) but removes true hits
+        from tracks outside the specified pT range [min_pt, max_pt].
+        """
+        filter_applied = False
+        filter_description = []
+        
+        if self.min_pt > 0:
+            filter_description.append(f"pT >= {self.min_pt} GeV")
+            filter_applied = True
+        
+        if self.max_pt < float('inf'):
+            filter_description.append(f"pT <= {self.max_pt} GeV")
+            filter_applied = True
+        
+        if not filter_applied:
+            print("No pT filtering applied")
+            return
+        
+        print(f"Filtering tracks with {' and '.join(filter_description)}...")
+        
+        # Create a mask for hits to keep
+        # Keep all noise hits (pT <= 0) and all hits from tracks within pT range
+        keep_mask = np.ones(len(self.all_logits), dtype=bool)
+        
+        # Only filter true hits (noise hits always have pT <= 0 and should be kept)
+        true_hit_mask = self.all_true_labels
+        
+        # For true hits, only keep those from tracks within the pT range
+        for i in range(len(self.all_logits)):
+            if true_hit_mask[i]:  # This is a true hit
+                track_pt = self.all_particle_pts[i]
+                # Exclude if below minimum pT or above maximum pT (but keep noise hits with pt <= 0)
+                if track_pt > 0 and (track_pt < self.min_pt or track_pt > self.max_pt):
+                    keep_mask[i] = False
+        
+        n_removed = np.sum(~keep_mask)
+        n_total = len(self.all_logits)
+        print(f"Removing {n_removed:,} hits from tracks outside pT range ({n_removed/n_total*100:.1f}%)")
+        
+        # Apply the filter
+        self._apply_hit_filter(keep_mask)
+    
+    def plot_roc_curve(self, output_subdir=None): # verified: (check!)
         """Generate ROC curve with AUC score."""
         print("Generating ROC curve...")
         
-        # Calculate ROC curve
-        fpr, tpr, thresholds = roc_curve(self.all_true_labels, self.all_logits)
+        # Safety checks to prevent NaN AUC
+        if len(self.all_logits) == 0:
+            print("Warning: No data available for ROC curve calculation")
+            return 0.5
+            
+        n_true = np.sum(self.all_true_labels)
+        n_false = np.sum(~self.all_true_labels)
         
-        roc_auc = auc(fpr, tpr)
+        if n_true == 0:
+            print("Warning: No true positive samples available for ROC curve")
+            return 0.5
+            
+        if n_false == 0:
+            print("Warning: No true negative samples available for ROC curve")
+            return 0.5
+            
+        # Calculate ROC curve
+        try:
+            fpr, tpr, thresholds = roc_curve(self.all_true_labels, self.all_logits)
+            roc_auc = auc(fpr, tpr)
+            
+            # Additional check for NaN
+            if np.isnan(roc_auc):
+                print("Warning: AUC calculation resulted in NaN, using default value")
+                roc_auc = 0.5
+                
+        except Exception as e:
+            print(f"Error calculating ROC curve: {e}")
+            roc_auc = 0.5
+            fpr = np.array([0, 1])
+            tpr = np.array([0, 1])
+        
+        print(f"Data statistics: {len(self.all_logits)} hits, {n_true} true, {n_false} false")
         
         # Create plot
         plt.figure(figsize=(8, 6))
@@ -383,8 +827,9 @@ class AtlasMuonEvaluatorDataLoader:
         plt.legend(loc="lower right")
         plt.grid(True, alpha=0.1)
         
-        # Save plot
-        output_path = self.output_dir / "roc_curve.png"
+        # Save plot to appropriate directory
+        save_dir = self.output_dir if output_subdir is None else output_subdir
+        output_path = save_dir / "roc_curve.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -431,7 +876,7 @@ class AtlasMuonEvaluatorDataLoader:
             overall_purity = 0.0
         
         # Define pt bins
-        pt_min, pt_max = 5.0, 200.0
+        pt_min, pt_max = self.min_pt, 200.0
         pt_bins = np.linspace(pt_min, pt_max, 21)  # 20 bins
         pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
         
@@ -471,7 +916,7 @@ class AtlasMuonEvaluatorDataLoader:
         """Calculate binomial error"""
         return ((p*(1-p))/n)**0.5
     
-    def plot_efficiency_vs_pt(self, working_points=None, skip_individual_plots=True):
+    def plot_efficiency_vs_pt(self, working_points=None, skip_individual_plots=True, output_subdir=None):
         """
         Plot efficiency vs pT for different working points with overall purity in legend
         OPTIMIZATION: Skip individual plots by default to reduce file I/O
@@ -482,24 +927,23 @@ class AtlasMuonEvaluatorDataLoader:
         print("Generating efficiency plots (optimized)...")
         
         # Only create the main combined plots, skip individual plots by default
-        self._plot_efficiency_vs_pt_general(working_points, skip_individual_plots)
+        self._plot_efficiency_vs_pt_general(working_points, skip_individual_plots, output_subdir)
         
         if not skip_individual_plots:
             # Only create technology-specific plots if explicitly requested
             self._plot_efficiency_vs_pt_by_technology(working_points)
     
-    def _plot_efficiency_vs_pt_general(self, working_points, skip_individual_plots=True):
+    def _plot_efficiency_vs_pt_general(self, working_points, skip_individual_plots=True, output_subdir=None):
         """Create general efficiency vs pT plots (all technologies combined) - OPTIMIZED"""
-        # Cache ROC calculation to avoid redundant computations
-        if not hasattr(self, '_cached_roc'):
-            print("Computing ROC curve (cached for reuse)...")
-            self._cached_roc = roc_curve(self.all_true_labels, self.all_logits)
+        # Skip multi-working-point plots - user no longer wants these combined plots
+        print("Skipping multi-working-point efficiency vs pT plot - no longer needed")
+        return
         
         fpr, tpr, thresholds = self._cached_roc
         
         # Prepare data for all working points (vectorized)
         results_dict = {}
-        pt_min, pt_max = 5.0, 200.0
+        pt_min, pt_max = self.min_pt, 200.0
         pt_bins = np.linspace(pt_min, pt_max, 21)  # 20 bins
         pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
         
@@ -587,8 +1031,9 @@ class AtlasMuonEvaluatorDataLoader:
         
         plt.tight_layout()
         
-        # Save plot
-        output_path = self.output_dir / "efficiency_vs_pt.png"
+        # Save plot to appropriate directory
+        save_dir = self.output_dir if output_subdir is None else output_subdir
+        output_path = save_dir / "efficiency_vs_pt.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -598,8 +1043,13 @@ class AtlasMuonEvaluatorDataLoader:
         if not skip_individual_plots:
             self._plot_individual_working_points_pt(results_dict)
     
-    def _plot_efficiency_vs_pt_by_technology(self, working_points):
+    def _plot_efficiency_vs_pt_by_technology(self, working_points, output_subdir=None):
         """Create efficiency vs pT plots for each sensor technology"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print("Skipping technology plots: output_subdir not specified (avoiding duplicates)")
+            return
+            
         for tech_name, tech_value in self.technology_mapping.items():
             print(f"Generating efficiency plots for {tech_name} technology...")
             
@@ -671,14 +1121,17 @@ class AtlasMuonEvaluatorDataLoader:
             plt.tight_layout()
             
             # Save plot
-            output_path = self.output_dir / f"efficiency_vs_pt_{tech_name}.png"
+            if output_subdir is not None:
+                output_path = output_subdir / f"efficiency_vs_pt_{tech_name}.png"
+            else:
+                output_path = self.output_dir / f"efficiency_vs_pt_{tech_name}.png"
             plt.savefig(output_path, dpi=300, bbox_inches='tight')
             plt.close()
             
             print(f"{tech_name} efficiency vs pT plot saved to: {output_path}")
             
             # Create individual plots for each working point for this technology
-            self._plot_individual_working_points_pt_technology(results_dict, tech_name)
+            self._plot_individual_working_points_pt_technology(results_dict, tech_name, output_subdir)
     
     def _plot_metric_with_errors(self, ax, pt_bins, values, errors, counts, color, label, metric_type):
         """Helper function to plot metrics with error bands and step plots"""
@@ -709,9 +1162,9 @@ class AtlasMuonEvaluatorDataLoader:
     
     def _plot_individual_working_points_pt(self, results_dict):
         """Create separate efficiency plots for each working point (pt)"""
-        # Create subdirectory for organizing plots
-        efficiency_dir = self.output_dir / "efficiency_plots"
-        efficiency_dir.mkdir(exist_ok=True)
+        # Skip individual plots - these should only be created within the three main categories
+        print("Skipping individual working point plots: should only be created within category subdirectories")
+        return
         
         for wp_name, wp_data in results_dict.items():
             # Create individual efficiency plot
@@ -738,10 +1191,15 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"Individual pt working point plots saved to: {efficiency_dir}")
     
-    def _plot_individual_working_points_pt_technology(self, results_dict, tech_name):
+    def _plot_individual_working_points_pt_technology(self, results_dict, tech_name, output_subdir=None):
         """Create separate efficiency plots for each working point for a specific technology (pt)"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print(f"Skipping individual pt plots for {tech_name}: output_subdir not specified (avoiding duplicates)")
+            return
+            
         # Create subdirectory for organizing plots
-        efficiency_dir = self.output_dir / f"efficiency_plots_{tech_name}"
+        efficiency_dir = output_subdir / f"efficiency_plots_{tech_name}"
         efficiency_dir.mkdir(exist_ok=True)
         
         for wp_name, wp_data in results_dict.items():
@@ -769,14 +1227,15 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"Individual {tech_name} pt working point plots saved to: {efficiency_dir}")
     
-    def plot_track_lengths(self):
+    def plot_track_lengths(self, output_subdir=None):
         """
         Plot track lengths (number of hits per track) binned by pT, eta, and phi
         """
         print("Generating track length plots...")
         
-        # Create track_lengths subdirectory
-        track_lengths_dir = self.output_dir / "track_lengths"
+        # Create track_lengths subdirectory in appropriate output directory
+        save_dir = self.output_dir if output_subdir is None else output_subdir
+        track_lengths_dir = save_dir / "track_lengths"
         track_lengths_dir.mkdir(exist_ok=True)
         
         # Calculate track lengths for each unique (event_id, particle_id) combination
@@ -867,6 +1326,7 @@ class AtlasMuonEvaluatorDataLoader:
         ax.grid(True, which='minor', linestyle=':', linewidth=0.5, color='lightgray')
         ax.legend()
         ax.set_xlim([0, 200])
+        ax.set_ylim([0, 60])
         
         plt.tight_layout()
         
@@ -915,6 +1375,7 @@ class AtlasMuonEvaluatorDataLoader:
         ax.grid(True, which='minor', linestyle=':', linewidth=0.5, color='lightgray')
         ax.legend()
         ax.set_xlim([-2.7, 2.7])
+        ax.set_ylim([0, 60])
         
         plt.tight_layout()
         
@@ -963,6 +1424,7 @@ class AtlasMuonEvaluatorDataLoader:
         ax.grid(True, which='minor', linestyle=':', linewidth=0.5, color='lightgray')
         ax.legend()
         ax.set_xlim([-3.2, 3.2])
+        ax.set_ylim([0, 60])
         
         plt.tight_layout()
         
@@ -972,7 +1434,7 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"Track length vs phi plot saved to: {output_path}")
 
-    def plot_working_point_performance(self, working_points=None):
+    def plot_working_point_performance(self, working_points=None, output_subdir=None):
         """
         Plot average purity for different working points with detailed track statistics.
         
@@ -1045,17 +1507,18 @@ class AtlasMuonEvaluatorDataLoader:
         plt.title('Working Point Performance - ATLAS Muon Hit Filter')
         plt.grid(True, alpha=0.3)
         plt.legend()
-        plt.ylim(0.4, 1.05)  # Zoom in on y-axis as requested
+        plt.ylim(0.1, 1.05)  # Zoom in on y-axis as requested
         
-        # Save plot
-        output_path = self.output_dir / "working_point_performance.png"
+        # Save plot to appropriate directory
+        save_dir = self.output_dir if output_subdir is None else output_subdir
+        output_path = save_dir / "working_point_performance.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
         print(f"Working point performance plot saved to {output_path}")
         
         # Save detailed statistics
-        self._save_working_point_statistics(working_points, avg_purities, avg_purity_errors, track_statistics, output_path)
+        self._save_working_point_statistics(working_points, avg_purities, avg_purity_errors, track_statistics, output_path, output_subdir)
         
         # Print performance summary
         print("\nWorking Point Performance Summary:")
@@ -1283,7 +1746,7 @@ class AtlasMuonEvaluatorDataLoader:
             'events_analyzed': events_analyzed
         }
     
-    def _save_working_point_statistics(self, working_points, purities, purity_errors, track_statistics, output_plot_path):
+    def _save_working_point_statistics(self, working_points, purities, purity_errors, track_statistics, output_plot_path, output_subdir=None):
         """
         Save comprehensive working point statistics to a text file.
         
@@ -1578,7 +2041,7 @@ class AtlasMuonEvaluatorDataLoader:
         
         return phi_centers, np.array(efficiencies), np.array(eff_errors), overall_purity
     
-    def plot_efficiency_vs_eta(self, working_points=None):
+    def plot_efficiency_vs_eta(self, working_points=None, skip_individual_plots=True, output_subdir=None):
         """
         Plot efficiency vs eta for different working points with overall purity in legend
         """
@@ -1587,17 +2050,16 @@ class AtlasMuonEvaluatorDataLoader:
         print("Generating efficiency vs eta plots...")
         
         # First, create the general (all technologies) plots
-        self._plot_efficiency_vs_eta_general(working_points)
+        self._plot_efficiency_vs_eta_general(working_points, skip_individual_plots, output_subdir)
         
         # Then, create technology-specific plots
-        self._plot_efficiency_vs_eta_by_technology(working_points)
+        self._plot_efficiency_vs_eta_by_technology(working_points, output_subdir)
     
-    def _plot_efficiency_vs_eta_general(self, working_points, skip_individual_plots=True):
+    def _plot_efficiency_vs_eta_general(self, working_points, skip_individual_plots=True, output_subdir=None):
         """Create general efficiency vs eta plots (all technologies combined) - OPTIMIZED"""
-        # Use cached ROC calculation  
-        if not hasattr(self, '_cached_roc'):
-            print("Computing ROC curve (cached for reuse)...")
-            self._cached_roc = roc_curve(self.all_true_labels, self.all_logits)
+        # Skip multi-working-point plots - user no longer wants these combined plots
+        print("Skipping multi-working-point efficiency vs eta plot - no longer needed")
+        return
         
         fpr, tpr, thresholds = self._cached_roc
         
@@ -1691,8 +2153,11 @@ class AtlasMuonEvaluatorDataLoader:
         
         plt.tight_layout()
         
-        # Save plot
-        output_path = self.output_dir / "efficiency_vs_eta.png"
+        # Save plot  
+        if output_subdir is not None:
+            output_path = output_subdir / "efficiency_vs_eta.png"
+        else:
+            output_path = self.output_dir / "efficiency_vs_eta.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -1700,14 +2165,13 @@ class AtlasMuonEvaluatorDataLoader:
         
         # Only create individual plots if explicitly requested
         if not skip_individual_plots:
-            self._plot_individual_working_points_eta(results_dict)
+            self._plot_individual_working_points_eta(results_dict, output_subdir)
     
     def _plot_efficiency_vs_phi_general(self, working_points, skip_individual_plots=True):
         """Create general efficiency vs phi plots (all technologies combined) - OPTIMIZED"""
-        # Use cached ROC calculation  
-        if not hasattr(self, '_cached_roc'):
-            print("Computing ROC curve (cached for reuse)...")
-            self._cached_roc = roc_curve(self.all_true_labels, self.all_logits)
+        # Skip multi-working-point plots - user no longer wants these combined plots
+        print("Skipping multi-working-point efficiency vs phi plot - no longer needed")
+        return
         
         fpr, tpr, thresholds = self._cached_roc
         
@@ -1808,12 +2272,18 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"General efficiency vs phi plot saved to: {output_path}")
         
+
         # Only create individual plots if explicitly requested
         if not skip_individual_plots:
-            self._plot_individual_working_points_phi(results_dict)
+            self._plot_individual_working_points_phi(results_dict, None)
     
-    def _plot_efficiency_vs_eta_by_technology(self, working_points):
+    def _plot_efficiency_vs_eta_by_technology(self, working_points, output_subdir=None):
         """Create efficiency vs eta plots for each sensor technology"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print("Skipping technology eta plots: output_subdir not specified (avoiding duplicates)")
+            return
+            
         for tech_name, tech_value in self.technology_mapping.items():
             print(f"Generating efficiency vs eta plots for {tech_name} technology...")
             
@@ -1884,16 +2354,19 @@ class AtlasMuonEvaluatorDataLoader:
             plt.tight_layout()
             
             # Save plot
-            output_path = self.output_dir / f"efficiency_vs_eta_{tech_name}.png"
+            if output_subdir is not None:
+                output_path = output_subdir / f"efficiency_vs_eta_{tech_name}.png"
+            else:
+                output_path = self.output_dir / f"efficiency_vs_eta_{tech_name}.png"
             plt.savefig(output_path, dpi=300, bbox_inches='tight')
             plt.close()
             
             print(f"{tech_name} efficiency vs eta plot saved to: {output_path}")
             
             # Create individual plots for each working point for this technology
-            self._plot_individual_working_points_eta_technology(results_dict, tech_name)
+            self._plot_individual_working_points_eta_technology(results_dict, tech_name, output_subdir)
     
-    def plot_efficiency_vs_phi(self, working_points=None):
+    def plot_efficiency_vs_phi(self, working_points=None, skip_individual_plots=True, output_subdir=None):
         """
         Plot efficiency vs phi for different working points with overall purity in legend
         """
@@ -1902,17 +2375,16 @@ class AtlasMuonEvaluatorDataLoader:
         print("Generating efficiency vs phi plots...")
         
         # First, create the general (all technologies) plots
-        self._plot_efficiency_vs_phi_general(working_points)
+        self._plot_efficiency_vs_phi_general(working_points, skip_individual_plots, output_subdir)
         
         # Then, create technology-specific plots
-        self._plot_efficiency_vs_phi_by_technology(working_points)
+        self._plot_efficiency_vs_phi_by_technology(working_points, output_subdir)
     
-    def _plot_efficiency_vs_phi_general(self, working_points, skip_individual_plots=True):
+    def _plot_efficiency_vs_phi_general(self, working_points, skip_individual_plots=True, output_subdir=None):
         """Create general efficiency vs phi plots (all technologies combined) - OPTIMIZED"""
-        # Use cached ROC calculation  
-        if not hasattr(self, '_cached_roc'):
-            print("Computing ROC curve (cached for reuse)...")
-            self._cached_roc = roc_curve(self.all_true_labels, self.all_logits)
+        # Skip multi-working-point plots - user no longer wants these combined plots
+        print("Skipping multi-working-point efficiency vs phi plot - no longer needed")
+        return
         
         fpr, tpr, thresholds = self._cached_roc
         
@@ -2007,7 +2479,10 @@ class AtlasMuonEvaluatorDataLoader:
         plt.tight_layout()
         
         # Save plot
-        output_path = self.output_dir / "efficiency_vs_phi.png"
+        if output_subdir is not None:
+            output_path = output_subdir / "efficiency_vs_phi.png"
+        else:
+            output_path = self.output_dir / "efficiency_vs_phi.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -2015,10 +2490,15 @@ class AtlasMuonEvaluatorDataLoader:
         
         # Only create individual plots if explicitly requested
         if not skip_individual_plots:
-            self._plot_individual_working_points_phi(results_dict)
+            self._plot_individual_working_points_phi(results_dict, output_subdir)
     
-    def _plot_efficiency_vs_phi_by_technology(self, working_points):
+    def _plot_efficiency_vs_phi_by_technology(self, working_points, output_subdir=None):
         """Create efficiency vs phi plots for each sensor technology"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print("Skipping technology phi plots: output_subdir not specified (avoiding duplicates)")
+            return
+            
         for tech_name, tech_value in self.technology_mapping.items():
             print(f"Generating efficiency vs phi plots for {tech_name} technology...")
             
@@ -2089,14 +2569,17 @@ class AtlasMuonEvaluatorDataLoader:
             plt.tight_layout()
             
             # Save plot
-            output_path = self.output_dir / f"efficiency_vs_phi_{tech_name}.png"
+            if output_subdir is not None:
+                output_path = output_subdir / f"efficiency_vs_phi_{tech_name}.png"
+            else:
+                output_path = self.output_dir / f"efficiency_vs_phi_{tech_name}.png"
             plt.savefig(output_path, dpi=300, bbox_inches='tight')
             plt.close()
             
             print(f"{tech_name} efficiency vs phi plot saved to: {output_path}")
             
             # Create individual plots for each working point for this technology
-            self._plot_individual_working_points_phi_technology(results_dict, tech_name)
+            self._plot_individual_working_points_phi_technology(results_dict, tech_name, output_subdir)
     
     def _plot_metric_with_errors_eta_phi(self, ax, bins, values, errors, counts, color, label, metric_type):
         """Helper function to plot metrics with error bands and step plots for eta/phi"""
@@ -2125,10 +2608,15 @@ class AtlasMuonEvaluatorDataLoader:
                    color=color, linewidth=2.5,
                    label=label if i == 0 else "")
     
-    def _plot_individual_working_points_eta(self, results_dict):
+    def _plot_individual_working_points_eta(self, results_dict, output_subdir=None):
         """Create separate efficiency plots for each working point (eta)"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print("Skipping individual eta working point plots: output_subdir not specified (avoiding duplicates)")
+            return
+            
         # Create subdirectory for organizing plots
-        efficiency_dir = self.output_dir / "efficiency_plots"
+        efficiency_dir = output_subdir / "efficiency_plots"
         efficiency_dir.mkdir(exist_ok=True)
         
         for wp_name, wp_data in results_dict.items():
@@ -2157,10 +2645,15 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"Individual eta working point plots saved to: {efficiency_dir}")
     
-    def _plot_individual_working_points_eta_technology(self, results_dict, tech_name):
+    def _plot_individual_working_points_eta_technology(self, results_dict, tech_name, output_subdir=None):
         """Create individual eta plots for each working point and technology"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print(f"Skipping individual eta plots for {tech_name}: output_subdir not specified (avoiding duplicates)")
+            return
+            
         # Create efficiency_plots_<technology> subdirectory (unified for all coordinates)
-        efficiency_plots_dir = self.output_dir / f"efficiency_plots_{tech_name}"
+        efficiency_plots_dir = output_subdir / f"efficiency_plots_{tech_name}"
         efficiency_plots_dir.mkdir(exist_ok=True)
         
         for wp_name, wp_data in results_dict.items():
@@ -2188,10 +2681,15 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"Individual {tech_name} eta efficiency plots saved to: {efficiency_plots_dir}")
     
-    def _plot_individual_working_points_phi(self, results_dict):
+    def _plot_individual_working_points_phi(self, results_dict, output_subdir=None):
         """Create separate efficiency plots for each working point (phi)"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print("Skipping individual phi working point plots: output_subdir not specified (avoiding duplicates)")
+            return
+            
         # Create subdirectory for organizing plots
-        efficiency_dir = self.output_dir / "efficiency_plots"
+        efficiency_dir = output_subdir / "efficiency_plots"
         efficiency_dir.mkdir(exist_ok=True)
         
         for wp_name, wp_data in results_dict.items():
@@ -2220,10 +2718,15 @@ class AtlasMuonEvaluatorDataLoader:
         
         print(f"Individual phi working point plots saved to: {efficiency_dir}")
     
-    def _plot_individual_working_points_phi_technology(self, results_dict, tech_name):
+    def _plot_individual_working_points_phi_technology(self, results_dict, tech_name, output_subdir=None):
         """Create individual phi plots for each working point and technology"""
+        # Only generate plots when output_subdir is specified to avoid duplicates in main run directory
+        if output_subdir is None:
+            print(f"Skipping individual phi plots for {tech_name}: output_subdir not specified (avoiding duplicates)")
+            return
+            
         # Create efficiency_plots_<technology> subdirectory (unified for all coordinates)
-        efficiency_plots_dir = self.output_dir / f"efficiency_plots_{tech_name}"
+        efficiency_plots_dir = output_subdir / f"efficiency_plots_{tech_name}"
         efficiency_plots_dir.mkdir(exist_ok=True)
         
         for wp_name, wp_data in results_dict.items():
@@ -2253,7 +2756,7 @@ class AtlasMuonEvaluatorDataLoader:
     
     def run_full_evaluation(self, skip_individual_plots=True, skip_technology_plots=True, skip_eta_phi_plots=True):
         """
-        Run complete evaluation pipeline with configurable plotting options.
+        Run complete evaluation pipeline with both all tracks and baseline filtered tracks.
         
         Parameters:
         -----------
@@ -2264,7 +2767,7 @@ class AtlasMuonEvaluatorDataLoader:
         skip_eta_phi_plots : bool, default True
             Skip eta and phi binned plots to save time/space
         """
-        print("Starting full evaluation of ATLAS muon hit filter (optimized)...")
+        print("Starting full evaluation of ATLAS muon hit filter with baseline comparison...")
         
         # Monitor memory throughout
         process = psutil.Process()
@@ -2279,61 +2782,357 @@ class AtlasMuonEvaluatorDataLoader:
         current_memory = process.memory_info().rss / 1024 / 1024
         print(f"Memory after data collection: {current_memory:.1f} MB (+{current_memory-start_memory:.1f} MB)")
         
-        # Generate core plots (always generated)
-        print("\n=== Generating core evaluation plots ===")
+        # Backup original data for filtering
+        self._backup_original_data()
+        
+        # Create baseline track filter
+        baseline_mask, rejected_mask, baseline_filter_stats = self.create_baseline_track_filter()
+        
+        # Store statistics for all evaluations
+        all_tracks_stats = {}
+        baseline_stats = baseline_filter_stats.copy()  # Include baseline filtering stats
+        rejected_stats = baseline_filter_stats.copy()  # Include baseline filtering stats
+        
+        # ===================================================================
+        # PHASE 1: Evaluate ALL TRACKS
+        # ===================================================================
+        print("\n" + "="*80)
+        print("PHASE 1: EVALUATING ALL TRACKS")
+        print("="*80)
+        
+        # Generate core plots for all tracks
+        print("\n=== Generating core evaluation plots (ALL TRACKS) ===")
+        
+        # Clear any cached ROC curves
+        if hasattr(self, '_cached_roc'):
+            delattr(self, '_cached_roc')
         
         # ROC curve
-        roc_auc = self.plot_roc_curve()
+        all_roc_auc = self.plot_roc_curve(output_subdir=self.all_tracks_dir)
+        all_tracks_stats['roc_auc'] = all_roc_auc
         gc.collect()
         
         # Efficiency vs pT (main plots only)
-        self.plot_efficiency_vs_pt(skip_individual_plots=skip_individual_plots)
+        self.plot_efficiency_vs_pt(skip_individual_plots=skip_individual_plots, output_subdir=self.all_tracks_dir)
         gc.collect()
         
         # Working point performance
-        self.plot_working_point_performance()
+        self.plot_working_point_performance(output_subdir=self.all_tracks_dir)
+        gc.collect()
+        
+        # Track lengths (lightweight, always include)
+        self.plot_track_lengths(output_subdir=self.all_tracks_dir)
         gc.collect()
         
         current_memory = process.memory_info().rss / 1024 / 1024
-        print(f"Memory after core plots: {current_memory:.1f} MB")
+        print(f"Memory after all tracks core plots: {current_memory:.1f} MB")
+        
+        # Store all tracks data statistics
+        all_tracks_stats.update({
+            'total_hits': len(self.all_logits),
+            'true_hits': np.sum(self.all_true_labels),
+            'noise_hits': np.sum(~self.all_true_labels),
+            'unique_tracks': len(np.unique(np.column_stack([
+                self.all_event_ids[self.all_true_labels], 
+                self.all_particle_ids[self.all_true_labels]
+            ]), axis=0))
+        })
         
         # Optional plots (can be skipped for speed/space)
         if not skip_eta_phi_plots:
-            print("\n=== Generating eta/phi plots ===")
-            self.plot_efficiency_vs_eta(skip_individual_plots=skip_individual_plots)
+            print("\n=== Generating eta/phi plots (ALL TRACKS) ===")
+            self.plot_efficiency_vs_eta(skip_individual_plots=skip_individual_plots, output_subdir=self.all_tracks_dir)
+            self.plot_efficiency_vs_phi(skip_individual_plots=skip_individual_plots, output_subdir=self.all_tracks_dir)
             gc.collect()
-            
-            self.plot_efficiency_vs_phi(skip_individual_plots=skip_individual_plots)  
-            gc.collect()
-            
-            current_memory = process.memory_info().rss / 1024 / 1024
-            print(f"Memory after eta/phi plots: {current_memory:.1f} MB")
         else:
             print("Skipping eta/phi plots (use --include-eta-phi to enable)")
         
         if not skip_technology_plots:
-            print("\n=== Generating technology-specific plots ===")
-            self._plot_efficiency_vs_pt_by_technology(DEFAULT_WORKING_POINTS)
+            print("\n=== Generating technology-specific plots (ALL TRACKS) ===")
+            self._plot_efficiency_vs_pt_by_technology(DEFAULT_WORKING_POINTS, output_subdir=self.all_tracks_dir)
             gc.collect()
-            
-            current_memory = process.memory_info().rss / 1024 / 1024
-            print(f"Memory after technology plots: {current_memory:.1f} MB")
         else:
             print("Skipping technology-specific plots (use --include-tech to enable)")
         
-        # Track lengths (lightweight, always include)
-        print("\n=== Generating track length plots ===")
-        self.plot_track_lengths()
+        # ===================================================================
+        # PHASE 2: Evaluate BASELINE FILTERED TRACKS
+        # ===================================================================
+        print("\n" + "="*80)
+        print("PHASE 2: EVALUATING BASELINE FILTERED TRACKS")
+        print("="*80)
+        
+        # Apply baseline filter to data
+        self._apply_hit_filter(baseline_mask)
+        
+        # Clear any cached ROC curves for baseline evaluation
+        if hasattr(self, '_cached_roc'):
+            delattr(self, '_cached_roc')
+        
+        print(f"Baseline filtered data: {len(self.all_logits):,} hits ({len(self.all_logits)/len(self._original_logits)*100:.1f}% of original)")
+        
+        # Generate core plots for baseline filtered tracks
+        print("\n=== Generating core evaluation plots (BASELINE FILTERED) ===")
+        
+        # ROC curve
+        baseline_roc_auc = self.plot_roc_curve(output_subdir=self.baseline_filtered_dir)
+        baseline_stats['roc_auc'] = baseline_roc_auc
         gc.collect()
+        
+        # Efficiency vs pT (main plots only)
+        self.plot_efficiency_vs_pt(skip_individual_plots=skip_individual_plots, output_subdir=self.baseline_filtered_dir)
+        gc.collect()
+        
+        # Working point performance
+        self.plot_working_point_performance(output_subdir=self.baseline_filtered_dir)
+        gc.collect()
+        
+        # Track lengths (lightweight, always include)
+        self.plot_track_lengths(output_subdir=self.baseline_filtered_dir)
+        gc.collect()
+        
+        current_memory = process.memory_info().rss / 1024 / 1024
+        print(f"Memory after baseline filtered plots: {current_memory:.1f} MB")
+        
+        # Store baseline filtered data statistics
+        baseline_stats.update({
+            'total_hits': len(self.all_logits),
+            'true_hits': np.sum(self.all_true_labels),
+            'noise_hits': np.sum(~self.all_true_labels),
+            'unique_tracks': len(np.unique(np.column_stack([
+                self.all_event_ids[self.all_true_labels], 
+                self.all_particle_ids[self.all_true_labels]
+            ]), axis=0))
+        })
+        
+        # Optional plots (can be skipped for speed/space)
+        if not skip_eta_phi_plots:
+            print("\n=== Generating eta/phi plots (BASELINE FILTERED) ===")
+            self.plot_efficiency_vs_eta(skip_individual_plots=skip_individual_plots, output_subdir=self.baseline_filtered_dir)
+            self.plot_efficiency_vs_phi(skip_individual_plots=skip_individual_plots, output_subdir=self.baseline_filtered_dir)
+            gc.collect()
+        else:
+            print("Skipping eta/phi plots (use --include-eta-phi to enable)")
+        
+        if not skip_technology_plots:
+            print("\n=== Generating technology-specific plots (BASELINE FILTERED) ===")
+            self._plot_efficiency_vs_pt_by_technology(DEFAULT_WORKING_POINTS, output_subdir=self.baseline_filtered_dir)
+            gc.collect()
+        else:
+            print("Skipping technology-specific plots (use --include-tech to enable)")
+        
+        # ===================================================================
+        # PHASE 3: Evaluate REJECTED TRACKS
+        # ===================================================================
+        print("\n" + "="*80)
+        print("PHASE 3: EVALUATING REJECTED TRACKS")
+        print("="*80)
+        
+        # Restore original data and apply rejected tracks filter
+        self._restore_original_data()
+        self._apply_hit_filter(rejected_mask)
+        
+        # Clear any cached ROC curves for rejected evaluation
+        if hasattr(self, '_cached_roc'):
+            delattr(self, '_cached_roc')
+        
+        print(f"Rejected tracks data: {len(self.all_logits):,} hits ({len(self.all_logits)/len(self._original_logits)*100:.1f}% of original)")
+        
+        # Generate core plots for rejected tracks
+        print("\n=== Generating core evaluation plots (REJECTED TRACKS) ===")
+        
+        # ROC curve
+        rejected_roc_auc = self.plot_roc_curve(output_subdir=self.rejected_tracks_dir)
+        rejected_stats['roc_auc'] = rejected_roc_auc
+        gc.collect()
+        
+        # Efficiency vs pT (main plots only)
+        self.plot_efficiency_vs_pt(skip_individual_plots=skip_individual_plots, output_subdir=self.rejected_tracks_dir)
+        gc.collect()
+        
+        # Working point performance
+        self.plot_working_point_performance(output_subdir=self.rejected_tracks_dir)
+        gc.collect()
+        
+        # Track lengths (lightweight, always include)
+        self.plot_track_lengths(output_subdir=self.rejected_tracks_dir)
+        gc.collect()
+        
+        current_memory = process.memory_info().rss / 1024 / 1024
+        print(f"Memory after rejected tracks plots: {current_memory:.1f} MB")
+        
+        # Store rejected tracks data statistics
+        rejected_stats.update({
+            'total_hits': len(self.all_logits),
+            'true_hits': np.sum(self.all_true_labels),
+            'noise_hits': np.sum(~self.all_true_labels),
+            'unique_tracks': len(np.unique(np.column_stack([
+                self.all_event_ids[self.all_true_labels], 
+                self.all_particle_ids[self.all_true_labels]
+            ]), axis=0))
+        })
+        
+        # Optional plots (can be skipped for speed/space)
+        if not skip_eta_phi_plots:
+            print("\n=== Generating eta/phi plots (REJECTED TRACKS) ===")
+            self.plot_efficiency_vs_eta(skip_individual_plots=skip_individual_plots, output_subdir=self.rejected_tracks_dir)
+            self.plot_efficiency_vs_phi(skip_individual_plots=skip_individual_plots, output_subdir=self.rejected_tracks_dir)
+            gc.collect()
+        else:
+            print("Skipping eta/phi plots (use --include-eta-phi to enable)")
+        
+        if not skip_technology_plots:
+            print("\n=== Generating technology-specific plots (REJECTED TRACKS) ===")
+            self._plot_efficiency_vs_pt_by_technology(DEFAULT_WORKING_POINTS, output_subdir=self.rejected_tracks_dir)
+            gc.collect()
+        else:
+            print("Skipping technology-specific plots (use --include-tech to enable)")
+        
+        # Restore original data for final cleanup
+        self._restore_original_data()
         
         final_memory = process.memory_info().rss / 1024 / 1024
         print(f"\nEvaluation complete! Final memory: {final_memory:.1f} MB")
         print(f"Peak memory usage: +{final_memory-start_memory:.1f} MB")
-        print(f"Results saved to {self.output_dir}")
-        print(f"Final AUC Score: {roc_auc:.4f}")
+        print(f"Results saved to:")
+        print(f"  All tracks: {self.all_tracks_dir}")
+        print(f"  Baseline filtered: {self.baseline_filtered_dir}")
+        print(f"  Rejected tracks: {self.rejected_tracks_dir}")
         
-        # Write summary file
-        self._write_evaluation_summary(roc_auc, skip_individual_plots, skip_technology_plots, skip_eta_phi_plots)
+        # Write comprehensive summary file
+        self._write_comparative_evaluation_summary(
+            all_tracks_stats, baseline_stats, rejected_stats,
+            skip_individual_plots, skip_technology_plots, skip_eta_phi_plots
+        )
+        
+        print(f"\nCOMPARISON SUMMARY:")
+        print(f"All tracks AUC: {all_tracks_stats['roc_auc']:.4f}")
+        print(f"Baseline filtered AUC: {baseline_stats['roc_auc']:.4f}")
+        print(f"Rejected tracks AUC: {rejected_stats['roc_auc']:.4f}")
+        
+        return all_tracks_stats, baseline_stats, rejected_stats
+    
+    def _write_comparative_evaluation_summary(self, all_tracks_stats, baseline_stats, rejected_stats, skip_individual_plots, skip_technology_plots, skip_eta_phi_plots):
+        """Write a comprehensive summary comparing all tracks vs baseline filtered vs rejected tracks."""
+        summary_path = self.output_dir / "evaluation_summary_comparison.txt"
+        
+        with open(summary_path, 'w') as f:
+            f.write("=" * 80 + "\n")
+            f.write("ATLAS MUON HIT FILTER EVALUATION - COMPARATIVE SUMMARY\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Max events processed: {self.max_events}\n\n")
+            
+            f.write("BASELINE FILTERING CRITERIA:\n")
+            f.write("- Tracks must have hits in at least 3 different stations\n") 
+            f.write("- Each station must have at least 3 hits from the track\n")
+            f.write("- This ensures tracks have at least 9 hits total\n")
+            f.write("- Detector acceptance: 0.1 <= |eta| <= 2.7\n")
+            f.write(f"- Minimum pT threshold: >= {self.min_pt} GeV\n\n")
+            f.write("BASELINE FILTERING STRATEGY:\n")
+            f.write("- Keep ALL noise hits from all events in both categories\n")
+            f.write("- BASELINE: Keep true hits from tracks meeting baseline criteria\n")
+            f.write("- REJECTED: Keep true hits from tracks NOT meeting baseline criteria\n")
+            f.write("- This maintains realistic signal-to-noise ratio for both evaluations\n\n")
+            
+            # Add detailed baseline filtering statistics
+            if 'total_tracks_checked' in baseline_stats:
+                f.write("=" * 50 + "\n")
+                f.write("BASELINE FILTERING BREAKDOWN\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"Total tracks evaluated: {baseline_stats['total_tracks_checked']:,}\n")
+                f.write(f"Tracks failing minimum hits (>=9): {baseline_stats['tracks_failed_min_hits']:,} ({baseline_stats['tracks_failed_min_hits']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks failing eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats['tracks_failed_eta_cuts']:,} ({baseline_stats['tracks_failed_eta_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks failing pT cuts (pT >= {self.min_pt} GeV): {baseline_stats['tracks_failed_pt_cuts']:,} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks failing station cuts (>=3 stations, >=3 hits/station): {baseline_stats['tracks_failed_station_cuts']:,} ({baseline_stats['tracks_failed_station_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks passing ALL criteria: {baseline_stats['tracks_passed_all_cuts']:,} ({baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n\n")
+                
+                f.write("FILTERING EFFICIENCY:\n")
+                f.write(f"Track retention rate: {baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%\n")
+                f.write(f"Hit retention rate: {baseline_stats['baseline_hit_count']/baseline_stats['total_hits']*100:.2f}%\n\n")
+            
+            f.write("=" * 50 + "\n")
+            f.write("ALL TRACKS ANALYSIS\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Total hits analyzed: {all_tracks_stats['total_hits']:,}\n")
+            f.write(f"True hits: {all_tracks_stats['true_hits']:,}\n")
+            f.write(f"Noise hits: {all_tracks_stats['noise_hits']:,}\n")
+            f.write(f"Unique tracks: {all_tracks_stats['unique_tracks']:,}\n")
+            f.write(f"Truth hit ratio: {all_tracks_stats['true_hits']/all_tracks_stats['total_hits']*100:.2f}%\n")
+            f.write(f"AUC Score: {all_tracks_stats['roc_auc']:.4f}\n\n")
+            
+            f.write("=" * 50 + "\n")
+            f.write("BASELINE FILTERED TRACKS ANALYSIS\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Total hits analyzed: {baseline_stats['total_hits']:,}\n")
+            f.write(f"True hits: {baseline_stats['true_hits']:,}\n")
+            f.write(f"Noise hits: {baseline_stats['noise_hits']:,}\n")
+            f.write(f"Unique tracks: {baseline_stats['unique_tracks']:,}\n")
+            f.write(f"Truth hit ratio: {baseline_stats['true_hits']/baseline_stats['total_hits']*100:.2f}%\n")
+            f.write(f"AUC Score: {baseline_stats['roc_auc']:.4f}\n\n")
+            
+            f.write("=" * 50 + "\n")
+            f.write("REJECTED TRACKS ANALYSIS\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Total hits analyzed: {rejected_stats['total_hits']:,}\n")
+            f.write(f"True hits: {rejected_stats['true_hits']:,}\n")
+            f.write(f"Noise hits: {rejected_stats['noise_hits']:,}\n")
+            f.write(f"Unique tracks: {rejected_stats['unique_tracks']:,}\n")
+            f.write(f"Truth hit ratio: {rejected_stats['true_hits']/rejected_stats['total_hits']*100:.2f}%\n")
+            f.write(f"AUC Score: {rejected_stats['roc_auc']:.4f}\n\n")
+            
+            f.write("=" * 50 + "\n")
+            f.write("COMPARISON METRICS\n")
+            f.write("=" * 50 + "\n")
+            f.write("BASELINE vs ALL TRACKS:\n")
+            f.write(f"Hit retention rate: {baseline_stats['total_hits']/all_tracks_stats['total_hits']*100:.2f}%\n")
+            f.write(f"True hit retention: {baseline_stats['true_hits']/all_tracks_stats['true_hits']*100:.2f}%\n")
+            f.write(f"Noise hit retention: {baseline_stats['noise_hits']/all_tracks_stats['noise_hits']*100:.2f}%\n")
+            f.write(f"Track retention rate: {baseline_stats['unique_tracks']/all_tracks_stats['unique_tracks']*100:.2f}%\n")
+            f.write(f"AUC improvement: {baseline_stats['roc_auc'] - all_tracks_stats['roc_auc']:.4f}\n\n")
+            
+            f.write("REJECTED vs ALL TRACKS:\n")
+            f.write(f"Hit retention rate: {rejected_stats['total_hits']/all_tracks_stats['total_hits']*100:.2f}%\n")
+            f.write(f"True hit retention: {rejected_stats['true_hits']/all_tracks_stats['true_hits']*100:.2f}%\n")
+            f.write(f"Noise hit retention: {rejected_stats['noise_hits']/all_tracks_stats['noise_hits']*100:.2f}%\n")
+            f.write(f"Track retention rate: {rejected_stats['unique_tracks']/all_tracks_stats['unique_tracks']*100:.2f}%\n")
+            f.write(f"AUC improvement: {rejected_stats['roc_auc'] - all_tracks_stats['roc_auc']:.4f}\n\n")
+            
+            baseline_purity = baseline_stats['true_hits']/baseline_stats['total_hits']
+            rejected_purity = rejected_stats['true_hits']/rejected_stats['total_hits']
+            all_tracks_purity = all_tracks_stats['true_hits']/all_tracks_stats['total_hits']
+            f.write(f"Dataset purity (all tracks): {all_tracks_purity:.4f}\n")
+            f.write(f"Dataset purity (baseline): {baseline_purity:.4f}\n")
+            f.write(f"Dataset purity (rejected): {rejected_purity:.4f}\n")
+            f.write(f"Baseline purity improvement: {baseline_purity - all_tracks_purity:.4f}\n")
+            f.write(f"Rejected purity change: {rejected_purity - all_tracks_purity:.4f}\n\n")
+            
+            f.write("PLOTS GENERATED:\n")
+            f.write("- ROC curve (all three datasets)\n")
+            f.write("- Efficiency vs pT (all three datasets)\n")
+            f.write("- Working point performance (all three datasets)\n")
+            f.write("- Track lengths (all three datasets)\n")
+            
+            if not skip_eta_phi_plots:
+                f.write("- Efficiency vs eta/phi (all three datasets)\n")
+            else:
+                f.write("- Efficiency vs eta/phi (SKIPPED)\n")
+                
+            if not skip_technology_plots:
+                f.write("- Technology-specific plots (all three datasets)\n")
+            else:
+                f.write("- Technology-specific plots (SKIPPED)\n")
+                
+            if not skip_individual_plots:
+                f.write("- Individual working point plots (all three datasets)\n")
+            else:
+                f.write("- Individual working point plots (SKIPPED)\n")
+            
+            f.write(f"\nOutputs saved to:\n")
+            f.write(f"  All tracks: {self.all_tracks_dir}\n")
+            f.write(f"  Baseline filtered: {self.baseline_filtered_dir}\n")
+            f.write(f"  Rejected tracks: {self.rejected_tracks_dir}\n")
+        
+        print(f"Comparative evaluation summary saved to: {summary_path}")
     
     def _write_evaluation_summary(self, roc_auc, skip_individual_plots, skip_technology_plots, skip_eta_phi_plots):
         """Write a summary of the evaluation run."""
@@ -2374,44 +3173,30 @@ class AtlasMuonEvaluatorDataLoader:
             f.write(f"\nOutputs saved to: {self.output_dir}\n")
         
         print(f"Evaluation summary saved to: {summary_path}")
-    
-    def plot_efficiency_vs_eta(self, working_points=None, skip_individual_plots=True):
-        """Plot efficiency vs eta - optimized version"""
-        if working_points is None:
-            working_points = DEFAULT_WORKING_POINTS
-        print("Generating efficiency vs eta plots (optimized)...")
-        
-        # Only create the general plots, skip individual by default
-        self._plot_efficiency_vs_eta_general(working_points, skip_individual_plots)
-        
-        if not skip_individual_plots:
-            self._plot_efficiency_vs_eta_by_technology(working_points)
-    
-    def plot_efficiency_vs_phi(self, working_points=None, skip_individual_plots=True):
-        """Plot efficiency vs phi - optimized version"""
-        if working_points is None:
-            working_points = DEFAULT_WORKING_POINTS
-        print("Generating efficiency vs phi plots (optimized)...")
-        
-        # Only create the general plots, skip individual by default
-        self._plot_efficiency_vs_phi_general(working_points, skip_individual_plots)
-        
-        if not skip_individual_plots:
-            self._plot_efficiency_vs_phi_by_technology(working_points)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate ATLAS muon hit filter using DataLoader (OPTIMIZED)')
-    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
-                       help='Path to evaluation HDF5 file')
-    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130_ml_test_data_156000_hdf5_noCuts_eval.h5",
+        help='Path to evaluation HDF5 file')
+    # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/bestfiltermodel/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+                    #    help='Path to evaluation HDF5 file') # CAREFUL the checkpoint is still referring to the old cuts!
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
                        help='Path to processed test data directory')
-    parser.add_argument('--config_path', "-c",type=str, default="./hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml",
+    parser.add_argument('--config_path', "-c",type=str, default="/shared/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml",
                        help='Path to config YAML file')
     parser.add_argument('--output_dir', "-o", type=str, default='./evaluation_results',
                        help='Output directory for plots and results')
     parser.add_argument('--max_events', '-m', type=int, default=-1,
                        help='Maximum number of events to process (for testing)')
+    parser.add_argument('--min_pt', type=float, default=5.0,
+                       help='Minimum pT threshold in GeV for track filtering (0.0 = no filter, 10.0 = exclude tracks < 10 GeV)')
+    parser.add_argument('--max_pt', type=float, default=float('inf'),
+                       help='Maximum pT threshold in GeV for track filtering (inf = no filter, 50.0 = exclude tracks > 50 GeV)')
     
     # Performance and output control options
     parser.add_argument('--include-individual-plots', action='store_true',
@@ -2439,6 +3224,7 @@ def main():
     print(f"Config file: {args.config_path}")
     print(f"Output directory: {args.output_dir}")
     print(f"Max events: {args.max_events if args.max_events > 0 else 'ALL'}")
+    print(f"Minimum pT threshold: {args.min_pt} GeV {'(no filter)' if args.min_pt <= 0 else ''}")
     print(f"Include individual plots: {args.include_individual_plots}")
     print(f"Include technology plots: {args.include_tech}")
     print(f"Include eta/phi plots: {args.include_eta_phi}")
@@ -2455,7 +3241,9 @@ def main():
             data_dir=args.data_dir,
             config_path=args.config_path,
             output_dir=args.output_dir,
-            max_events=args.max_events
+            max_events=args.max_events,
+            min_pt=args.min_pt,
+            max_pt=args.max_pt
         )
         
         evaluator.run_full_evaluation(

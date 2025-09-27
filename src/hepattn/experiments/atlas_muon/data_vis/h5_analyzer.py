@@ -663,6 +663,343 @@ class h5Analyzer:
 
         return results
     
+    def generate_feature_histograms_with_categories(
+        self, 
+        output_dir: Union[str, Path], 
+        histogram_settings: Optional[Dict] = None,
+        features_to_plot: Optional[List[str]] = None,
+        category: str = "standard"
+    ) -> Dict[str, bool]:
+        """
+        Generate HEP ROOT style histograms with different categories.
+        
+        Parameters:
+        -----------
+        output_dir : str or Path
+            Directory to save histogram plots
+        histogram_settings : dict, optional
+            Dictionary defining histogram settings for specific features
+        features_to_plot : list, optional
+            List of feature names to plot. If None, plots all available input features.
+        category : str
+            Category of histograms to generate:
+            - "standard": Original implementation (unchanged)
+            - "signal_background": Side-by-side plots of signal vs background
+            
+        Returns:
+        --------
+        dict : Dictionary with feature names as keys and success status as values
+        """
+        if category == "standard":
+            # Use the original implementation unchanged
+            return self.generate_feature_histograms(output_dir, histogram_settings, features_to_plot)
+        elif category == "signal_background":
+            return self._generate_signal_background_histograms(output_dir, histogram_settings, features_to_plot)
+        else:
+            raise ValueError(f"Unknown category: {category}. Must be 'standard' or 'signal_background'")
+    
+    def _generate_signal_background_histograms(
+        self, 
+        output_dir: Union[str, Path], 
+        histogram_settings: Optional[Dict] = None,
+        features_to_plot: Optional[List[str]] = None
+    ) -> Dict[str, bool]:
+        """
+        Generate side-by-side histograms comparing signal vs background for input features.
+        
+        Parameters:
+        -----------
+        output_dir : str or Path
+            Directory to save histogram plots
+        histogram_settings : dict, optional
+            Dictionary defining histogram settings for specific features
+        features_to_plot : list, optional
+            List of feature names to plot. If None, plots all available input features.
+            
+        Returns:
+        --------
+        dict : Dictionary with feature names as keys and success status as values
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        results = {}
+        
+        # Get test dataloader
+        test_dataloader = self.data_module.test_dataloader()
+        
+        # Collect data from all batches with signal/background separation
+        collected_signal_data = {}
+        collected_background_data = {}
+        event_count = 0
+        
+        for batch in tqdm(test_dataloader, desc="Collecting signal/background feature data", total=self.max_events):
+            inputs, targets = batch
+            
+            # Get histogram settings from config
+            from .h5_config import HISTOGRAM_SETTINGS
+            
+
+            num_particles = np.sum(targets["particle_valid"].numpy())
+            # Get number of valid particles and hits
+            truth_links = targets["particle_hit_valid"][0][:num_particles, :].numpy()
+            # print(truth_links.shape)
+            # print(truth_links)
+            all_truth = np.full(len(inputs["hit_valid"][0]), -1, dtype=int)  # Default to -1 for background
+
+            for id, truth_link in enumerate(truth_links):
+                indices = np.where(truth_link)[0]
+                # print()
+                all_truth[indices] = id  # Assign the track ID to the corresponding hits
+            
+            # Create signal and background masks
+            signal_mask = all_truth != -1
+            background_mask = all_truth == -1
+            
+            # Process hits (inputs) - only consider features in HISTOGRAM_SETTINGS
+            for key, value in inputs.items():
+                if key.endswith('_valid') or key not in HISTOGRAM_SETTINGS["hits"]:
+                    continue
+                    
+                if features_to_plot is not None and key not in features_to_plot:
+                    continue
+                
+                # Initialize collections if needed
+                if key not in collected_signal_data:
+                    collected_signal_data[key] = []
+                    collected_background_data[key] = []
+                
+                # Get valid hits and apply signal/background separation
+                if 'hit_valid' in inputs:
+                    valid_mask = inputs['hit_valid'][0].cpu().numpy().astype(bool)
+                    valid_values = value[0][valid_mask].cpu().numpy()
+                    
+                    # Separate signal and background
+                    signal_values = valid_values[signal_mask]
+                    background_values = valid_values[background_mask]
+                    
+                    if len(signal_values) > 0:
+                        collected_signal_data[key].extend(signal_values.flatten())
+                    if len(background_values) > 0:
+                        collected_background_data[key].extend(background_values.flatten())
+            
+            event_count += 1
+            if event_count >= self.max_events:
+                break
+        
+        # Generate side-by-side histograms for collected data
+        for feature_name in collected_signal_data.keys():
+            if feature_name not in collected_background_data:
+                continue
+                
+            signal_data = collected_signal_data[feature_name]
+            background_data = collected_background_data[feature_name]
+            
+            if len(signal_data) == 0 and len(background_data) == 0:
+                print(f"WARNING: No data collected for feature '{feature_name}'")
+                results[feature_name] = False
+                continue
+            
+            # Get histogram settings for this feature
+            all_settings = HISTOGRAM_SETTINGS["hits"].copy()
+            all_settings.update(HISTOGRAM_SETTINGS["tragets"])  # Fix typo if needed
+
+            if feature_name in all_settings:
+                settings = all_settings[feature_name]
+            else:
+                # Default settings - combine both datasets to determine range
+                combined_data = np.concatenate([signal_data, background_data]) if len(signal_data) > 0 and len(background_data) > 0 else (signal_data if len(signal_data) > 0 else background_data)
+                settings = {
+                    'bins': 50,
+                    'range': (np.min(combined_data), np.max(combined_data)),
+                    'log_y': True
+                }
+            
+            # Create side-by-side histogram
+            success = self._create_signal_background_histogram(
+                np.array(signal_data) if len(signal_data) > 0 else np.array([]),
+                np.array(background_data) if len(background_data) > 0 else np.array([]),
+                feature_name, 
+                settings, 
+                output_path
+            )
+            results[feature_name] = success
+                
+        return results
+    
+    def _create_signal_background_histogram(
+        self, 
+        signal_data: np.ndarray, 
+        background_data: np.ndarray,
+        branch_name: str, 
+        settings: Dict, 
+        output_dir: Path
+    ) -> bool:
+        """
+        Create side-by-side histograms comparing signal vs background for a given feature.
+        
+        Parameters:
+        -----------
+        signal_data : np.ndarray
+            Data for signal hits (truth_links != -1)
+        background_data : np.ndarray
+            Data for background hits (truth_links == -1)
+        branch_name : str
+            Name of the branch (used for labeling)
+        settings : dict
+            Dictionary containing 'bins' and 'range' settings
+        output_dir : Path
+            Directory to save the plot
+            
+        Returns:
+        --------
+        bool : True if successful, False otherwise
+        """
+        try:
+            # Set HEP/ROOT style
+            plt.style.use('default')  # Reset to default style first
+            
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+            
+            # Get settings
+            bins = settings.get('bins', 50)
+            scale_factor = settings.get('scale_factor', 1.0)
+            data_range = settings.get('range', None)
+            
+            # Apply scale factor
+            signal_data_scaled = signal_data / settings.get('scale_factor', 1.0) 
+            background_data_scaled = background_data / settings.get('scale_factor', 1.0)
+            data_range = settings.get('range', (np.min(np.concatenate([signal_data_scaled, background_data_scaled])), np.max(np.concatenate([signal_data_scaled, background_data_scaled]))))
+
+            # Determine bins
+            if bins is None:
+                # Integer binning for discrete variables
+                all_data = np.concatenate([signal_data_scaled, background_data_scaled])
+                min_val = int(np.floor(np.min(all_data)))
+                max_val = int(np.ceil(np.max(all_data)))
+                bins_array = np.arange(min_val - 0.5, max_val + 1.5, 1)
+            else:
+                # Use specified number of bins
+                bins_array = np.linspace(data_range[0], data_range[1], bins + 1)
+            
+            # Plot signal histogram
+            self._plot_single_histogram(ax1, signal_data_scaled, bins_array, data_range, 
+                                       f"Signal - {branch_name}", "lightgreen", settings, "Signal")
+            
+            # Plot background histogram  
+            self._plot_single_histogram(ax2, background_data_scaled, bins_array, data_range,
+                                       f"Background - {branch_name}", "lightcoral", settings, "Background")
+            
+            # Set overall title
+            fig.suptitle(f'Signal vs Background Comparison: {branch_name}', fontsize=18, fontweight='bold')
+            
+            # Set tight layout
+            plt.tight_layout()
+            
+            # Save plot
+            output_file = output_dir / f"{branch_name}_signal_background_comparison.png"
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✓ Signal/Background comparison saved: {output_file}")
+            print(f"  Signal entries: {len(signal_data_scaled)}")
+            print(f"  Background entries: {len(background_data_scaled)}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"ERROR creating signal/background histogram for '{branch_name}': {str(e)}")
+            return False
+    
+    def _plot_single_histogram(self, ax, data, bins_array, data_range, title, color, settings, data_type):
+        """Helper function to plot a single histogram on given axes."""
+        # Apply range filter
+        if len(data) > 0:
+            mask = (data >= data_range[0]) & (data <= data_range[1])
+            filtered_data = data[mask]
+        else:
+            filtered_data = data
+        
+        # Calculate exclusion counts
+        total_entries = len(data)
+        entries_in_range = len(filtered_data)
+        excluded_below = len(data[data < data_range[0]]) if len(data) > 0 else 0
+        excluded_above = len(data[data > data_range[1]]) if len(data) > 0 else 0
+        excluded_total = excluded_below + excluded_above
+        
+        if len(filtered_data) > 0:
+            # Create histogram with HEP ROOT style
+            n, bins_edges, patches = ax.hist(
+                filtered_data,
+                bins=bins_array,
+                histtype='step',  # ROOT style outline
+                linewidth=0.5,
+                color='black',
+                alpha=0.8
+            )
+            
+            # Fill histogram with light color
+            ax.hist(
+                filtered_data,
+                bins=bins_array,
+                alpha=0.3,
+                color=color,
+                edgecolor='black'
+            )
+            
+            # Add statistics
+            mean = np.mean(filtered_data)
+            std = np.std(filtered_data)
+        else:
+            # Empty histogram
+            n = np.zeros(len(bins_array) - 1)
+            mean = 0
+            std = 0
+        
+        # HEP ROOT style formatting
+        ax.set_xlabel(title.split(' - ')[1], fontsize=14, fontweight='bold')
+        ax.set_ylabel('Entries', fontsize=14, fontweight='bold')
+        ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
+        
+        # Add statistics box (HEP ROOT style)
+        stats_text = f'{data_type} Entries: {entries_in_range}\nMean: {mean:.3g}\nStd: {std:.3g}'
+        
+        # Add exclusion information 
+        if excluded_total > 0:
+            stats_text += f'\n\nExcluded: {excluded_total}'
+            if excluded_below > 0:
+                stats_text += f'\n  < {data_range[0]:.3g}: {excluded_below}'
+            if excluded_above > 0:
+                stats_text += f'\n  > {data_range[1]:.3g}: {excluded_above}'
+        
+        # Position stats box in upper right
+        stats_y_pos = 0.98 if excluded_total == 0 else 0.95
+        ax.text(0.72, stats_y_pos, stats_text, 
+               transform=ax.transAxes, 
+               verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, pad=0.5),
+               fontsize=11, fontfamily='monospace')
+        
+        # Grid (ROOT style)
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        
+        # Apply log scale for Y-axis
+        log_y = settings.get('log_y', True)
+        if log_y and len(filtered_data) > 0:
+            ax.set_yscale('log')
+            if len(n[n > 0]) > 0:
+                ax.set_ylim(bottom=max(0.1, np.min(n[n > 0]) * 0.5))
+            else:
+                ax.set_ylim(bottom=0.1)
+        
+        # Set axis style
+        ax.tick_params(labelsize=12)
+        ax.tick_params(direction='in', length=6, width=1)
+        
+        # Add minor ticks
+        ax.minorticks_on()
+        ax.tick_params(which='minor', direction='in', length=3, width=0.5)
+    
     def _create_hep_style_histogram(
         self, 
         data: np.ndarray, 

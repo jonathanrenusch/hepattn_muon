@@ -76,6 +76,46 @@ class TrackMLTracker(ModelWrapper):
             self.log(f"{stage}/p{wp}_eff", mean_eff, sync_dist=True)
             self.log(f"{stage}/p{wp}_pur", mean_pur, sync_dist=True)
 
+        # Calculate track-level efficiency and fake rate for track_valid prediction
+        # True Positives: predicted valid AND actually valid
+        track_tp = (pred_valid & true_valid).float()
+        # False Positives: predicted valid BUT actually invalid  
+        track_fp = (pred_valid & ~true_valid).float()
+        # False Negatives: predicted invalid BUT actually valid
+        track_fn = (~pred_valid & true_valid).float()
+        # True Negatives: predicted invalid AND actually invalid
+        track_tn = (~pred_valid & ~true_valid).float()
+        
+        # Calculate per-batch efficiency and fake rate, then average
+        batch_track_effs = []
+        batch_track_fake_rates = []
+        
+        for batch_idx in range(true_valid.shape[0]):
+            tp_batch = track_tp[batch_idx].sum()
+            fp_batch = track_fp[batch_idx].sum()
+            fn_batch = track_fn[batch_idx].sum()
+            tn_batch = track_tn[batch_idx].sum()
+            
+            # Track-level efficiency: TP / (TP + FN)
+            if (tp_batch + fn_batch) > 0:
+                track_eff = tp_batch / (tp_batch + fn_batch)
+                batch_track_effs.append(track_eff)
+            
+            # Track-level fake rate: FP / (FP + TN)
+            if (fp_batch + tn_batch) > 0:
+                track_fake_rate = fp_batch / (fp_batch + tn_batch)
+                if fp_batch.sum() >=3:
+                    batch_track_fake_rates.append(track_fake_rate)
+        
+        # Log averaged metrics
+        if batch_track_effs:
+            mean_track_eff = torch.stack(batch_track_effs).mean()
+            self.log(f"{stage}/track_efficiency", mean_track_eff, sync_dist=True)
+        
+        if batch_track_fake_rates:
+            mean_track_fake_rate = torch.stack(batch_track_fake_rates).mean()
+            self.log(f"{stage}/track_fake_rate", mean_track_fake_rate, sync_dist=True)
+
         true_num = true_valid.sum(-1)
         pred_num = pred_valid.sum(-1)
         # number true predicted hits: 

@@ -408,7 +408,9 @@ class HitFilterDatasetReducer:
                 'events_failed_eval_data_missing': int(self.stats['events_failed_eval_data_missing']),
                 'events_failed_data_loading': int(self.stats['events_failed_data_loading']),
                 'events_failed_max_tracks': int(self.stats['events_failed_max_tracks']),
+                'events_failed_min_tracks': int(self.stats['events_failed_min_tracks']),
                 'events_failed_max_hits': int(self.stats['events_failed_max_hits']),
+                'events_failed_min_hits': int(self.stats['events_failed_min_hits']),
                 'events_final_output': int(self.stats['events_final_output']),
                 'hit_filter_pass_rate_percent': float(hit_filter_pass_rate),
                 'max_tracks_fail_rate_percent': float(max_tracks_fail_rate),
@@ -478,8 +480,12 @@ class HitFilterDatasetReducer:
               f"({self.stats['events_failed_data_loading']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"  Events failed max tracks cut: {self.stats['events_failed_max_tracks']:,} "
               f"({self.stats['events_failed_max_tracks']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
+        print(f"  Events failed min tracks cut: {self.stats['events_failed_min_tracks']:,} "
+              f"({self.stats['events_failed_min_tracks']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"  Events failed max hits cut: {self.stats['events_failed_max_hits']:,} "
               f"({self.stats['events_failed_max_hits']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
+        print(f"  Events failed min hits cut: {self.stats['events_failed_min_hits']:,} "
+              f"({self.stats['events_failed_min_hits']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"  Final events output: {self.stats['events_final_output']:,} "
               f"({self.stats['events_final_output']/max(1,self.stats['total_events_processed'])*100:.2f}%)")
         print(f"")
@@ -515,7 +521,9 @@ def process_worker_events(args: Tuple) -> Dict:
         'events_passed_hit_filter': 0,
         'events_failed_no_hits_after_filter': 0,
         'events_failed_max_tracks': 0,
+        'events_failed_max_tracks': 0,
         'events_failed_max_hits': 0,
+        'events_failed_min_hits': 0,
         'events_failed_eval_data_missing': 0,
         'events_failed_data_loading': 0,
         'events_final_output': 0,
@@ -614,6 +622,9 @@ def process_worker_events(args: Tuple) -> Dict:
                 
                 worker_stats['events_passed_hit_filter'] += 1
                 
+                # TODO: You will have to integrate track level filtering here if you really wanne have a good dataset
+                # Similar to other scripts live filter evaluation or the filter preperation script
+
                 # Count tracks after hit filtering
                 unique_track_ids = np.unique(hits_dict['spacePoint_truthLink'])
                 valid_track_ids = unique_track_ids[unique_track_ids >= 0]
@@ -623,16 +634,25 @@ def process_worker_events(args: Tuple) -> Dict:
                 if filtered_num_tracks > max_tracks_per_event:
                     worker_stats['events_failed_max_tracks'] += 1
                     continue
+                # Apply min tracks cut
+                if filtered_num_tracks < 1:
+                    worker_stats['events_failed_min_tracks'] += 1
+                    continue 
                 
                 # Apply max hits cut
                 if filtered_num_hits > max_hits_per_event:
                     worker_stats['events_failed_max_hits'] += 1
                     continue
-                
+                # Apply min hits cut 
+                if filtered_num_hits < 9: 
+                    worker_stats['events_failed_min_hits'] += 1
+                    continue               
+
                 # Filter tracks to only keep those that have hits
                 track_mask = np.isin(np.arange(len(tracks_dict[track_features[0]])), valid_track_ids)
                 for feature in track_features:
                     tracks_dict[feature] = tracks_dict[feature][track_mask]
+
                 
                 # Convert back to arrays
                 filtered_hits_array = np.column_stack([hits_dict[feature] for feature in hit_features])

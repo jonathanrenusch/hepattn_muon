@@ -133,8 +133,8 @@ dmypy.json
 .pypirc
 
 # Logging stuff
-*.png
-*.pdf
+#*.png
+#*.pdf
 logs/
 
 # Extra
