@@ -1,0 +1,31 @@
+TASK 3: REGRESSION EVALUATION SUMMARY
+==================================================
+
+Evaluation file: /scratch/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+Number of tracks processed: 16677
+
+REGRESSION STATISTICS:
+-------------------------
+ETA:
+  Mean normalized residual: -0.008848
+  STD normalized residual:  0.307887
+  Number of tracks: 16677
+
+PHI:
+  Mean normalized residual: 0.037720
+  STD normalized residual:  0.754914
+  Number of tracks: 16677
+
+QPT:
+  Mean normalized residual: 0.005953
+  STD normalized residual:  0.099349
+  Number of tracks: 16677
+
+PLOTS GENERATED:
+--------------------
+• Step histogram residual plots for eta, phi, qpt
+• Overlaid distribution comparisons for eta, phi, qpt
+• Truth-normalized residual analysis
+
+Generated at: 2025-09-24 15:22:08.824246

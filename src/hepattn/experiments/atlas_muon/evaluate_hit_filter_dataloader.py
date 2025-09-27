@@ -55,7 +55,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 # Global configuration constants
 # DEFAULT_WORKING_POINTS = [0.96, 0.965, 0.97, 0.975, 0.98, 0.985, 0.99, 0.995]
-DEFAULT_WORKING_POINTS = [0.985, 0.99, 0.995]
+DEFAULT_WORKING_POINTS = [0.975, 0.985, 0.99, 0.995]
 
 # Set matplotlib backend and style
 plt.switch_backend('Agg')
@@ -72,7 +72,7 @@ plt.rcParams.update({
 
 
 def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_particle_pts, 
-                        all_particle_etas, all_station_indices, true_hit_mask):
+                        all_particle_etas, all_station_indices, true_hit_mask, min_pt):
     """
     Worker function to process a chunk of tracks for baseline filtering.
     This function is designed to be called by multiprocessing.Pool.
@@ -132,8 +132,8 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
             chunk_stats['tracks_failed_eta_cuts'] += 1
             continue
             
-        # Pre-filter 3: pt threshold >= 3 GeV
-        if track_pt < 3.0:
+        # Pre-filter 3: pt threshold >= self.min_pt
+        if track_pt < min_pt:
             chunk_stats['tracks_failed_pt_cuts'] += 1
             continue
         
@@ -147,8 +147,9 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
             chunk_stats['tracks_failed_station_cuts'] += 1
             continue
             
-        # 2. Each station must have at least 3 hits
-        if not np.all(station_counts >= 3):
+         # 2. Each station must have at least 3 hits
+        n_good_stations = np.sum(station_counts >= 3)
+        if n_good_stations < 3:
             chunk_stats['tracks_failed_station_cuts'] += 1
             continue
             
@@ -466,7 +467,7 @@ class AtlasMuonEvaluatorDataLoader:
             if self.max_pt < float('inf'):
                 filter_desc.append(f"pT <= {self.max_pt} GeV")
             print(f"\nApplying pT filter: excluding all hits from tracks with {' and '.join(filter_desc)}...")
-            self._apply_pt_filter()
+            # self._apply_pt_filter()
             print(f"After pT filter:")
             print(f"  Total hits: {len(self.all_logits):,}")
             print(f"  True hits: {np.sum(self.all_true_labels):,}")
@@ -499,7 +500,7 @@ class AtlasMuonEvaluatorDataLoader:
           * At least 3 different stations
           * At least 3 hits per station (meaning >= 9 hits total per track)
           * |eta| >= 0.1 and |eta| <= 2.7 (detector acceptance region)
-          * pt >= 3 GeV (minimum pt threshold)
+          * pt >= some GeV (minimum pt threshold)
         
         Note: If global pT filtering was applied earlier (--min_pt), only tracks
         above that threshold will be considered here.
@@ -564,7 +565,8 @@ class AtlasMuonEvaluatorDataLoader:
             all_particle_pts=self.all_particle_pts,
             all_particle_etas=self.all_particle_etas,
             all_station_indices=self.all_station_indices,
-            true_hit_mask=true_hit_mask
+            true_hit_mask=true_hit_mask,
+            min_pt=self.min_pt
         )
         
         # Process tracks in parallel
@@ -588,7 +590,7 @@ class AtlasMuonEvaluatorDataLoader:
         print(f"  Total tracks checked: {stats['total_tracks_checked']}")
         print(f"  Failed minimum hits (>=9): {stats['tracks_failed_min_hits']} ({stats['tracks_failed_min_hits']/stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {stats['tracks_failed_eta_cuts']} ({stats['tracks_failed_eta_cuts']/stats['total_tracks_checked']*100:.1f}%)")
-        print(f"  Failed pt cuts (pt >= 3 GeV): {stats['tracks_failed_pt_cuts']} ({stats['tracks_failed_pt_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= {self.min_pt} GeV): {stats['tracks_failed_pt_cuts']} ({stats['tracks_failed_pt_cuts']/stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed station cuts (>=3 stations, >=3 hits/station): {stats['tracks_failed_station_cuts']} ({stats['tracks_failed_station_cuts']/stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Tracks passing all cuts: {stats['tracks_passed_all_cuts']} ({stats['tracks_passed_all_cuts']/stats['total_tracks_checked']*100:.1f}%)")
         
@@ -874,7 +876,7 @@ class AtlasMuonEvaluatorDataLoader:
             overall_purity = 0.0
         
         # Define pt bins
-        pt_min, pt_max = 5.0, 200.0
+        pt_min, pt_max = self.min_pt, 200.0
         pt_bins = np.linspace(pt_min, pt_max, 21)  # 20 bins
         pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
         
@@ -941,7 +943,7 @@ class AtlasMuonEvaluatorDataLoader:
         
         # Prepare data for all working points (vectorized)
         results_dict = {}
-        pt_min, pt_max = 5.0, 200.0
+        pt_min, pt_max = self.min_pt, 200.0
         pt_bins = np.linspace(pt_min, pt_max, 21)  # 20 bins
         pt_centers = (pt_bins[:-1] + pt_bins[1:]) / 2
         
@@ -3025,7 +3027,7 @@ class AtlasMuonEvaluatorDataLoader:
             f.write("- Each station must have at least 3 hits from the track\n")
             f.write("- This ensures tracks have at least 9 hits total\n")
             f.write("- Detector acceptance: 0.1 <= |eta| <= 2.7\n")
-            f.write("- Minimum pT threshold: >= 3 GeV\n\n")
+            f.write(f"- Minimum pT threshold: >= {self.min_pt} GeV\n\n")
             f.write("BASELINE FILTERING STRATEGY:\n")
             f.write("- Keep ALL noise hits from all events in both categories\n")
             f.write("- BASELINE: Keep true hits from tracks meeting baseline criteria\n")
@@ -3040,7 +3042,7 @@ class AtlasMuonEvaluatorDataLoader:
                 f.write(f"Total tracks evaluated: {baseline_stats['total_tracks_checked']:,}\n")
                 f.write(f"Tracks failing minimum hits (>=9): {baseline_stats['tracks_failed_min_hits']:,} ({baseline_stats['tracks_failed_min_hits']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
                 f.write(f"Tracks failing eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats['tracks_failed_eta_cuts']:,} ({baseline_stats['tracks_failed_eta_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
-                f.write(f"Tracks failing pT cuts (pT >= 3 GeV): {baseline_stats['tracks_failed_pt_cuts']:,} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks failing pT cuts (pT >= {self.min_pt} GeV): {baseline_stats['tracks_failed_pt_cuts']:,} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
                 f.write(f"Tracks failing station cuts (>=3 stations, >=3 hits/station): {baseline_stats['tracks_failed_station_cuts']:,} ({baseline_stats['tracks_failed_station_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n")
                 f.write(f"Tracks passing ALL criteria: {baseline_stats['tracks_passed_all_cuts']:,} ({baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.2f}%)\n\n")
                 
@@ -3176,9 +3178,14 @@ class AtlasMuonEvaluatorDataLoader:
 def main():
     parser = argparse.ArgumentParser(description='Evaluate ATLAS muon hit filter using DataLoader (OPTIMIZED)')
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
-    parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/bestfiltermodel/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
-                       help='Path to evaluation HDF5 file')
-    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130_ml_test_data_156000_hdf5_noCuts_eval.h5",
+        help='Path to evaluation HDF5 file')
+    # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/bestfiltermodel/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+                    #    help='Path to evaluation HDF5 file') # CAREFUL the checkpoint is still referring to the old cuts!
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
                        help='Path to processed test data directory')
     parser.add_argument('--config_path', "-c",type=str, default="/shared/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml",
                        help='Path to config YAML file')
@@ -3186,7 +3193,7 @@ def main():
                        help='Output directory for plots and results')
     parser.add_argument('--max_events', '-m', type=int, default=-1,
                        help='Maximum number of events to process (for testing)')
-    parser.add_argument('--min_pt', type=float, default=0.0,
+    parser.add_argument('--min_pt', type=float, default=5.0,
                        help='Minimum pT threshold in GeV for track filtering (0.0 = no filter, 10.0 = exclude tracks < 10 GeV)')
     parser.add_argument('--max_pt', type=float, default=float('inf'),
                        help='Maximum pT threshold in GeV for track filtering (inf = no filter, 50.0 = exclude tracks > 50 GeV)')

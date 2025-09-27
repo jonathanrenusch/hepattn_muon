@@ -1,0 +1,53 @@
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - BASELINE_TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-09-23 18:27:26
+Category: Baseline Tracks
+
+DATASET INFORMATION
+--------------------
+Number of tracks analyzed: 1,852
+Max events limit: 1000
+
+OVERALL PERFORMANCE METRICS
+------------------------------
+ROC AUC: 0.8226
+Overall Hit Assignment Efficiency: 0.9850
+Overall Hit Assignment Purity: 0.3930
+Overall Double Matching Efficiency: 0.2657
+
+WORKING POINT METRICS
+-------------------------
+Working Point 0.80:
+  Threshold: 3.5312
+  Target Efficiency: 0.8000
+  Achieved Efficiency: 0.8014
+  Purity: 0.5805
+Working Point 0.85:
+  Threshold: 3.2188
+  Target Efficiency: 0.8500
+  Achieved Efficiency: 0.8512
+  Purity: 0.5560
+Working Point 0.95:
+  Threshold: 2.0781
+  Target Efficiency: 0.9500
+  Achieved Efficiency: 0.9502
+  Purity: 0.4756
+
+AVERAGE METRICS BY KINEMATIC VARIABLE
+----------------------------------------
+PT:
+  Average Efficiency: 0.9850
+  Average Purity: 0.3934
+  Average Double Matching: 0.2657
+
+ETA:
+  Average Efficiency: 0.9844
+  Average Purity: 0.3919
+  Average Double Matching: 0.2657
+
+PHI:
+  Average Efficiency: 0.9848
+  Average Purity: 0.3952
+  Average Double Matching: 0.2657
+

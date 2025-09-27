@@ -1,0 +1,35 @@
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - ALL_TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-09-21 20:52:52
+Category: All Tracks
+
+DATASET INFORMATION
+--------------------
+Number of tracks analyzed: 111,814
+Max events limit: 80000
+
+OVERALL PERFORMANCE METRICS
+------------------------------
+ROC AUC: 0.9271
+Overall Hit Assignment Efficiency: 0.7479
+Overall Hit Assignment Purity: 0.8301
+Overall Double Matching Efficiency: 0.7616
+
+AVERAGE METRICS BY KINEMATIC VARIABLE
+----------------------------------------
+PT:
+  Average Efficiency: 0.7479
+  Average Purity: 0.8306
+  Average Double Matching: 0.7616
+
+ETA:
+  Average Efficiency: 0.7372
+  Average Purity: 0.8265
+  Average Double Matching: 0.7616
+
+PHI:
+  Average Efficiency: 0.7506
+  Average Purity: 0.8302
+  Average Double Matching: 0.7616
+

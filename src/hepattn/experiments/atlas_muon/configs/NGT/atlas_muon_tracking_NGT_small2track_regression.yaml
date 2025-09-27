@@ -202,7 +202,7 @@ model:
                     input_size: 22
                     output_size: *dim
                 posenc:
-                  class_path: hepattn.models.posenc.FourierPositionEncoder
+                  class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
                     input_name: hit
                     dim: *dim
@@ -211,7 +211,7 @@ model:
                       # - eta
                       - phi
                     dim: *dim
-                    scale: 0.1
+                    # scale: 0.1
 
       # encoder:
       #   class_path: hepattn.models.Encoder
@@ -283,9 +283,9 @@ model:
                 losses:
                   object_bce: 1.0
                 costs:
-                  object_bce: 10.0
+                  object_bce: 0.1
                 dim: *dim
-                null_weight: 1.0
+                null_weight: 0.01
                 mask_queries: false
             - class_path: hepattn.models.task.ObjectHitMaskTask
               init_args:
@@ -303,13 +303,14 @@ model:
                 # dim: *dim
                 # null_weight: 1.0
                 losses:
-                  mask_bce: 1.0
-                  # mask_dice: 1.0
+                  mask_bce: 0.1
+                  mask_dice: 0.1
+                  mask_focal: 0.1
                 costs:
-                  mask_bce: 1.0
+                  mask_bce: 0.1
                   # mask_dice: 1.0
                 dim: *dim
-                null_weight: 1.0
+                null_weight: 0.01
 
             - class_path: hepattn.models.task.ObjectRegressionTask
               init_args:
@@ -318,8 +319,9 @@ model:
                 output_object: track
                 target_object: particle
                 dim: *dim
-                loss_weight: 1.0
+                loss_weight: 0.1
                 fields:
                   - truthMuon_eta
                   - truthMuon_phi
-                  - truthMuon_qpt
+                  - truthMuon_pt
+                  - truthMuon_q

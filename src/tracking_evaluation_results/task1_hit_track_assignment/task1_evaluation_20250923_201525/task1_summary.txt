@@ -1,0 +1,111 @@
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION SUMMARY
+==================================================
+
+Evaluation file: /eos/project/e/end-to-end-muon-tracking/tracking/data/best2tracktracking/TRK-ATLAS-Muon-smallModel_20250915-T192111/ckpts/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+Number of tracks processed: 16139
+Total number of hits: 1192187
+Total true hits: 424836
+Total predicted hits: 406159
+
+OVERALL METRICS
+--------------------
+ROC AUC: 0.9282
+Overall Hit Assignment Efficiency: 0.7717
+Overall Hit Assignment Purity: 0.8072
+Overall Double Matching Efficiency: 0.7769
+
+WORKING POINT METRICS
+-------------------------
+Working Point 0.80:
+  Threshold: -0.1650
+  Target Efficiency: 0.8000
+  Achieved Efficiency: 0.8001
+  Purity: 0.7997
+Working Point 0.85:
+  Threshold: -0.5156
+  Target Efficiency: 0.8500
+  Achieved Efficiency: 0.8504
+  Purity: 0.7829
+Working Point 0.95:
+  Threshold: -1.8203
+  Target Efficiency: 0.9500
+  Achieved Efficiency: 0.9502
+  Purity: 0.7099
+
+AVERAGE METRICS BY KINEMATIC VARIABLES
+----------------------------------------
+
+PT Averages:
+
+ETA Averages:
+
+PHI Averages:
+
+AVERAGE WORKING POINT METRICS BY KINEMATIC VARIABLES
+--------------------------------------------------
+
+PT Working Point Averages:
+  WP 0.60:
+    Average Efficiency: 0.6007
+    Average Purity: 0.8385
+  WP 0.80:
+    Average Efficiency: 0.8001
+    Average Purity: 0.8008
+  WP 0.85:
+    Average Efficiency: 0.8503
+    Average Purity: 0.7841
+  WP 0.95:
+    Average Efficiency: 0.9501
+    Average Purity: 0.7117
+
+ETA Working Point Averages:
+  WP 0.60:
+    Average Efficiency: 0.6006
+    Average Purity: 0.8270
+  WP 0.80:
+    Average Efficiency: 0.8002
+    Average Purity: 0.7914
+  WP 0.85:
+    Average Efficiency: 0.8503
+    Average Purity: 0.7766
+  WP 0.95:
+    Average Efficiency: 0.9502
+    Average Purity: 0.7039
+
+PHI Working Point Averages:
+  WP 0.60:
+    Average Efficiency: 0.6006
+    Average Purity: 0.8454
+  WP 0.80:
+    Average Efficiency: 0.8003
+    Average Purity: 0.8059
+  WP 0.85:
+    Average Efficiency: 0.8503
+    Average Purity: 0.7898
+  WP 0.95:
+    Average Efficiency: 0.9502
+    Average Purity: 0.7158
+
+AVERAGE DOUBLE MATCHING WITH WORKING POINTS BY KINEMATIC VARIABLES
+-----------------------------------------------------------------
+
+PT Double Matching Working Point Averages:
+  WP 0.60: Average Double Matching Efficiency = 0.7397
+  WP 0.80: Average Double Matching Efficiency = 0.6419
+  WP 0.85: Average Double Matching Efficiency = 0.6088
+  WP 0.95: Average Double Matching Efficiency = 0.4871
+
+ETA Double Matching Working Point Averages:
+  WP 0.60: Average Double Matching Efficiency = 0.7396
+  WP 0.80: Average Double Matching Efficiency = 0.6419
+  WP 0.85: Average Double Matching Efficiency = 0.6088
+  WP 0.95: Average Double Matching Efficiency = 0.4869
+
+PHI Double Matching Working Point Averages:
+  WP 0.60: Average Double Matching Efficiency = 0.7396
+  WP 0.80: Average Double Matching Efficiency = 0.6419
+  WP 0.85: Average Double Matching Efficiency = 0.6088
+  WP 0.95: Average Double Matching Efficiency = 0.4869
+
+Generated at: 2025-09-23 20:17:18.240552

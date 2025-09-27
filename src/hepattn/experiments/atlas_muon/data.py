@@ -268,6 +268,7 @@ class AtlasMuonDataset(Dataset):
         hits["theta"] = np.arccos(np.clip(hits["spacePoint_globEdgeLowZ"] / hits["s"], -1, 1))
         hits["phi"] = np.arctan2(hits["spacePoint_globEdgeLowY"], hits["spacePoint_globEdgeLowX"])
         hits["on_valid_particle"] = hits["spacePoint_truthLink"] >= 0
+        
 
         # Convert tracks array to dictionary
         tracks_dict = {}

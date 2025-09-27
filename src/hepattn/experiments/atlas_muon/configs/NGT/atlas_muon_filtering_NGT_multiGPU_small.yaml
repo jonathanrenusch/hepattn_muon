@@ -1,5 +1,6 @@
 seed_everything: 42
-name: ATLAS-Muon-small
+name: ATLAS-Muon-small-NSWimpact
+
 # ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small_20250907-T121140/ckpts/epoch=023-val_loss=0.00437.ckpt
 data:
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
@@ -20,7 +21,7 @@ data:
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: 6  # Typically fewer tracks per event in muon data
+  event_max_num_particles: 10  # Typically fewer tracks per event in muon data
 
   # Define which inputs will be available to the model
   inputs:
@@ -65,7 +66,8 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [1, 2]
+  # devices: [1, 2]
+  devices: -1
   # devices: [1,2,3,4,5,6,7]
   # devices: -1
   precision: bf16-mixed
@@ -163,15 +165,16 @@ model:
                     output_size: &dim 128
                     norm_input: true
                 posenc:
-                  class_path: hepattn.models.FourierPositionEncoder
+                  class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
                     input_name: hit
-                    fields:
-                      - phi
-                      - r 
-                    # TODO: Check wether you might want to add more here
                     dim: *dim
-                    scale: 0.1
+                    fields:
+                      - r
+                      # - eta
+                      - phi
+                    dim: *dim
+                    # scale: 0.1
       encoder:
         class_path: hepattn.models.Encoder
         init_args:

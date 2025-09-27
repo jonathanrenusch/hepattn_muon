@@ -54,6 +54,7 @@ def generate_plots_for_file(
     output_dir: Path,
     num_events: int = 10,
     generate_histograms: bool = True,
+    histogram_categories: List[str] = ["standard", "signal_background"],
     dataset: Optional[AtlasMuonDataset] = None,
 ) -> Optional[Dict[str, Union[List[str], int]]]:
     """Generate all plots for a single ROOT file."""
@@ -106,10 +107,13 @@ def generate_plots_for_file(
     # 3. Generate branch histograms
 
     if generate_histograms: 
-        analyzer.generate_feature_histograms(
-            output_dir=file_output_dir / "histograms",
-            histogram_settings=HISTOGRAM_SETTINGS
-        )
+        for histogram_category in histogram_categories:
+            print(f"\n--- Generating histograms (category: {histogram_category}) ---")
+            analyzer.generate_feature_histograms_with_categories(
+                output_dir=file_output_dir / f"histograms_{histogram_category}",
+                histogram_settings=HISTOGRAM_SETTINGS,
+                category=histogram_category
+            )
 
     # 4. Plot number of true hits: 
     track_analyzer = h5TrackVisualizerMDTGeometry(
@@ -175,20 +179,22 @@ def main() -> None:
         "--num-events",
         "-n",
         type=int,
-        default=10000,
+        default=90000,
         # default=-1,
         help="number of events to use for statistics",
-    )
-    parser.add_argument(
-        "--min-tracks",
-        type=int,
-        default=1,
-        help="Minimum number of tracks required per event (default: 1)",
     )
     parser.add_argument(
         "--skip-histograms",
         action="store_true",
         help="Skip generation of branch histograms (default: False)",
+    )
+    parser.add_argument(
+        "--histogram-categories",
+        type=str,
+        nargs="+",
+        default=["standard", "signal_background"],
+        choices=["standard", "signal_background"],
+        help="Categories of histograms to generate (default: both 'standard' and 'signal_background')",
     )
 
     args = parser.parse_args()
@@ -420,6 +426,7 @@ def main() -> None:
         output_dir,
         args.num_events,
         not args.skip_histograms,
+        args.histogram_categories,
         dataset=dataset,
     )
 

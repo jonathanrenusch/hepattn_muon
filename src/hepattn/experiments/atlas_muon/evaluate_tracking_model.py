@@ -131,9 +131,14 @@ def _process_track_chunk_for_baseline(track_chunk, all_event_ids, all_particle_i
             continue
             
         # 2. Each station must have at least 3 hits
-        if not np.all(station_counts >= 3):
+        n_good_stations = np.sum(station_counts >= 3)
+        if n_good_stations < 3:
             chunk_stats['tracks_failed_station_cuts'] += 1
             continue
+
+        # if not np.all(station_counts >= 3):
+        #     stats['tracks_failed_station_cuts'] += 1
+        #     continue
             
         # Track passed all criteria
         qualified_tracks.add((event_id, particle_id))

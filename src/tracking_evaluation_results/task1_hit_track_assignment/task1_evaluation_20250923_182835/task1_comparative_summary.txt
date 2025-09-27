@@ -1,0 +1,115 @@
+
+================================================================================
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-09-23 18:29:21
+Evaluation file: /eos/project/e/end-to-end-muon-tracking/tracking/data/best2tracktracking/TRK-ATLAS-Muon-smallModel_20250915-T192111/ckpts/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+Max events processed: 1000
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 1,884
+Failed minimum hits (>=9): 22
+Failed eta cuts (0.1 <= |eta| <= 2.7): 51
+Failed pt cuts (pt >= 3 GeV): 0
+Failed station cuts (at least 3 stations and 3 stations with 3+ hits): 4
+Tracks passing all cuts: 1,807
+
+Detailed Cut Statistics:
+  Failed minimum hits: 1.2%
+  Failed eta cuts: 2.7%
+  Failed pt cuts: 0.0%
+  Failed station cuts: 0.2%
+  Passed all cuts (baseline): 95.9%
+  Rejected (failed any cut): 4.1%
+
+Baseline Filtering Criteria:
+  Minimum hits: >= 9 hits
+  Eta acceptance: 0.1 <= |eta| <= 2.7
+  Minimum pt: >= 3.0 GeV
+  Station requirements: >= 3 stations with >= 3 stations having >= 3 hits each
+
+TRACKS ANALYZED PER CATEGORY
+------------------------------
+All Tracks: 1,884 tracks
+Baseline Tracks: 1,807 tracks
+Rejected Tracks: 77 tracks
+
+COMPARATIVE METRICS
+--------------------
+Category            Roc Auc                  Overall Efficiency       Overall Purity           Overall Double Matching  Num Tracks     
+------------------------------------------------------------------------------------------------------------------------
+All Tracks          0.9304                   0.7847                   0.7936                   0.7850                   1884           
+Baseline Tracks     0.9306                   0.7841                   0.7963                   0.7886                   1807           
+Rejected Tracks     0.9268                   0.8080                   0.7059                   0.7013                   77             
+
+WORKING POINT METRICS COMPARISON
+-----------------------------------
+
+Working Point 0.80:
+Category            Threshold      Achieved Eff   Purity         
+-----------------------------------------------------------------
+All Tracks          -0.0903        0.8001         0.7892         
+Baseline Tracks     -0.0938        0.8000         0.7919         
+Rejected Tracks     0.0430         0.8019         0.7115         
+
+Working Point 0.85:
+Category            Threshold      Achieved Eff   Purity         
+-----------------------------------------------------------------
+All Tracks          -0.4355        0.8502         0.7711         
+Baseline Tracks     -0.4395        0.8503         0.7740         
+Rejected Tracks     -0.2754        0.8506         0.6780         
+
+Working Point 0.95:
+Category            Threshold      Achieved Eff   Purity         
+-----------------------------------------------------------------
+All Tracks          -1.7500        0.9501         0.6969         
+Baseline Tracks     -1.7422        0.9501         0.7011         
+Rejected Tracks     -2.3750        0.9505         0.5534         
+
+ALL TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.7850
+  Average Purity: 0.7943
+  Average Double Matching: 0.7850
+ETA:
+  Average Efficiency: 0.7717
+  Average Purity: 0.7888
+  Average Double Matching: 0.7850
+PHI:
+  Average Efficiency: 0.7872
+  Average Purity: 0.7944
+  Average Double Matching: 0.7850
+
+BASELINE TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.7844
+  Average Purity: 0.7971
+  Average Double Matching: 0.7886
+ETA:
+  Average Efficiency: 0.7703
+  Average Purity: 0.7914
+  Average Double Matching: 0.7886
+PHI:
+  Average Efficiency: 0.7866
+  Average Purity: 0.7973
+  Average Double Matching: 0.7886
+
+REJECTED TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.8077
+  Average Purity: 0.7088
+  Average Double Matching: 0.7013
+ETA:
+  Average Efficiency: 0.7954
+  Average Purity: 0.6912
+  Average Double Matching: 0.7013
+PHI:
+  Average Efficiency: 0.8127
+  Average Purity: 0.7153
+  Average Double Matching: 0.7013
+

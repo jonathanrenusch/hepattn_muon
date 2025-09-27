@@ -1,0 +1,99 @@
+================================================================================
+ATLAS MUON HIT FILTER EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-09-25 11:15:43
+Max events processed: 10000
+
+BASELINE FILTERING CRITERIA:
+- Tracks must have hits in at least 3 different stations
+- Each station must have at least 3 hits from the track
+- This ensures tracks have at least 9 hits total
+- Detector acceptance: 0.1 <= |eta| <= 2.7
+- Minimum pT threshold: >= 3 GeV
+
+BASELINE FILTERING STRATEGY:
+- Keep ALL noise hits from all events in both categories
+- BASELINE: Keep true hits from tracks meeting baseline criteria
+- REJECTED: Keep true hits from tracks NOT meeting baseline criteria
+- This maintains realistic signal-to-noise ratio for both evaluations
+
+==================================================
+BASELINE FILTERING BREAKDOWN
+==================================================
+Total tracks evaluated: 4,045
+Tracks failing minimum hits (>=9): 59 (1.46%)
+Tracks failing eta cuts (0.1 <= |eta| <= 2.7): 125 (3.09%)
+Tracks failing pT cuts (pT >= 3 GeV): 56 (1.38%)
+Tracks failing station cuts (>=3 stations, >=3 hits/station): 2,015 (49.81%)
+Tracks passing ALL criteria: 1,790 (44.25%)
+
+FILTERING EFFICIENCY:
+Track retention rate: 44.25%
+Hit retention rate: 100.00%
+
+==================================================
+ALL TRACKS ANALYSIS
+==================================================
+Total hits analyzed: 45,149,167
+True hits: 106,141
+Noise hits: 45,043,026
+Unique tracks: 4,045
+Truth hit ratio: 0.24%
+AUC Score: 0.9926
+
+==================================================
+BASELINE FILTERED TRACKS ANALYSIS
+==================================================
+Total hits analyzed: 45,087,050
+True hits: 44,024
+Noise hits: 45,043,026
+Unique tracks: 1,790
+Truth hit ratio: 0.10%
+AUC Score: 0.9936
+
+==================================================
+REJECTED TRACKS ANALYSIS
+==================================================
+Total hits analyzed: 45,105,143
+True hits: 62,117
+Noise hits: 45,043,026
+Unique tracks: 2,255
+Truth hit ratio: 0.14%
+AUC Score: 0.9919
+
+==================================================
+COMPARISON METRICS
+==================================================
+BASELINE vs ALL TRACKS:
+Hit retention rate: 99.86%
+True hit retention: 41.48%
+Noise hit retention: 100.00%
+Track retention rate: 44.25%
+AUC improvement: 0.0010
+
+REJECTED vs ALL TRACKS:
+Hit retention rate: 99.90%
+True hit retention: 58.52%
+Noise hit retention: 100.00%
+Track retention rate: 55.75%
+AUC improvement: -0.0007
+
+Dataset purity (all tracks): 0.0024
+Dataset purity (baseline): 0.0010
+Dataset purity (rejected): 0.0014
+Baseline purity improvement: -0.0014
+Rejected purity change: -0.0010
+
+PLOTS GENERATED:
+- ROC curve (all three datasets)
+- Efficiency vs pT (all three datasets)
+- Working point performance (all three datasets)
+- Track lengths (all three datasets)
+- Efficiency vs eta/phi (SKIPPED)
+- Technology-specific plots (SKIPPED)
+- Individual working point plots (SKIPPED)
+
+Outputs saved to:
+  All tracks: evaluation_results/run_20250925_111047/all_tracks
+  Baseline filtered: evaluation_results/run_20250925_111047/baseline_filtered_tracks
+  Rejected tracks: evaluation_results/run_20250925_111047/rejected_tracks

@@ -1,0 +1,53 @@
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - REJECTED_TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-09-23 18:29:21
+Category: Rejected Tracks
+
+DATASET INFORMATION
+--------------------
+Number of tracks analyzed: 77
+Max events limit: 1000
+
+OVERALL PERFORMANCE METRICS
+------------------------------
+ROC AUC: 0.9268
+Overall Hit Assignment Efficiency: 0.8080
+Overall Hit Assignment Purity: 0.7059
+Overall Double Matching Efficiency: 0.7013
+
+WORKING POINT METRICS
+-------------------------
+Working Point 0.80:
+  Threshold: 0.0430
+  Target Efficiency: 0.8000
+  Achieved Efficiency: 0.8019
+  Purity: 0.7115
+Working Point 0.85:
+  Threshold: -0.2754
+  Target Efficiency: 0.8500
+  Achieved Efficiency: 0.8506
+  Purity: 0.6780
+Working Point 0.95:
+  Threshold: -2.3750
+  Target Efficiency: 0.9500
+  Achieved Efficiency: 0.9505
+  Purity: 0.5534
+
+AVERAGE METRICS BY KINEMATIC VARIABLE
+----------------------------------------
+PT:
+  Average Efficiency: 0.8077
+  Average Purity: 0.7088
+  Average Double Matching: 0.7013
+
+ETA:
+  Average Efficiency: 0.7954
+  Average Purity: 0.6912
+  Average Double Matching: 0.7013
+
+PHI:
+  Average Efficiency: 0.8127
+  Average Purity: 0.7153
+  Average Double Matching: 0.7013
+
