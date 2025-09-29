@@ -1,0 +1,28 @@
+TASK 2: TRACK VALIDITY CLASSIFICATION - REJECTED TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-09-28 19:16:00
+Category: Rejected Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 51,234
+True valid tracks: 12,926
+True invalid tracks: 38,308
+Predicted valid tracks: 32,607
+Predicted invalid tracks: 18,627
+
+CONFUSION MATRIX
+----------------
+True Positives: 12,252
+False Positives: 20,355
+True Negatives: 17,953
+False Negatives: 674
+
+PERFORMANCE METRICS
+--------------------
+Overall Efficiency: 0.9479
+Fake Rate: 0.3973
+ROC AUC: 0.8046
+
+Generated at: 2025-09-28 19:16:00.646622

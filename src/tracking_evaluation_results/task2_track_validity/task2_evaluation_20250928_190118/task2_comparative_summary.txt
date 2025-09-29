@@ -1,0 +1,26 @@
+
+================================================================================
+TASK 2: TRACK VALIDITY CLASSIFICATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-09-28 19:16:00
+Evaluation file: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5
+Data directory: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts
+Max events processed: 80000
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 121,692
+Failed minimum hits (>=9): 1,196
+Failed eta cuts (0.1 <= |eta| <= 2.7): 3,481
+Failed pt cuts (pt >= 3.0 GeV): 0
+Failed station cuts: 8,249
+Tracks passing all cuts: 108,766
+
+COMPARATIVE METRICS
+--------------------
+Category            Num Tracks     Efficiency  Fake Rate   ROC AUC   
+----------------------------------------------------------------------
+All Tracks          160000         0.9785      0.1272      0.8485    
+Baseline Tracks     143076         0.9822      0.1274      0.8541    
+Rejected Tracks     51234          0.9479      0.3973      0.8046    
+

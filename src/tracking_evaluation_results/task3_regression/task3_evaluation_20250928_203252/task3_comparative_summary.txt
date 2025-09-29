@@ -1,0 +1,50 @@
+
+================================================================================
+TASK 3: REGRESSION EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-09-28 20:48:22
+Evaluation file: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5
+Data directory: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts
+Max events processed: 80000
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 121,692
+Failed minimum hits (>=9): 1,196
+Failed eta cuts (0.1 <= |eta| <= 2.7): 3,481
+Failed pt cuts (pt >= 3.0 GeV): 0
+Failed station cuts: 8,249
+Tracks passing all cuts: 108,766
+
+PHI COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          121692         0.162416       13.448186      
+Baseline Tracks     108766         0.147362       13.823479      
+Rejected Tracks     12926          0.289093       9.732127       
+
+ETA COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          121692         0.148766       23.682715      
+Baseline Tracks     108766         0.049844       0.970611       
+Rejected Tracks     12926          0.981147       72.605957      
+
+PT COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          121692         0.101970       0.781639       
+Baseline Tracks     108766         0.092897       0.748988       
+Rejected Tracks     12926          0.178310       1.012409       
+
+Q COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          121692         0.009703       0.727362       
+Baseline Tracks     108766         0.012316       0.712703       
+Rejected Tracks     12926          -0.012283      0.840324       
+

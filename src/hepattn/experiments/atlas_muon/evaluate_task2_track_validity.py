@@ -2,16 +2,14 @@
 """
 Evaluation script for Task 2: Track Validity Classification (track_valid)
 
-This script evaluates the performance of the track validity classification task by:
-1. Creating ROC curves using the track validity logits
-2. Creating efficiency and fake rate plots over pt, eta, phi (using true values)
-3. Analyzing the performance in different detector regions
+This script evaluates the performance of the track validity classification task with:
+1. Three categories: all tracks, baseline tracks, rejected tracks
+2. On-the-fly data processing (no large memory storage)
+3. ROC curves using track validity logits
+4. Efficiency and fake rate plots over pt, eta, phi
+5. Baseline filtering criteria from Task 1
 
-FILTERING CRITERION: Optionally filters tracks based on minimum number of hits assigned.
-Use --min_hits 9 to apply the 9-hit minimum criterion for both fake rate and true rate tracks.
-Default behavior (--min_hits 0) applies no filtering.
-
-The evaluation is inspired by the hit filter evaluation approach.
+Based on lessons learned from simple_task1_metrics.py
 """
 
 import os
@@ -47,45 +45,44 @@ plt.rcParams.update({
 })
 
 class Task2TrackValidityEvaluator:
-    """Evaluator for track validity classification task."""
+    """Evaluator for track validity classification task with baseline filtering."""
     
-    def __init__(self, eval_path, data_dir, config_path, output_dir, max_events=None, min_hits=0):
+    def __init__(self, eval_path, data_dir, output_dir, max_events=None):
         self.eval_path = eval_path
         self.data_dir = data_dir
-        self.config_path = config_path
-        self.output_dir = Path(output_dir)
         self.max_events = max_events
-        self.min_hits = min_hits  # Minimum number of hits required per track
         
-        # Create output directory
+        # Create timestamped output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_output_dir = Path(output_dir)
+        self.output_dir = base_output_dir / f"task2_evaluation_{timestamp}"
+        
+        # Create output directory and subdirectories for categories
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.all_tracks_dir = self.output_dir / "all_tracks"
+        self.baseline_dir = self.output_dir / "baseline_tracks" 
+        self.rejected_dir = self.output_dir / "rejected_tracks"
         
-        # Data storage
-        self.predictions = []       # Boolean predictions for track validity
-        self.logits = []           # Raw logits for track validity
-        self.true_validity = []    # True track validity
-        self.track_info = []       # pt, eta, phi for each track
-        self.hit_assignments = []  # Track-hit assignments for each track (for hit count filtering)
-        self.has_pt_predictions = False  # Whether pt predictions are available
+        for subdir in [self.all_tracks_dir, self.baseline_dir, self.rejected_dir]:
+            subdir.mkdir(parents=True, exist_ok=True)
         
         print(f"Task 2 Evaluator initialized")
         print(f"Evaluation file: {eval_path}")
         print(f"Data directory: {data_dir}")
-        print(f"Output directory: {output_dir}")
-        print(f"Minimum hits per track: {min_hits} {'(no filtering)' if min_hits == 0 else f'({min_hits}-hit cut applied)'}")
+        print(f"Output directory: {self.output_dir}")
+        print(f"Max events: {max_events}")
         
     def setup_data_module(self):
         """Setup the data module for loading truth information."""
         print("Setting up data module...")
         
-        # Create a minimal config for the data module
         self.data_module = AtlasMuonDataModule(
             train_dir=self.data_dir,
             val_dir=self.data_dir,
             test_dir=self.data_dir,
-            num_workers=1,
-            num_train=1,  # Set to 1 instead of 0 to avoid error
-            num_val=1,    # Set to 1 instead of 0 to avoid error
+            num_workers=4,  # Reduced from 100
+            num_train=1,
+            num_val=1,
             num_test=self.max_events if self.max_events else -1,
             batch_size=1,
             event_max_num_particles=2,
@@ -105,23 +102,45 @@ class Task2TrackValidityEvaluator:
             }
         )
         
-        # Only setup test stage to avoid creating unnecessary train/val datasets
         self.data_module.setup("test")
         self.test_dataloader = self.data_module.test_dataloader()
         print(f"Data module setup complete. Test dataset size: {len(self.test_dataloader.dataset)}")
         
-    def collect_data(self):
-        """Collect predictions and truth data."""
-        print("Collecting data from predictions and truth...")
+    def collect_and_process_data(self):
+        """Collect and process data on-the-fly, applying baseline filtering."""
+        print("Collecting and processing data with baseline filtering...")
+        
+        # Data storage for all three categories
+        all_data = {
+            'logits': [], 'true_validity': [], 'predictions': [],
+            'track_pts': [], 'track_etas': [], 'track_phis': []
+        }
+        baseline_data = {
+            'logits': [], 'true_validity': [], 'predictions': [],
+            'track_pts': [], 'track_etas': [], 'track_phis': []
+        }
+        rejected_data = {
+            'logits': [], 'true_validity': [], 'predictions': [],
+            'track_pts': [], 'track_etas': [], 'track_phis': []
+        }
+        
+        # Baseline filtering statistics
+        baseline_stats = {
+            'total_tracks_checked': 0,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
+            'tracks_failed_station_cuts': 0,
+            'tracks_passed_all_cuts': 0
+        }
         
         with h5py.File(self.eval_path, 'r') as pred_file:
             event_count = 0
             
-            for batch_idx, batch in enumerate(tqdm(self.test_dataloader, desc="Processing events")):
+            for batch in tqdm(self.test_dataloader, desc="Processing events"):
                 if self.max_events and event_count >= self.max_events:
                     break
                     
-                # Get event ID (assuming sequential)
                 event_id = str(event_count)
                 
                 if event_id not in pred_file:
@@ -129,17 +148,16 @@ class Task2TrackValidityEvaluator:
                     event_count += 1
                     continue
                 
-                # Get predictions and logits
+                # Get truth information from batch
+                inputs, targets = batch
                 pred_group = pred_file[event_id]
                 
-                # Track validity predictions and logits
+                # Get predictions
                 track_valid_pred = pred_group['preds/final/track_valid/track_valid'][...]  # Shape: (1, 2)
                 track_valid_logits = pred_group['outputs/final/track_valid/track_logit'][...]  # Shape: (1, 2)
-                
-                # Track-hit assignment predictions (for hit count filtering)
                 track_hit_pred = pred_group['preds/final/track_hit_valid/track_hit_valid'][...]  # Shape: (1, 2, num_hits)
                 
-                # Get predicted track parameters for binning
+                # Get predicted track parameters for binning (available for both real and fake tracks)
                 pred_eta = pred_group['preds/final/parameter_regression/track_truthMuon_eta'][...]  # Shape: (1, 2)
                 pred_phi = pred_group['preds/final/parameter_regression/track_truthMuon_phi'][...]  # Shape: (1, 2)
                 
@@ -148,127 +166,192 @@ class Task2TrackValidityEvaluator:
                 if has_pt_pred:
                     pred_pt = pred_group['preds/final/parameter_regression/track_truthMuon_pt'][...]  # Shape: (1, 2)
                 else:
-                    # Try qpt and convert to pt
                     pred_pt = None
-                    has_pt_pred = False
                 
-                # Get truth information from batch
-                inputs, targets = batch
-                
-                # Truth track parameters
+                # Get truth
                 true_particle_valid = targets['particle_valid'][0]  # Shape: (2,)
+                true_hit_assignments = targets['particle_hit_valid'][0]  # Shape: (2, num_hits)
                 
-                # Convert to numpy for easier handling
-                valid_particles = true_particle_valid.numpy()
+                # First pass: check if this event contains any baseline tracks
+                event_has_baseline_track = False
+                event_tracks = []
                 
-                # For this event, store the data for each track slot
-                batch_size, num_tracks = track_valid_pred.shape
+                # Process both potential tracks (max 2 tracks per event)
+                for track_idx in range(2):
+                    # Get track validity predictions and truth
+                    predicted_track_valid = bool(track_valid_pred[0, track_idx])
+                    true_particle_exists = bool(true_particle_valid[track_idx])
+                    track_logit = float(track_valid_logits[0, track_idx])
+                    
+                    # Use predicted kinematic parameters for binning (works for both real and fake tracks)
+                    track_eta = pred_eta[0, track_idx].item()
+                    track_phi = pred_phi[0, track_idx].item()
+                    track_pt = pred_pt[0, track_idx].item() if has_pt_pred else 0.0
+                    
+                    # Store track info temporarily
+                    track_info = {
+                        'predicted_track_valid': predicted_track_valid,
+                        'true_particle_exists': true_particle_exists,
+                        'track_logit': track_logit,
+                        'track_pt': track_pt,
+                        'track_eta': track_eta,
+                        'track_phi': track_phi
+                    }
+                    
+                    # Apply baseline filtering (only for tracks with true particles)
+                    passes_baseline = False
+                    if true_particle_exists:
+                        baseline_stats['total_tracks_checked'] += 1
+                        passes_baseline = True
+                        
+                        # Get hit assignments for baseline filtering
+                        true_hits = true_hit_assignments[track_idx].numpy().astype(bool)
+                        
+                        # Get truth parameters for baseline filtering criteria
+                        truth_pt = targets["particle_truthMuon_pt"][0, track_idx].item()
+                        truth_eta = targets["particle_truthMuon_eta"][0, track_idx].item()
+                        
+                        # Pre-filter 1: tracks must have at least 9 hits total
+                        total_true_hits = true_hits.sum()
+                        if total_true_hits < 9:
+                            baseline_stats['tracks_failed_min_hits'] += 1
+                            passes_baseline = False
+                        
+                        # Pre-filter 2: eta acceptance cuts |eta| >= 0.1 and |eta| <= 2.7 (use truth eta)
+                        if passes_baseline and (np.abs(truth_eta) < 0.1 or np.abs(truth_eta) > 2.7):
+                            baseline_stats['tracks_failed_eta_cuts'] += 1
+                            passes_baseline = False
+                        
+                        # Pre-filter 3: pt threshold >= 3.0 GeV (use truth pt)
+                        if passes_baseline and truth_pt < 5.0:
+                            baseline_stats['tracks_failed_pt_cuts'] += 1
+                            passes_baseline = False
+                        
+                        # Pre-filter 4: station requirements
+                        if passes_baseline:
+                            true_station_index = inputs["hit_spacePoint_stationIndex"][0]
+                            track_stations = true_station_index[true_hits]
+                            unique_stations, station_counts = np.unique(track_stations, return_counts=True)
+                            
+                            # At least 3 different stations and 3 stations with >=3 hits each
+                            if len(unique_stations) < 3:
+                                baseline_stats['tracks_failed_station_cuts'] += 1
+                                passes_baseline = False
+                            else:
+                                n_good_stations = np.sum(station_counts >= 3)
+                                if n_good_stations < 3:
+                                    baseline_stats['tracks_failed_station_cuts'] += 1
+                                    passes_baseline = False
+                        
+                        if passes_baseline:
+                            baseline_stats['tracks_passed_all_cuts'] += 1
+                            event_has_baseline_track = True
+                    
+                    track_info['passes_baseline'] = passes_baseline
+                    event_tracks.append(track_info)
                 
-                for track_idx in range(num_tracks):
-                    # Process ALL track slots to get proper positive/negative examples
-                    # Get prediction and logit for this track slot
-                    pred_prob = track_valid_pred[0, track_idx]  # This might be a probability
-                    logit_valid = track_valid_logits[0, track_idx]
+                # Second pass: assign tracks to categories based on event-level information
+                for track_info in event_tracks:
+                    predicted_track_valid = track_info['predicted_track_valid']
+                    true_particle_exists = track_info['true_particle_exists']
+                    track_logit = track_info['track_logit']
+                    track_pt = track_info['track_pt']
+                    track_eta = track_info['track_eta']
+                    track_phi = track_info['track_phi']
+                    passes_baseline = track_info['passes_baseline']
                     
-                    # Convert probability to boolean prediction (threshold at 0.5)
-                    pred_valid = bool(pred_prob > 0.5) if isinstance(pred_prob, (float, np.floating)) else bool(pred_prob)
+                    # Add to all tracks category
+                    all_data['logits'].append(track_logit)
+                    all_data['true_validity'].append(true_particle_exists)
+                    all_data['predictions'].append(predicted_track_valid)
+                    all_data['track_pts'].append(track_pt)
+                    all_data['track_etas'].append(track_eta)
+                    all_data['track_phis'].append(track_phi)
                     
-                    # Get truth validity - directly from particle_valid array
-                    true_valid = bool(valid_particles[track_idx]) if track_idx < len(valid_particles) else False
-                    
-                    # Store the prediction data for ALL track slots
-                    self.predictions.append(pred_valid)
-                    self.logits.append(logit_valid)
-                    self.true_validity.append(true_valid)
-                    
-                    # Store hit assignments for hit count filtering
-                    hit_assignments = track_hit_pred[0, track_idx]  # Get hits for this track
-                    self.hit_assignments.append(hit_assignments)
-                    
-                    # Use predicted values for binning (for both real and fake tracks)
-                    pred_eta_val = pred_eta[0, track_idx]
-                    pred_phi_val = pred_phi[0, track_idx]
-                    pred_pt_val = pred_pt[0, track_idx] if has_pt_pred else 0.0
-                    
-                    self.track_info.append({
-                        'pt': pred_pt_val,
-                        'eta': pred_eta_val, 
-                        'phi': pred_phi_val,
-                        'event_id': event_count,
-                        'track_id': track_idx,
-                        'has_pt': has_pt_pred
-                    })
+                    # Add to appropriate category
+                    if true_particle_exists and passes_baseline:
+                        # Baseline tracks (true particles that pass filtering)
+                        baseline_data['logits'].append(track_logit)
+                        baseline_data['true_validity'].append(true_particle_exists)
+                        baseline_data['predictions'].append(predicted_track_valid)
+                        baseline_data['track_pts'].append(track_pt)
+                        baseline_data['track_etas'].append(track_eta)
+                        baseline_data['track_phis'].append(track_phi)
+                    elif true_particle_exists and not passes_baseline:
+                        # Rejected tracks (true particles that fail filtering)
+                        rejected_data['logits'].append(track_logit)
+                        rejected_data['true_validity'].append(true_particle_exists)
+                        rejected_data['predictions'].append(predicted_track_valid)
+                        rejected_data['track_pts'].append(track_pt)
+                        rejected_data['track_etas'].append(track_eta)
+                        rejected_data['track_phis'].append(track_phi)
+                    elif not true_particle_exists:
+                        # Fake tracks: add to rejected category, and to baseline if event has baseline tracks
+                        rejected_data['logits'].append(track_logit)
+                        rejected_data['true_validity'].append(true_particle_exists)
+                        rejected_data['predictions'].append(predicted_track_valid)
+                        rejected_data['track_pts'].append(track_pt)
+                        rejected_data['track_etas'].append(track_eta)
+                        rejected_data['track_phis'].append(track_phi)
+                        
+                        # Also add fake tracks to baseline category if event has baseline tracks
+                        # This allows ROC curve calculation for baseline category
+                        if event_has_baseline_track:
+                            baseline_data['logits'].append(track_logit)
+                            baseline_data['true_validity'].append(true_particle_exists)  # False
+                            baseline_data['predictions'].append(predicted_track_valid)
+                            baseline_data['track_pts'].append(track_pt)
+                            baseline_data['track_etas'].append(track_eta)
+                            baseline_data['track_phis'].append(track_phi)
                 
                 event_count += 1
-                
-                # Set pt availability flag based on first event
-                if event_count == 1:
-                    self.has_pt_predictions = has_pt_pred
-                
-        print(f"Collected data for {len(self.predictions)} track slots from {event_count} events")
-        print(f"PT predictions available: {self.has_pt_predictions}")
         
-        # Convert to numpy arrays for easier handling
-        self.predictions = np.array(self.predictions)
-        self.logits = np.array(self.logits)
-        self.true_validity = np.array(self.true_validity)
-        # Note: hit_assignments remains as list since each track may have different number of hits
+        # Convert to numpy arrays
+        for data_dict in [all_data, baseline_data, rejected_data]:
+            for key in data_dict:
+                data_dict[key] = np.array(data_dict[key])
         
-        # Debug information
-        print(f"Prediction range: {self.predictions.min():.3f} to {self.predictions.max():.3f}")
-        print(f"Logit range: {self.logits.min():.3f} to {self.logits.max():.3f}")
-        print(f"True validity distribution: {self.true_validity.sum()} true, {(~self.true_validity).sum()} false")
-        print(f"Predicted validity distribution: {self.predictions.sum()} true, {(~self.predictions).sum()} false")
+        print(f"\nData collection complete!")
+        print(f"Total events processed: {event_count}")
         
-        # Print some statistics
-        n_true_tracks = self.true_validity.sum()
-        n_pred_tracks = self.predictions.sum()
-        n_correct = (self.predictions & self.true_validity).sum()
+        # Print baseline filtering statistics
+        print(f"\nBaseline Filtering Statistics:")
+        print(f"  Total tracks checked: {baseline_stats['total_tracks_checked']}")
+        print(f"  Failed minimum hits (>=9): {baseline_stats['tracks_failed_min_hits']} ({baseline_stats['tracks_failed_min_hits']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats['tracks_failed_eta_cuts']} ({baseline_stats['tracks_failed_eta_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 3.0 GeV): {baseline_stats['tracks_failed_pt_cuts']} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed station cuts: {baseline_stats['tracks_failed_station_cuts']} ({baseline_stats['tracks_failed_station_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {baseline_stats['tracks_passed_all_cuts']} ({baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         
-        print(f"True tracks: {n_true_tracks}")
-        print(f"Predicted tracks: {n_pred_tracks}")
-        print(f"Correctly predicted tracks: {n_correct}")
-        print(f"Overall accuracy: {(self.predictions == self.true_validity).mean():.3f}")
+        # Print category statistics
+        print(f"\nCategory Statistics:")
+        print(f"  All tracks: {len(all_data['logits'])}")
+        print(f"  Baseline tracks: {len(baseline_data['logits'])}")
+        print(f"  Rejected tracks: {len(rejected_data['logits'])}")
         
-    def calculate_efficiency_fakerate_by_variable(self, variable='pt', bins=None):
-        """Calculate efficiency and fake rate binned by a kinematic variable.
-        
-        Only considers tracks that have at least self.min_hits hits assigned (if min_hits > 0).
-        """
+        return all_data, baseline_data, rejected_data, baseline_stats
+    
+    def calculate_efficiency_fakerate_by_variable(self, data, variable='pt', bins=None):
+        """Calculate efficiency and fake rate binned by a kinematic variable."""
         
         if bins is None:
             if variable == 'pt':
-                bins = np.linspace(0, 200, 21)  # 20 bins: 0 to 200 GeV linear
+                bins = np.linspace(0, 200, 21)  # 20 bins
             elif variable == 'eta':
-                bins = np.linspace(-3, 3, 21)  # 20 bins: -3 to 3
+                bins = np.linspace(-3, 3, 21)  # 20 bins
             elif variable == 'phi':
-                bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins: -pi to pi
+                bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins
         
         # Extract the variable values
-        var_values = np.array([track[variable] for track in self.track_info])
+        if variable == 'pt':
+            var_values = data['track_pts']
+        elif variable == 'eta':
+            var_values = data['track_etas']
+        elif variable == 'phi':
+            var_values = data['track_phis']
         
-        # Apply minimum hit criterion if enabled
-        if self.min_hits > 0:
-            hit_counts = np.array([np.sum(hits) for hits in self.hit_assignments])
-            min_hit_mask = hit_counts >= self.min_hits
-            
-            print(f"Applying {self.min_hits}-hit minimum criterion: {min_hit_mask.sum()}/{len(min_hit_mask)} tracks pass ({min_hit_mask.sum()/len(min_hit_mask)*100:.1f}%)")
-            
-            # Filter all data based on hit count criterion
-            var_values = var_values[min_hit_mask]
-            predictions_filtered = self.predictions[min_hit_mask]
-            true_validity_filtered = self.true_validity[min_hit_mask]
-        else:
-            print(f"No hit filtering applied - using all {len(var_values)} tracks")
-            predictions_filtered = self.predictions
-            true_validity_filtered = self.true_validity
-        
-        if len(var_values) == 0:
-            if self.min_hits > 0:
-                print(f"Warning: No tracks pass the {self.min_hits}-hit minimum criterion")
-            else:
-                print("Warning: No tracks available for evaluation")
-            return np.array([]), np.array([]), np.array([]), np.array([]), np.array([])
+        predictions = data['predictions']
+        true_validity = data['true_validity']
         
         # Calculate bin indices
         bin_indices = np.digitize(var_values, bins) - 1
@@ -287,30 +370,36 @@ class Task2TrackValidityEvaluator:
                 continue
                 
             # Get predictions and truth for this bin
-            bin_predictions = predictions_filtered[mask]
-            bin_truth = true_validity_filtered[mask]
+            bin_predictions = predictions[mask]
+            bin_truth = true_validity[mask]
+            n_total = len(bin_predictions)
             
             # Calculate efficiency and fake rate
-            n_true = bin_truth.sum()  # True positives (real tracks)
-            n_false = (~bin_truth).sum()  # True negatives (fake tracks)
-            n_correct = (bin_predictions & bin_truth).sum()  # Correctly identified real tracks
-            n_false_pos = (bin_predictions & ~bin_truth).sum()  # Incorrectly identified fake tracks as real
+            n_true = bin_truth.sum()  # Number of true tracks
+            n_false = (~bin_truth).sum()  # Number of fake tracks
             
-            # Efficiency = TP / (TP + FN) = correct real tracks / all real tracks
+            # True positives: correctly identified real tracks
+            true_positives = (bin_predictions & bin_truth).sum()
+            # False positives: incorrectly identified fake tracks as real
+            false_positives = (bin_predictions & ~bin_truth).sum()
+            # False negatives: missed real tracks
+            false_negatives = (~bin_predictions & bin_truth).sum()
+            
+            # Efficiency = TP / (TP + FN) = TP / n_true
             if n_true > 0:
-                efficiency = n_correct / n_true
+                efficiency = true_positives / n_true
                 eff_error = np.sqrt(efficiency * (1 - efficiency) / n_true)
             else:
-                efficiency = 0
-                eff_error = 0
+                efficiency = 0.0
+                eff_error = 0.0
             
-            # Fake rate = FP / (FP + TN) = false positives / all fake tracks
-            if n_false > 0:
-                fake_rate = n_false_pos / n_false
-                fake_error = np.sqrt(fake_rate * (1 - fake_rate) / n_false)
+            # Fake rate = FP / Total Predictions = false positives / all predictions
+            if n_total > 0:
+                fake_rate = false_positives / n_total
+                fake_error = np.sqrt(fake_rate * (1 - fake_rate) / n_total)
             else:
-                fake_rate = 0
-                fake_error = 0
+                fake_rate = 0.0
+                fake_error = 0.0
             
             efficiencies.append(efficiency)
             fake_rates.append(fake_rate)
@@ -320,40 +409,35 @@ class Task2TrackValidityEvaluator:
         
         return np.array(bin_centers), np.array(efficiencies), np.array(fake_rates), np.array(eff_errors), np.array(fake_errors)
     
-    def plot_efficiency_fakerate_vs_variable(self, variable='pt', output_subdir=None):
+    def plot_efficiency_fakerate_vs_variable(self, data, variable='pt', output_dir=None, category_name=""):
         """Plot efficiency and fake rate vs a kinematic variable."""
         
-        # Check if pt is requested but not available
-        if variable == 'pt' and not self.has_pt_predictions:
-            print(f"Warning: PT predictions not available, skipping {variable} plot")
-            return
-        
-        # Define bins same as in calculate_efficiency_fakerate_by_variable (matching filter evaluation ranges)
+        # Define bins
         if variable == 'pt':
-            bins = np.linspace(0, 200, 21)  # 20 bins: 0 to 200 GeV linear
+            bins = np.linspace(0, 200, 21)
         elif variable == 'eta':
-            bins = np.linspace(-3, 3, 21)  # 20 bins: -3 to 3 (matching filter eval)
+            bins = np.linspace(-3, 3, 21)
         elif variable == 'phi':
-            bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins: -pi to pi (matching filter eval)
+            bins = np.linspace(-np.pi, np.pi, 21)
         
-        bin_centers, efficiencies, fake_rates, eff_errors, fake_errors = self.calculate_efficiency_fakerate_by_variable(variable, bins)
+        bin_centers, efficiencies, fake_rates, eff_errors, fake_errors = self.calculate_efficiency_fakerate_by_variable(data, variable, bins)
         
         if len(bin_centers) == 0:
-            print(f"Warning: No data points for {variable} plots")
+            print(f"Warning: No data points for {variable} plots in {category_name}")
             return
         
         # Create the plot with step style and error bands
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
         
-        # Efficiency plot with step style and error bands
+        # Efficiency plot
         for i, (lhs, rhs, eff_val, eff_err) in enumerate(zip(bins[:-1], bins[1:], efficiencies, eff_errors)):
             color = 'blue'
             
             # Create error band
             if eff_err > 0:
                 point_in_range = np.linspace(lhs, rhs, 100)
-                y_upper = min(eff_val + eff_err, 1.0)  # Cap at 1.0
-                y_lower = max(eff_val - eff_err, 0.0)  # Floor at 0.0
+                y_upper = min(eff_val + eff_err, 1.0)
+                y_lower = max(eff_val - eff_err, 0.0)
                 ax1.fill_between(point_in_range, y_upper, y_lower, 
                                color=color, alpha=0.3, 
                                label="binomial err - Efficiency" if i == 0 else "")
@@ -367,17 +451,17 @@ class Task2TrackValidityEvaluator:
         ax1.set_ylim(0, 1.1)
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        ax1.set_title(f'Track Validity Efficiency vs {variable.capitalize()}')
+        ax1.set_title(f'Track Validity Efficiency vs {variable.capitalize()} - {category_name}')
         
-        # Fake rate plot with step style and error bands
+        # Fake rate plot
         for i, (lhs, rhs, fake_val, fake_err) in enumerate(zip(bins[:-1], bins[1:], fake_rates, fake_errors)):
             color = 'red'
             
             # Create error band
             if fake_err > 0:
                 point_in_range = np.linspace(lhs, rhs, 100)
-                y_upper = min(fake_val + fake_err, 1.0)  # Cap at 1.0
-                y_lower = max(fake_val - fake_err, 0.0)  # Floor at 0.0
+                y_upper = min(fake_val + fake_err, 1.0)
+                y_lower = max(fake_val - fake_err, 0.0)
                 ax2.fill_between(point_in_range, y_upper, y_lower, 
                                color=color, alpha=0.3, 
                                label="binomial err - Fake Rate" if i == 0 else "")
@@ -391,11 +475,7 @@ class Task2TrackValidityEvaluator:
         ax2.set_ylim(0, 1.1)
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-        ax2.set_ylabel('Track Validity Fake Rate')
-        ax2.set_ylim(0, 1.1)
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        ax2.set_title(f'Track Validity Fake Rate vs {variable.capitalize()}')
+        ax2.set_title(f'Track Validity Fake Rate vs {variable.capitalize()} - {category_name}')
         
         # Set x-axis labels
         if variable == 'pt':
@@ -408,111 +488,34 @@ class Task2TrackValidityEvaluator:
         plt.tight_layout()
         
         # Save the plot
-        if output_subdir:
-            output_dir = self.output_dir / output_subdir
-            output_dir.mkdir(exist_ok=True)
-        else:
-            output_dir = self.output_dir
-            
         output_path = output_dir / f'track_validity_efficiency_fakerate_vs_{variable}.png'
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"Saved track validity efficiency/fake rate vs {variable} plot to {output_path}")
+        print(f"Saved {category_name} efficiency/fake rate vs {variable} plot to {output_path}")
     
-    def plot_roc_curve(self, output_subdir=None):
-        """Plot ROC curve using track validity logits.
+    def plot_roc_curve(self, data, output_dir=None, category_name=""):
+        """Plot ROC curve using track validity logits."""
         
-        Only considers tracks that have at least self.min_hits hits assigned (if min_hits > 0).
-        """
+        logits = data['logits']
+        true_validity = data['true_validity']
         
-        if len(self.logits) == 0:
-            print("Warning: No logits available for ROC curve")
-            return None
-        
-        # Apply minimum hit criterion if enabled
-        if self.min_hits > 0:
-            hit_counts = np.array([np.sum(hits) for hits in self.hit_assignments])
-            min_hit_mask = hit_counts >= self.min_hits
-            
-            print(f"ROC curve: Applying {self.min_hits}-hit minimum criterion: {min_hit_mask.sum()}/{len(min_hit_mask)} tracks pass ({min_hit_mask.sum()/len(min_hit_mask)*100:.1f}%)")
-            
-            # Filter data
-            logits_filtered = self.logits[min_hit_mask]
-            true_validity_filtered = self.true_validity[min_hit_mask]
-        else:
-            print(f"ROC curve: No hit filtering applied - using all {len(self.logits)} tracks")
-            logits_filtered = self.logits
-            true_validity_filtered = self.true_validity
-        
-        if len(logits_filtered) == 0:
-            if self.min_hits > 0:
-                print(f"Warning: No tracks pass the {self.min_hits}-hit minimum criterion for ROC curve")
-            else:
-                print("Warning: No tracks available for ROC curve")
+        if len(logits) == 0:
+            print(f"Warning: No logits available for ROC curve in {category_name}")
             return None
         
         # Check if we have both positive and negative examples
-        n_positive = true_validity_filtered.sum()
-        n_negative = (~true_validity_filtered).sum()
+        n_positive = true_validity.sum()
+        n_negative = (~true_validity).sum()
         
-        if n_positive == 0:
-            print("Warning: No positive examples for ROC curve")
+        if n_positive == 0 or n_negative == 0:
+            print(f"Warning: Cannot create ROC curve for {category_name} - need both positive and negative examples")
+            print(f"  Positive examples: {n_positive}, Negative examples: {n_negative}")
             return None
         
-        if n_negative == 0:
-            print("Warning: No negative examples for ROC curve - all tracks are valid")
-            print("This could indicate:")
-            print("1. Pre-filtered dataset with only valid tracks (expected)")
-            print("2. Data collection issue excluding negative examples (check logic)")
-            if self.min_hits > 0:
-                print(f"Total tracks processed (with >={self.min_hits} hits): {len(true_validity_filtered)}")
-            else:
-                print(f"Total tracks processed: {len(true_validity_filtered)}")
-            print(f"True positives: {n_positive}")
-            
-            # Create a plot indicating the situation
-            plt.figure(figsize=(8, 8))
-            plt.text(0.5, 0.5, f'No negative examples found\n({n_positive} positive examples)\n\nThis may indicate:\n• Pre-filtered dataset\n• Data collection bias', 
-                    ha='center', va='center', fontsize=14,
-                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
-            plt.xlim([0.0, 1.0])
-            plt.ylim([0.0, 1.05])
-            plt.xlabel('False Positive Rate')
-            plt.ylabel('True Positive Rate')
-            plt.title('ROC Curve for Track Validity Classification')
-            plt.grid(True, alpha=0.3)
-            
-            # Save the plot
-            if output_subdir:
-                output_dir = self.output_dir / output_subdir
-                output_dir.mkdir(exist_ok=True)
-            else:
-                output_dir = self.output_dir
-                
-            output_path = output_dir / 'roc_curve_track_validity.png'
-            plt.savefig(output_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            print(f"Saved ROC curve (no negatives) to {output_path}")
-            return None  # Return None instead of 1.0 to indicate undefined AUC
-        
         # Calculate ROC curve
-        fpr, tpr, thresholds = roc_curve(true_validity_filtered, logits_filtered)
+        fpr, tpr, thresholds = roc_curve(true_validity, logits)
         roc_auc = auc(fpr, tpr)
-        
-        # Debug: Check if we need to flip the logits
-        print(f"Initial AUC: {roc_auc:.4f}")
-        if roc_auc < 0.5:
-            print("AUC < 0.5, trying flipped logits...")
-            fpr_flip, tpr_flip, thresholds_flip = roc_curve(true_validity_filtered, -logits_filtered)
-            roc_auc_flip = auc(fpr_flip, tpr_flip)
-            print(f"Flipped AUC: {roc_auc_flip:.4f}")
-            
-            if roc_auc_flip > roc_auc:
-                print("Using flipped logits for ROC curve")
-                fpr, tpr, thresholds = fpr_flip, tpr_flip, thresholds_flip
-                roc_auc = roc_auc_flip
         
         # Create the plot
         plt.figure(figsize=(8, 8))
@@ -523,320 +526,294 @@ class Task2TrackValidityEvaluator:
         plt.ylim([0.0, 1.05])
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
-        plt.title('ROC Curve for Track Validity Classification')
+        plt.title(f'ROC Curve for Track Validity Classification - {category_name}')
         plt.legend(loc="lower right")
         plt.grid(True, alpha=0.3)
         
         # Save the plot
-        if output_subdir:
-            output_dir = self.output_dir / output_subdir
-            output_dir.mkdir(exist_ok=True)
-        else:
-            output_dir = self.output_dir
-            
         output_path = output_dir / 'roc_curve_track_validity.png'
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"Saved ROC curve to {output_path}")
-        print(f"ROC AUC: {roc_auc:.4f}")
+        print(f"Saved {category_name} ROC curve to {output_path} (AUC: {roc_auc:.4f})")
         
         return roc_auc
     
-    def plot_logit_distributions(self, output_subdir=None):
-        """Plot distributions of logits for true and fake tracks.
+    def plot_logit_distributions(self, data, output_dir=None, category_name=""):
+        """Plot distributions of logits for true and fake tracks."""
         
-        Only considers tracks that have at least self.min_hits hits assigned (if min_hits > 0).
-        """
+        logits = data['logits']
+        true_validity = data['true_validity']
         
-        # Apply minimum hit criterion if enabled
-        if self.min_hits > 0:
-            hit_counts = np.array([np.sum(hits) for hits in self.hit_assignments])
-            min_hit_mask = hit_counts >= self.min_hits
-            
-            print(f"Logit distributions: Applying {self.min_hits}-hit minimum criterion: {min_hit_mask.sum()}/{len(min_hit_mask)} tracks pass ({min_hit_mask.sum()/len(min_hit_mask)*100:.1f}%)")
-            
-            # Filter data
-            logits_filtered = self.logits[min_hit_mask]
-            true_validity_filtered = self.true_validity[min_hit_mask]
-        else:
-            print(f"Logit distributions: No hit filtering applied - using all {len(self.logits)} tracks")
-            logits_filtered = self.logits
-            true_validity_filtered = self.true_validity
-        
-        if len(logits_filtered) == 0:
-            if self.min_hits > 0:
-                print(f"Warning: No tracks pass the {self.min_hits}-hit minimum criterion for logit distributions")
-            else:
-                print("Warning: No tracks available for logit distributions")
+        if len(logits) == 0:
+            print(f"Warning: No logits available for distributions in {category_name}")
             return
         
-        true_track_logits = logits_filtered[true_validity_filtered]
-        fake_track_logits = logits_filtered[~true_validity_filtered]
+        true_track_logits = logits[true_validity]
+        fake_track_logits = logits[~true_validity]
         
         plt.figure(figsize=(10, 6))
         
-        plt.hist(fake_track_logits, bins=50, alpha=0.7, label=f'Fake tracks (n={len(fake_track_logits)})', 
-                color='red', density=False)
-        plt.hist(true_track_logits, bins=50, alpha=0.7, label=f'True tracks (n={len(true_track_logits)})', 
-                color='blue', density=False)
+        if len(fake_track_logits) > 0:
+            plt.hist(fake_track_logits, bins=50, alpha=0.7, 
+                    label=f'Fake tracks (n={len(fake_track_logits)})', 
+                    color='red', density=False)
+        
+        if len(true_track_logits) > 0:
+            plt.hist(true_track_logits, bins=50, alpha=0.7, 
+                    label=f'True tracks (n={len(true_track_logits)})', 
+                    color='blue', density=False)
         
         plt.xlabel('Track Validity Logit')
         plt.ylabel('Count')
-        plt.title('Distribution of Track Validity Logits')
+        plt.title(f'Distribution of Track Validity Logits - {category_name}')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
         # Save the plot
-        if output_subdir:
-            output_dir = self.output_dir / output_subdir
-            output_dir.mkdir(exist_ok=True)
-        else:
-            output_dir = self.output_dir
-            
         output_path = output_dir / 'track_validity_logit_distributions.png'
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"Saved logit distributions to {output_path}")
+        print(f"Saved {category_name} logit distributions to {output_path}")
     
-    def run_evaluation(self):
-        """Run the complete evaluation for Task 2."""
+    def write_category_summary(self, data, output_dir, category_name, roc_auc):
+        """Write evaluation summary for a category."""
+        summary_path = output_dir / f'{category_name.lower().replace(" ", "_")}_summary.txt'
+        
+        logits = data['logits']
+        predictions = data['predictions']
+        true_validity = data['true_validity']
+        
+        if len(predictions) == 0:
+            print(f"Warning: No data for {category_name} summary")
+            return
+        
+        # Calculate overall statistics
+        n_total = len(predictions)
+        n_true_tracks = true_validity.sum()
+        n_fake_tracks = n_total - n_true_tracks
+        n_pred_valid = predictions.sum()
+        n_pred_invalid = n_total - n_pred_valid
+        
+        # Calculate confusion matrix elements
+        true_positives = (predictions & true_validity).sum()
+        false_positives = (predictions & ~true_validity).sum()
+        true_negatives = (~predictions & ~true_validity).sum()
+        false_negatives = (~predictions & true_validity).sum()
+        
+        # Calculate metrics
+        efficiency = true_positives / n_true_tracks if n_true_tracks > 0 else 0  # TP / (TP + FN)
+        fake_rate = false_positives / n_total if n_total > 0 else 0  # FP / Total predictions
+        
+        with open(summary_path, 'w') as f:
+            f.write(f"TASK 2: TRACK VALIDITY CLASSIFICATION - {category_name.upper()} SUMMARY\n")
+            f.write("=" * 70 + "\n\n")
+            f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Category: {category_name}\n\n")
+            
+            f.write("DATASET INFORMATION\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Total tracks analyzed: {n_total:,}\n")
+            f.write(f"True valid tracks: {n_true_tracks:,}\n")
+            f.write(f"True invalid tracks: {n_fake_tracks:,}\n")
+            f.write(f"Predicted valid tracks: {n_pred_valid:,}\n")
+            f.write(f"Predicted invalid tracks: {n_pred_invalid:,}\n\n")
+            
+            f.write("CONFUSION MATRIX\n")
+            f.write("-" * 16 + "\n")
+            f.write(f"True Positives: {true_positives:,}\n")
+            f.write(f"False Positives: {false_positives:,}\n")
+            f.write(f"True Negatives: {true_negatives:,}\n")
+            f.write(f"False Negatives: {false_negatives:,}\n\n")
+            
+            f.write("PERFORMANCE METRICS\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Overall Efficiency: {efficiency:.4f}\n")
+            f.write(f"Fake Rate: {fake_rate:.4f}\n")
+            
+            if roc_auc is not None:
+                f.write(f"ROC AUC: {roc_auc:.4f}\n")
+            else:
+                f.write("ROC AUC: N/A (insufficient data)\n")
+            
+            f.write(f"\nGenerated at: {datetime.now()}\n")
+        
+        print(f"Summary for {category_name} written to {summary_path}")
+    
+    def write_comparative_summary(self, all_results, baseline_stats):
+        """Write comprehensive summary comparing all categories."""
+        summary_path = self.output_dir / 'task2_comparative_summary.txt'
+        
+        with open(summary_path, 'w') as f:
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("TASK 2: TRACK VALIDITY CLASSIFICATION - COMPARATIVE SUMMARY\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Evaluation file: {self.eval_path}\n")
+            f.write(f"Data directory: {self.data_dir}\n")
+            f.write(f"Max events processed: {self.max_events}\n\n")
+            
+            # Write filtering statistics
+            f.write("BASELINE FILTERING STATISTICS\n")
+            f.write("-" * 35 + "\n")
+            f.write(f"Total tracks checked: {baseline_stats.get('total_tracks_checked', 0):,}\n")
+            f.write(f"Failed minimum hits (>=9): {baseline_stats.get('tracks_failed_min_hits', 0):,}\n")
+            f.write(f"Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats.get('tracks_failed_eta_cuts', 0):,}\n")
+            f.write(f"Failed pt cuts (pt >= 3.0 GeV): {baseline_stats.get('tracks_failed_pt_cuts', 0):,}\n")
+            f.write(f"Failed station cuts: {baseline_stats.get('tracks_failed_station_cuts', 0):,}\n")
+            f.write(f"Tracks passing all cuts: {baseline_stats.get('tracks_passed_all_cuts', 0):,}\n\n")
+            
+            # Write comparative metrics
+            f.write("COMPARATIVE METRICS\n")
+            f.write("-" * 20 + "\n")
+            
+            categories = ['All Tracks', 'Baseline Tracks', 'Rejected Tracks']
+            f.write(f"{'Category':<20}{'Num Tracks':<15}{'Efficiency':<12}{'Fake Rate':<12}{'ROC AUC':<10}\n")
+            f.write("-" * 70 + "\n")
+            
+            for category in categories:
+                if category in all_results:
+                    result = all_results[category]
+                    f.write(f"{category:<20}{result['num_tracks']:<15}{result['efficiency']:<12.4f}{result['fake_rate']:<12.4f}")
+                    if result['roc_auc'] is not None:
+                        f.write(f"{result['roc_auc']:<10.4f}\n")
+                    else:
+                        f.write(f"{'N/A':<10}\n")
+                else:
+                    f.write(f"{category:<20}{'0':<15}{'N/A':<12}{'N/A':<12}{'N/A':<10}\n")
+            
+            f.write("\n")
+        
+        print(f"Comparative summary written to {summary_path}")
+    
+    def run_evaluation_with_categories(self):
+        """Run evaluation for all categories."""
         print("=" * 80)
-        print("TASK 2: TRACK VALIDITY CLASSIFICATION EVALUATION")
+        print("TASK 2: TRACK VALIDITY CLASSIFICATION WITH CATEGORIES")
         print("=" * 80)
         
         # Setup and collect data
         self.setup_data_module()
-        self.collect_data()
+        all_data, baseline_data, rejected_data, baseline_stats = self.collect_and_process_data()
         
-        if len(self.predictions) == 0:
-            print("Error: No data collected. Check file paths and data format.")
-            return
+        # Store results for comparative summary
+        all_results = {}
         
-        # Create plots
-        print("\nGenerating plots...")
+        # Process each category
+        categories = [
+            ("All Tracks", all_data, self.all_tracks_dir),
+            ("Baseline Tracks", baseline_data, self.baseline_dir),
+            ("Rejected Tracks", rejected_data, self.rejected_dir)
+        ]
         
-        # ROC curve
-        try:
-            roc_auc = self.plot_roc_curve()
-        except Exception as e:
-            print(f"Error creating ROC curve: {e}")
-            roc_auc = None
-        
-        # Logit distributions
-        try:
-            self.plot_logit_distributions()
-        except Exception as e:
-            print(f"Error creating logit distributions: {e}")
-        
-        # Efficiency/purity vs kinematic variables
-        variables_to_plot = ['eta', 'phi']
-        if self.has_pt_predictions:
-            variables_to_plot.insert(0, 'pt')  # Add pt first if available
-        
-        for variable in variables_to_plot:
+        for category_name, data, output_dir in categories:
+            print(f"\n" + "="*50)
+            print(f"EVALUATING {category_name.upper()}")
+            print("="*50)
+            
+            if len(data['logits']) == 0:
+                print(f"Warning: No data for {category_name}")
+                continue
+            
+            # Generate plots
+            print("Generating plots...")
+            
+            # ROC curve
             try:
-                self.plot_efficiency_fakerate_vs_variable(variable)
+                roc_auc = self.plot_roc_curve(data, output_dir, category_name)
             except Exception as e:
-                print(f"Error creating {variable} plots: {e}")
-        
-        # Write summary
-        self.write_summary(roc_auc)
-        
-        print(f"\nTask 2 evaluation complete. Results saved to {self.output_dir}")
-    
-    def calculate_averaged_fake_rates(self):
-        """Calculate averaged fake rates across different kinematic variables."""
-        averaged_fake_rates = {}
-        
-        # Variables to calculate averaged fake rates for
-        variables_to_check = ['eta', 'phi']
-        if self.has_pt_predictions:
-            variables_to_check.insert(0, 'pt')
-        
-        for variable in variables_to_check:
+                print(f"Error creating ROC curve: {e}")
+                roc_auc = None
+            
+            # Logit distributions
             try:
-                bin_centers, efficiencies, fake_rates, eff_errors, fake_errors = self.calculate_efficiency_fakerate_by_variable(variable)
+                self.plot_logit_distributions(data, output_dir, category_name)
+            except Exception as e:
+                print(f"Error creating logit distributions: {e}")
+            
+            # Efficiency/fake rate vs kinematic variables
+            for variable in ['pt', 'eta', 'phi']:
+                try:
+                    self.plot_efficiency_fakerate_vs_variable(data, variable, output_dir, category_name)
+                except Exception as e:
+                    print(f"Error creating efficiency/fake rate vs {variable} plot: {e}")
+            
+            # Calculate summary statistics
+            predictions = data['predictions']
+            true_validity = data['true_validity']
+            
+            if len(predictions) > 0:
+                n_total = len(predictions)
+                n_true_tracks = true_validity.sum()
+                n_fake_tracks = n_total - n_true_tracks
+                n_pred_valid = predictions.sum()
                 
-                if len(fake_rates) > 0:
-                    # Calculate weighted average (by number of tracks in each bin)
-                    # For now, use simple average since we don't have bin populations
-                    avg_fake_rate = np.mean(fake_rates)
-                    std_fake_rate = np.std(fake_rates)
-                    averaged_fake_rates[variable] = {
-                        'mean': avg_fake_rate,
-                        'std': std_fake_rate,
-                        'n_bins': len(fake_rates)
-                    }
-                else:
-                    averaged_fake_rates[variable] = {
-                        'mean': 0.0,
-                        'std': 0.0,
-                        'n_bins': 0
-                    }
-            except Exception as e:
-                print(f"Error calculating averaged fake rate for {variable}: {e}")
-                averaged_fake_rates[variable] = {
-                    'mean': 0.0,
-                    'std': 0.0,
-                    'n_bins': 0
+                true_positives = (predictions & true_validity).sum()
+                false_positives = (predictions & ~true_validity).sum()
+                true_negatives = (~predictions & ~true_validity).sum()
+                
+                efficiency = true_positives / n_true_tracks if n_true_tracks > 0 else 0  # TP / (TP + FN)
+                fake_rate = false_positives / n_total if n_total > 0 else 0  # FP / Total predictions
+                
+                all_results[category_name] = {
+                    'num_tracks': n_total,
+                    'efficiency': efficiency,
+                    'fake_rate': fake_rate,
+                    'roc_auc': roc_auc
                 }
-        
-        return averaged_fake_rates
-    
-    def write_summary(self, roc_auc):
-        """Write evaluation summary."""
-        summary_path = self.output_dir / 'task2_summary.txt'
-        
-        # Calculate averaged fake rates across kinematic variables
-        averaged_fake_rates = self.calculate_averaged_fake_rates()
-        
-        # Apply minimum hit criterion if enabled
-        if self.min_hits > 0:
-            hit_counts = np.array([np.sum(hits) for hits in self.hit_assignments])
-            min_hit_mask = hit_counts >= self.min_hits
-        else:
-            min_hit_mask = np.ones(len(self.predictions), dtype=bool)  # Include all tracks
-        
-        # Calculate statistics both before and after filtering
-        total_tracks_before = len(self.predictions)
-        tracks_after_filter = min_hit_mask.sum()
-        
-        # Overall statistics (before filtering)
-        n_true_tracks_before = self.true_validity.sum()
-        n_pred_tracks_before = self.predictions.sum()
-        n_correct_before = (self.predictions & self.true_validity).sum()
-        accuracy_before = (self.predictions == self.true_validity).mean()
-        
-        # Statistics after 9-hit filtering
-        predictions_filtered = self.predictions[min_hit_mask]
-        true_validity_filtered = self.true_validity[min_hit_mask]
-        
-        if len(predictions_filtered) > 0:
-            n_true_tracks = true_validity_filtered.sum()
-            n_pred_tracks = predictions_filtered.sum()
-            n_correct = (predictions_filtered & true_validity_filtered).sum()
-            accuracy = (predictions_filtered == true_validity_filtered).mean()
-            
-            if n_true_tracks > 0:
-                efficiency = n_correct / n_true_tracks
-            else:
-                efficiency = 0
                 
-            if n_pred_tracks > 0:
-                purity = n_correct / n_pred_tracks
-            else:
-                purity = 0
+                print(f"\n{category_name.upper()} METRICS:")
+                print(f"  Total tracks: {n_total:,}")
+                print(f"  Efficiency: {efficiency:.4f}")
+                print(f"  Fake rate: {fake_rate:.4f}")
+                if roc_auc is not None:
+                    print(f"  ROC AUC: {roc_auc:.4f}")
             
-            # Compute overall fake rate: false positives / all fake tracks
-            n_false_tracks = len(predictions_filtered) - n_true_tracks
-            n_false_pos = (predictions_filtered & ~true_validity_filtered).sum()
-            if n_false_tracks > 0:
-                overall_fake_rate = n_false_pos / n_false_tracks
-            else:
-                overall_fake_rate = 0
-        else:
-            n_true_tracks = n_pred_tracks = n_correct = 0
-            accuracy = efficiency = purity = overall_fake_rate = 0
+            # Write individual summary
+            try:
+                self.write_category_summary(data, output_dir, category_name, roc_auc)
+            except Exception as e:
+                print(f"Error writing summary for {category_name}: {e}")
         
-        with open(summary_path, 'w') as f:
-            f.write("TASK 2: TRACK VALIDITY CLASSIFICATION EVALUATION SUMMARY\n")
-            f.write("=" * 60 + "\n\n")
-            f.write(f"Evaluation file: {self.eval_path}\n")
-            f.write(f"Data directory: {self.data_dir}\n")
-            if self.min_hits > 0:
-                f.write(f"FILTERING CRITERION: Minimum {self.min_hits} hits assigned per track\n\n")
-            else:
-                f.write(f"FILTERING CRITERION: No hit filtering applied\n\n")
-            
-            if self.min_hits > 0:
-                f.write("BEFORE HIT FILTERING:\n")
-                f.write(f"  Number of track slots processed: {total_tracks_before}\n")
-                f.write(f"  True valid tracks: {n_true_tracks_before}\n")
-                f.write(f"  Predicted valid tracks: {n_pred_tracks_before}\n")
-                f.write(f"  Overall accuracy: {accuracy_before:.4f}\n\n")
-                
-                f.write(f"AFTER {self.min_hits}-HIT FILTERING:\n")
-                f.write(f"  Tracks passing filter: {tracks_after_filter} / {total_tracks_before} ({tracks_after_filter/total_tracks_before*100:.1f}%)\n")
-            else:
-                f.write("EVALUATION RESULTS (NO FILTERING):\n")
-                f.write(f"  Number of track slots processed: {total_tracks_before}\n")
-            
-            f.write(f"  True valid tracks: {n_true_tracks}\n")
-            f.write(f"  True invalid tracks: {len(predictions_filtered) - n_true_tracks}\n")
-            f.write(f"  Predicted valid tracks: {n_pred_tracks}\n")
-            f.write(f"  Predicted invalid tracks: {len(predictions_filtered) - n_pred_tracks}\n")
-            f.write(f"  Correctly predicted: {n_correct}\n")
-            
-            if len(predictions_filtered) > 0:
-                f.write(f"  True Positives (correct valid): {(predictions_filtered & true_validity_filtered).sum()}\n")
-                f.write(f"  True Negatives (correct invalid): {(~predictions_filtered & ~true_validity_filtered).sum()}\n")
-                f.write(f"  False Positives (incorrect valid): {(predictions_filtered & ~true_validity_filtered).sum()}\n")
-                f.write(f"  False Negatives (incorrect invalid): {(~predictions_filtered & true_validity_filtered).sum()}\n")
-            
-            f.write(f"  Overall accuracy: {accuracy:.4f}\n")
-            f.write(f"  Overall efficiency: {efficiency:.4f}\n")
-            f.write(f"  Overall purity: {purity:.4f}\n")
-            f.write(f"  Overall fake rate: {overall_fake_rate:.4f}\n")
-            
-            # Add averaged fake rates across kinematic bins
-            f.write(f"\nAVERAGED FAKE RATES ACROSS KINEMATIC BINS:\n")
-            for variable, stats in averaged_fake_rates.items():
-                if stats['n_bins'] > 0:
-                    f.write(f"  {variable.capitalize()} bins: {stats['mean']:.4f} ± {stats['std']:.4f} (across {stats['n_bins']} bins)\n")
-                else:
-                    f.write(f"  {variable.capitalize()} bins: No data available\n")
-            
-            if roc_auc is not None:
-                f.write(f"\n  ROC AUC: {roc_auc:.4f}\n")
-            else:
-                f.write("\n  ROC AUC: Not applicable (no negative examples)\n")
-            
-            f.write(f"\nGenerated at: {datetime.now()}\n")
+        # Write comparative summary
+        self.write_comparative_summary(all_results, baseline_stats)
         
-        print(f"Summary written to {summary_path}")
+        print(f"\nTask 2 evaluation with categories complete. Results saved to {self.output_dir}")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 2: Track Validity Classification')
     parser.add_argument('--eval_path', type=str, 
-                       default="/eos/project/e/end-to-end-muon-tracking/tracking/data/best2tracktracking/TRK-ATLAS-Muon-smallModel_20250915-T192111/ckpts/epoch=008-val_loss=1.62751_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500_eval.h5",
+                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
-                       default="/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500",
+                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
                        help='Path to processed test data directory')
-    parser.add_argument('--config_path', type=str, 
-                       default="/shared/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_tracking_NGT_small2track_regression_inference.yaml",
-                       help='Path to config YAML file')
     parser.add_argument('--output_dir', type=str, 
                        default='./tracking_evaluation_results/task2_track_validity',
-                       help='Output directory for plots and results')
-    parser.add_argument('--max_events',"-m", type=int, default=10000,
+                       help='Base output directory for plots and results')
+    parser.add_argument('--max_events', "-m", type=int, default=1000,
                        help='Maximum number of events to process (for testing)')
-    parser.add_argument('--min_hits', type=int, default=0,
-                       help='Minimum number of hits required per track (0 = no filtering, 9 = apply 9-hit cut)')
     
     args = parser.parse_args()
     
-    print("Task 2: Track Validity Classification Evaluation")
-    print("=" * 60)
+    print("Task 2: Track Validity Classification Evaluation with Categories")
+    print("=" * 70)
     print(f"Evaluation file: {args.eval_path}")
     print(f"Data directory: {args.data_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Max events: {args.max_events}")
-    print(f"Minimum hits per track: {args.min_hits} {'(no filtering)' if args.min_hits == 0 else f'({args.min_hits}-hit cut)'}")
     
     try:
         evaluator = Task2TrackValidityEvaluator(
             eval_path=args.eval_path,
             data_dir=args.data_dir,
-            config_path=args.config_path,
             output_dir=args.output_dir,
-            max_events=args.max_events,
-            min_hits=args.min_hits
+            max_events=args.max_events
         )
         
-        evaluator.run_evaluation()
+        evaluator.run_evaluation_with_categories()
         
     except Exception as e:
         print(f"Error during evaluation: {e}")

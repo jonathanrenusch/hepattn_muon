@@ -1,0 +1,34 @@
+TASK 3: REGRESSION EVALUATION - REJECTED TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-09-28 20:48:22
+Category: Rejected Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 12,926
+
+REGRESSION STATISTICS
+-------------------------
+PHI:
+  Mean normalized residual: 0.289093
+  STD normalized residual:  9.732127
+  Number of tracks: 12926
+
+ETA:
+  Mean normalized residual: 0.981147
+  STD normalized residual:  72.605957
+  Number of tracks: 12926
+
+PT:
+  Mean normalized residual: 0.178310
+  STD normalized residual:  1.012409
+  Number of tracks: 12926
+
+Q:
+  Mean absolute residual: -0.012283
+  STD absolute residual:  0.840324
+  Number of tracks: 12926
+
+
+Generated at: 2025-09-28 20:48:22.511070

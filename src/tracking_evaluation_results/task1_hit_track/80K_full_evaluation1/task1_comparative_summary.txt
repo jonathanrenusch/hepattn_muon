@@ -1,0 +1,77 @@
+
+================================================================================
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-09-28 19:17:09
+Evaluation file: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5
+Data directory: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts
+Max events processed: 80000
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 121,692
+Failed minimum hits (>=9): 1,196
+Failed eta cuts (0.1 <= |eta| <= 2.7): 3,481
+Failed pt cuts (pt >= 3 GeV): 0
+Failed station cuts: 504
+Tracks passing all cuts: 116,511
+
+TRACKS ANALYZED PER CATEGORY
+------------------------------
+All Tracks: 121,692 tracks
+Baseline Tracks: 116,511 tracks
+Rejected Tracks: 5,181 tracks
+
+COMPARATIVE METRICS
+--------------------
+Category            Roc Auc                  Overall Efficiency       Overall Purity           Overall Double Matching  Num Tracks     
+------------------------------------------------------------------------------------------------------------------------
+All Tracks          0.9363                   0.7907                   0.8077                   0.8073                   121692         
+Baseline Tracks     0.9373                   0.7918                   0.8103                   0.8125                   116511         
+Rejected Tracks     0.9072                   0.7564                   0.7274                   0.6883                   5181           
+
+ALL TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.7907
+  Average Purity: 0.8077
+  Average Double Matching: 0.8073
+ETA:
+  Average Efficiency: 0.7907
+  Average Purity: 0.8077
+  Average Double Matching: 0.8073
+PHI:
+  Average Efficiency: 0.7907
+  Average Purity: 0.8077
+  Average Double Matching: 0.8073
+
+BASELINE TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.7918
+  Average Purity: 0.8103
+  Average Double Matching: 0.8125
+ETA:
+  Average Efficiency: 0.7918
+  Average Purity: 0.8103
+  Average Double Matching: 0.8125
+PHI:
+  Average Efficiency: 0.7918
+  Average Purity: 0.8103
+  Average Double Matching: 0.8125
+
+REJECTED TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.7564
+  Average Purity: 0.7274
+  Average Double Matching: 0.6883
+ETA:
+  Average Efficiency: 0.7564
+  Average Purity: 0.7274
+  Average Double Matching: 0.6883
+PHI:
+  Average Efficiency: 0.7564
+  Average Purity: 0.7274
+  Average Double Matching: 0.6883
+

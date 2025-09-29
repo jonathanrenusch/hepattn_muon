@@ -7,7 +7,7 @@ data:
   train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
 
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_slight_cuts
+  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts
   # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500
 
   num_workers: 50

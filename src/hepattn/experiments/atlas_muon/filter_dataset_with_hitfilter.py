@@ -764,11 +764,7 @@ def process_worker_events(args: Tuple) -> Dict:
                 modified_truth_link[~hit2track_mask] = -1
                 
                 # Apply the mask to all hit features
-                for feature in hit_features:
-                    if feature == 'spacePoint_truthLink':
-                        hits_dict[feature] = modified_truth_link
-                    else:
-                        hits_dict[feature] = hits_dict[feature]  # Keep all hits but modify truthLink
+                hits_dict["spacePoint_truthLink"] = modified_truth_link
                 
                 # Filter tracks to only keep remaining tracks
                 track_mask = np.isin(np.arange(len(tracks_dict['truthMuon_pt'])), remaining_tracks.astype(int))
