@@ -45,6 +45,33 @@ class AtlasMuonFilter(ModelWrapper):
             # Calculate AUC
             auc = auroc(pred_probs.flatten(), true.flatten().long(), task="binary")
 
+        # Calculate reconstructable particles metric
+        # Get the particle-hit mask and filter it to only valid hits
+        particle_hit_mask = targets["particle_hit_valid"][0]  # Remove batch dimension: (num_particles, num_hits)
+        particle_hit_mask_valid = particle_hit_mask[:, targets["hit_valid"][0]]  # Only consider valid hits
+        
+        # Count hits per particle before filtering (ground truth)
+        hits_per_particle_true = particle_hit_mask_valid.sum(dim=1)  # Sum over hits for each particle
+        
+        # Count hits per particle after filtering (prediction)
+        # pred is already filtered to valid hits, so we need to map it back to the particle-hit mask
+        pred_expanded = torch.zeros_like(targets["hit_valid"][0], dtype=torch.bool)
+        pred_expanded[targets["hit_valid"][0]] = pred
+        particle_hit_mask_pred = particle_hit_mask & pred_expanded.unsqueeze(0)
+        hits_per_particle_pred = particle_hit_mask_pred.sum(dim=1)  # Sum over hits for each particle
+        
+        # Find particles with >3 true hits (reconstructable particles)
+        reconstructable_particles = hits_per_particle_true > 3
+        
+        # Among reconstructable particles, find those that retain >=3 hits after filtering
+        reconstructable_and_filtered = reconstructable_particles & (hits_per_particle_pred >= 3)
+        
+        # Calculate the percentage
+        num_reconstructable = reconstructable_particles.sum().float()
+        num_reconstructable_retained = reconstructable_and_filtered.sum().float()
+        
+        reconstructable_retention = num_reconstructable_retained / num_reconstructable if num_reconstructable > 0 else torch.tensor(0.0)
+
         metrics = {
             # Log quantities based on the number of hits
             "nh_total_pre": float(pred.numel()),
@@ -61,6 +88,10 @@ class AtlasMuonFilter(ModelWrapper):
             "valid_precision": tp / pred.sum(),
             "noise_recall": tn / (~true).sum(),
             "noise_precision": tn / (~pred).sum(),
+            # Reconstructable particles metric
+            "reconstructable_particle_retention": reconstructable_retention,
+            "num_reconstructable_particles": num_reconstructable,
+            "num_reconstructable_retained": num_reconstructable_retained,
         }
         
         # Add AUC if calculated

@@ -1,31 +1,20 @@
 seed_everything: 42
 name: ATLAS-Muon-small
-ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/epoch=041-val_loss=0.00402.ckpt
-data:
-  # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/train_PU200_processed
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/valid_PU200_processed
-  # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_multi_processed
-  # train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
-  # val_dir: /shared/tracking/data/ml_validation_data_150K_processed
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_1_2Mio_processed
-  # test_dir: /scratch/ml_training_data_2694000_hdf5
-  test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/parallellization_testing/gut_check_test_data9
-  # test_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_test_data_150K_processed
+# ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T115813/ckpts/epoch=022-val_loss=0.01176.ckpt
+data: 
+  train_dir: /scratch/ml_training_data_2694000_hdf5
+  val_dir: /scratch/ml_validation_data_144000_hdf5
 
-  train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_1_2Mio_processed
-  val_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_1_2Mio_processed
-
-  num_workers: 10
+  num_workers: 100
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 1 # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 50  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
-  event_max_num_particles: 6  # Typically fewer tracks per event in muon data
+  event_max_num_particles: 10  # Typically fewer tracks per event in muon data
 
   # Define which inputs will be available to the model
   inputs:
@@ -71,17 +60,22 @@ trainer:
   num_sanity_val_steps: 1
   accelerator: gpu
   devices: [1]
+  # devices: -1
+  # devices: [1,2,3,4,5,6,7]
+  # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
-  gradient_clip_val: 1.0
+  # TODO: Try a looser gradient clipping like 0.1 some time to see if it helps with performance
+  # gradient_clip_val: 1.0
+  gradient_clip_val: 0.1
   enable_progress_bar: True
 
   # Specify loggers here
   logger:
-    class_path: lightning.pytorch.loggers.CometLogger
+    class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      project: atlas_muon_filtering
+      project_name: atlas_muon_filtering
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -95,7 +89,7 @@ trainer:
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
-        write_outputs: True
+        write_outputs: false
         write_preds: True
         write_targets: false
         write_losses: false
@@ -105,10 +99,10 @@ trainer:
         refresh_rate: 50
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
-        monitor: val/loss
-        patience: 15 
+        monitor: val/reconstructable_particle_retention
+        patience: 5 
         min_delta: 0.0
-        mode: min
+        mode: max
         verbose: True 
 
 model:
@@ -166,15 +160,16 @@ model:
                     output_size: &dim 128
                     norm_input: true
                 posenc:
-                  class_path: hepattn.models.FourierPositionEncoder
+                  class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
                     input_name: hit
-                    fields:
-                      - phi
-                      - r 
-                    # TODO: Check wether you might want to add more here
                     dim: *dim
-                    scale: 0.1
+                    fields:
+                      - r
+                      - theta
+                      - phi
+                    dim: *dim
+                    # scale: 0.1
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
@@ -184,7 +179,7 @@ model:
           window_size: 512  # Smaller window size for fewer hits per event
           window_wrap: true
           hybrid_norm: true
-          # norm: RMSNorm
+          norm: RMSNorm
           attn_kwargs:
             num_heads: 8
 

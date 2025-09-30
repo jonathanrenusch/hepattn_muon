@@ -1,5 +1,5 @@
 seed_everything: 42
-name: TRK-ATLAS-Muon-smallModel-best-run
+name: TRK-ATLAS-Muon-smallModel-better-run
 # ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
@@ -62,16 +62,15 @@ data:
       - truthMuon_q
       - truthMuon_eta
       - truthMuon_phi
-      - truthMuon_qpt
 
 trainer:
   # Training stuff here
-  # max_epochs: 50
-  max_epochs: 25
+  max_epochs: 50
+  # max_epochs: 25
   num_sanity_val_steps: 1
   accelerator: gpu
   # devices: [0,1,2]
-  devices: [1]
+  devices: [0]
   # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
@@ -119,7 +118,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 25
+        patience: 15
         min_delta: 0.0
         mode: min
         verbose: True
@@ -128,13 +127,20 @@ model:
   optimizer: Lion
 
 
+  # ls_config:
+  #   initial: 1.0e-06
+  #   max: 1.0e-05
+  #   end: 1.0e-07
+  #   pct_start: 0.5
+  #   weight_decay: 0.1
+  #   skip_scheduler: false
   lrs_config:
-    initial: 1.0e-06
-    max: 1.0e-05
-    end: 1.0e-07
-    pct_start: 0.5
-    weight_decay: 0.1
+    initial: 1e-5
+    max: 5e-5
+    end: 1e-5
+    pct_start: 0.05
     skip_scheduler: false
+    weight_decay: 1e-5
 
 
   # Whether to use multi task learning or not
@@ -143,7 +149,7 @@ model:
   model:
     class_path: hepattn.models.MaskFormer
     init_args:
-      dim: &dim 128
+      dim: &dim 32
       num_queries: *num_objects
       input_sort_field: phi
       # record_intermediate_embeddings: false
@@ -178,7 +184,7 @@ model:
                   - spacePoint_stationEta
                   - spacePoint_technology
                   - spacePoint_stationIndex
-                  # # Add derived hit fields
+                  # # Add derived lrhit fields
                   - r  # Radial distance
                   - s  # 3D distance
                   - theta  # Polar angle
@@ -189,22 +195,22 @@ model:
                     input_size: 22
                     output_size: *dim
                 posenc:
-                  class_path: hepattn.models.posenc.FourierPositionEncoder
+                  class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
                     input_name: hit
                     dim: *dim
                     fields:
                       - r
-                      # - eta
+                      - theta
                       - phi
                     dim: *dim
-                    scale: 0.1
+                    # scale: 0.1
 
 
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 3
+          num_layers: 2
           dim: *dim
           # attn_type: flash
           attn_type: flash-varlen
@@ -224,7 +230,7 @@ model:
           parallel_solver: true
           n_jobs: 16
 
-      num_decoder_layers: 3
+      num_decoder_layers: 2
       # intermediate_losses: true
       decoder_layer_config:
         dim: *dim
@@ -232,6 +238,8 @@ model:
         # hybrid_norm: true
         mask_attention: true
 
+
+    # You should try to enable the dense networks to have different layers norms and sizes for better regression here, there must be arguments to enable this
       tasks:
         class_path: torch.nn.ModuleList
         init_args:
@@ -246,7 +254,7 @@ model:
                   object_bce: 1.0
                 costs:
                   object_bce: 10.0
-                dim: 128
+                dim: *dim
                 null_weight: 1.0
                 mask_queries: false
             - class_path: hepattn.models.task.ObjectHitMaskTask
@@ -260,7 +268,7 @@ model:
                   mask_bce: 1.0
                 costs:
                   mask_bce: 1.0
-                dim: 128
+                dim: *dim
                 null_weight: 1.0
                 mask_attn: true
 
@@ -276,4 +284,4 @@ model:
                 - truthMuon_pt
                 - truthMuon_q
                 loss_weight: 1.0
-                dim: 128
+                dim: *dim
