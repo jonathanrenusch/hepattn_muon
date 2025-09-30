@@ -73,7 +73,7 @@ trainer:
 
   # Specify loggers here
   logger:
-    class_path: hepattn.utils.loggers.MyCometLogger
+    class_path: hepattn.utils.loggers.CometLogger
     init_args:
       project_name: atlas_muon_filtering
 
