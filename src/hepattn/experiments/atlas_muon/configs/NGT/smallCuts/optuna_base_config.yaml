@@ -1,27 +1,16 @@
 seed_everything: 42
-name: TRK-ATLAS-Muon-smallModel-better-run
-# ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
-
   train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
-  # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
-  # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
-
-  # hit_eval_train: /scratch/epoch=021-val_auc=0.99969_ml_training_data_2694000_hdf5_eval.h5
-  # hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
-  # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
   num_workers: 24
   num_train: -1
   num_test: -1
   num_val: -1
   batch_size: 1024
-  # batch_size: 32
-  # use_smart_batching: false  # Disable smart batching as requested
-
+  
   # ATLAS muon data parameters
   event_max_num_particles: &num_objects 2  # Typically fewer particles per event in muon data
 
@@ -55,8 +44,6 @@ data:
       - phi  # Azimuthal angle
 
   targets:
-    # hit:
-    #   - on_valid_particle
     particle:
       - truthMuon_pt
       - truthMuon_q
@@ -66,38 +53,16 @@ data:
 trainer:
   # Training stuff here
   max_epochs: 50
-  # max_epochs: 25
   num_sanity_val_steps: 1
   accelerator: gpu
-  # devices: [0,1,2]
-  devices: [1]
-  # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
   default_root_dir: logs
   gradient_clip_val: 0.1
   enable_progress_bar: true
-  #strategy:
-   # class_path: lightning.pytorch.strategies.DDPStrategy
-    #init_args:
-     # find_unused_parameters: true
 
-  #profiler:
-  #  class_path: lightning.pytorch.profilers.PyTorchProfiler
-  #  init_args:
-  #    dirpath: ./profile_logs/
-  #    filename: profile.json
-
-  # Specify loggers here
-  logger:
-    class_path: lightning.pytorch.loggers.CometLogger
-    init_args:
-      project_name: atlas_muon_tracking
-      experiment_name: TRK-ATLAS-Muon-smallModel-better-run
-      save_dir: logs
-
+  # Callbacks for optuna optimization
   callbacks:
-    # - class_path: hepattn.callbacks.Compile
     - class_path: hepattn.callbacks.InferenceTimer
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
@@ -127,33 +92,16 @@ trainer:
 
 model:
   optimizer: Lion
-
-
-  # ls_config:
-  #   initial: 1.0e-06
-  #   max: 1.0e-05
-  #   end: 1.0e-07
-  #   pct_start: 0.5
-  #   weight_decay: 0.1
-  #   skip_scheduler: false
-  lrs_config:
-    initial: 1e-5
-    max: 5e-5
-    end: 1e-5
-    pct_start: 0.05
-    skip_scheduler: false
-    weight_decay: 1e-5
-
-
+  
   # Whether to use multi task learning or not
   mtl: false
 
+  # Static model configuration that won't be optimized
   model:
     class_path: hepattn.models.MaskFormer
     init_args:
-      dim: &dim 32
       input_sort_field: phi
-      # record_intermediate_embeddings: false
+      
       input_nets:
         class_path: torch.nn.ModuleList
         init_args:
@@ -183,7 +131,7 @@ model:
                   - spacePoint_stationEta
                   - spacePoint_technology
                   - spacePoint_stationIndex
-                  # # Add derived lrhit fields
+                  # Add derived hit fields
                   - r  # Radial distance
                   - s  # 3D distance
                   - theta  # Polar angle
@@ -192,50 +140,33 @@ model:
                   class_path: hepattn.models.Dense
                   init_args:
                     input_size: 22
-                    output_size: *dim
-                    # Dense network arguments with defaults:
-                    # output_size: None  # If None, defaults to input_size
-                    hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                    # hidden_dim_scale: 2  # Scale factor for hidden layer size
                     activation: null  # If null, defaults to SwiGLU()
-                    # final_activation: null  # Activation for output layer
-                    dropout: 0.3  # Dropout probability
                     bias: true  # Whether to use bias in linear layers
                     norm_input: true  # Whether to apply LayerNorm to input
                 posenc:
                   class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
                     input_name: hit
-                    dim: *dim
                     fields:
                       - r
                       - theta
                       - phi
-                    dim: *dim
-                    # scale: 0.1
 
-
+      # Static encoder config - only num_layers and dim will be optimized
       encoder:
         class_path: hepattn.models.Encoder
         init_args:
-          num_layers: 2
-          dim: *dim
-          # attn_type: flash
           attn_type: flash-varlen
           hybrid_norm: true
-
           value_residual: true
-          # num_register_tokens: 8
           attn_kwargs:
             num_heads: 8
       
+      # Static decoder config - only num_decoder_layers will be optimized
       decoder:
-        num_decoder_layers: 2
-        num_queries: *num_objects
         mask_attention: true
         use_query_masks: false
         decoder_layer_config:
-          dim: *dim
           norm: RMSNorm
           attn_kwargs: 
             num_heads: 8
@@ -249,7 +180,7 @@ model:
           parallel_solver: true
           n_jobs: 16
 
-    # You should try to enable the dense networks to have different layers norms and sizes for better regression here, there must be arguments to enable this
+      # Tasks configuration - only costs, losses, and dense_kwargs will be optimized
       tasks:
         class_path: torch.nn.ModuleList
         init_args:
@@ -260,20 +191,10 @@ model:
                 input_object: query
                 output_object: track
                 target_object: particle
-                losses:
-                  object_bce: 1.0
-                costs:
-                  object_bce: 10.0
-                dim: *dim
                 null_weight: 1.0
                 mask_queries: false
-                # Dense network arguments (defaults shown):
                 dense_kwargs:
-                  # output_size: null  # If null, defaults to input_size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
                   activation: null  # If null, defaults to SwiGLU()
-                  # final_activation: null  # Activation for output layer
                   dropout: 0.3  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
@@ -284,26 +205,12 @@ model:
                 input_object: query
                 output_object: track
                 target_object: particle
-                losses:
-                  mask_bce: 1.0
-                  # mask_dice: 1.0
-                  # mask_focal: 1.0
-                costs:
-                  mask_bce: 1.0
-                  # mask_focal: 1.0
-                dim: *dim
                 null_weight: 1.0
-                # Dense network arguments (defaults shown, applies to both hit_net and object_net):
                 dense_kwargs:
-                  # output_size: null  # If null, defaults to input_size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
                   activation: null  # If null, defaults to SwiGLU()
-                  # final_activation: null  # Activation for output layer
                   dropout: 0.3  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
-
             - class_path: hepattn.models.task.ObjectRegressionTask
               init_args:
                 name: parameter_regression
@@ -314,20 +221,11 @@ model:
                 - truthMuon_eta
                 - truthMuon_phi
                 - truthMuon_pt
-                loss_weight: 1.0
-                cost_weight: 1.0
-                dim: *dim
-                # Dense network arguments (defaults shown):
                 dense_kwargs:
-                  # output_size: null  # If null, defaults to input_size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
                   activation: null  # If null, defaults to SwiGLU()
-                  # final_activation: null  # Activation for output layer
                   dropout: 0.3  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
-            
             - class_path: hepattn.models.task.ObjectChargeClassificationTask
               init_args:
                 name: charge_classification
@@ -335,17 +233,8 @@ model:
                 output_object: track
                 target_object: particle
                 field: truthMuon_q
-                loss_weight: 1.0
-                cost_weight: 1.0
-                dim: *dim
-                # Dense network arguments (defaults shown):
                 dense_kwargs:
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
                   activation: null  # If null, defaults to SwiGLU()
                   dropout: 0.3  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
-
-
-

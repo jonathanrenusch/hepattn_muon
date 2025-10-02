@@ -4,6 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
+from jsonargparse import Namespace
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
 
@@ -17,6 +19,18 @@ def serializer(x: torch.Tensor) -> list:
 
 def deserializer(x: list) -> torch.Tensor:
     return torch.tensor(x)
+
+
+def namespace_to_dict(namespace):
+    """Convert Namespace to dict recursively."""
+    if isinstance(namespace, Namespace):
+        return {k: namespace_to_dict(v) for k, v in namespace.items()}
+    elif isinstance(namespace, list):
+        return [namespace_to_dict(item) for item in namespace]
+    elif hasattr(namespace, '__dict__'):
+        return {k: namespace_to_dict(v) for k, v in namespace.__dict__.items()}
+    else:
+        return namespace
 
 
 register_type(torch.Tensor, serializer, deserializer)
@@ -121,3 +135,19 @@ class CLI(LightningCLI):
             self.trainer.ckpt_path = ckpt_path
             self.trainer.ckpt_dir = Path(ckpt_path).parent
             self.trainer.ckpt_name = str(Path(ckpt_path).stem)
+
+        # Log the YAML config file to Comet ML logger
+        if self.subcommand == "fit" and hasattr(self.trainer.logger, "experiment"):
+            comet_logger = self.trainer.logger
+            if hasattr(comet_logger, "experiment"):
+                experiment = comet_logger.experiment
+
+                # Convert Namespace to dict
+                config_dict = namespace_to_dict(self.config[self.subcommand])
+
+                # Format the config as a readable YAML string
+                formatted_yaml = yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+                
+                # Log the formatted YAML to Comet ML
+                experiment.log_text(formatted_yaml, step=None, metadata={"type": "yaml_config"})
+                print("Logged formatted YAML config to Comet ML.")
