@@ -71,6 +71,7 @@ class ObjectValidTask(Task):
         null_weight: float = 1.0,
         mask_queries: bool = False,
         has_intermediate_loss: bool = True,
+        dense_kwargs: dict | None = None,
     ):
         """Task used for classifying whether object candidates/seeds should be taken as reconstructed/predicted objects or not.
 
@@ -86,6 +87,7 @@ class ObjectValidTask(Task):
                 to overcome class imbalance.
             mask_queries: Whether to mask queries.
             has_intermediate_loss: Whether the task has intermediate loss.
+            dense_kwargs: Optional arguments for Dense network initialization.
         """
         super().__init__(has_intermediate_loss=has_intermediate_loss)
 
@@ -102,7 +104,8 @@ class ObjectValidTask(Task):
         # Internal
         self.inputs = [input_object + "_embed"]
         self.outputs = [output_object + "_logit"]
-        self.net = Dense(dim, 1)
+        dense_kwargs = dense_kwargs or {}
+        self.net = Dense(dim, 1, **dense_kwargs)
 
     def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
         # Network projects the embedding down into a scalar
@@ -229,6 +232,7 @@ class ObjectHitMaskTask(Task):
         logit_scale: float = 1.0,
         pred_threshold: float = 0.5,
         has_intermediate_loss: bool = True,
+        dense_kwargs: dict | None = None,
     ):
         """Task for predicting associations between objects and hits.
 
@@ -248,6 +252,7 @@ class ObjectHitMaskTask(Task):
             logit_scale: Scale for logits.
             pred_threshold: Prediction threshold.
             has_intermediate_loss: Whether the task has intermediate loss.
+            dense_kwargs: Optional arguments for Dense network initialization.
         """
         super().__init__(has_intermediate_loss=has_intermediate_loss)
 
@@ -272,8 +277,9 @@ class ObjectHitMaskTask(Task):
 
         self.inputs = [input_object + "_embed", input_constituent + "_embed"]
         self.outputs = [self.output_object_hit + "_logit"]
-        self.hit_net = Dense(dim, dim)
-        self.object_net = Dense(dim, dim)
+        dense_kwargs = dense_kwargs or {}
+        self.hit_net = Dense(dim, dim, **dense_kwargs)
+        self.object_net = Dense(dim, dim, **dense_kwargs)
 
     def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
         # Produce new task-specific embeddings for the objects and hits
@@ -525,6 +531,7 @@ class ObjectGaussianRegressionTask(GaussianRegressionTask):
         loss_weight: float,
         cost_weight: float,
         dim: int,
+        dense_kwargs: dict | None = None,
     ):
         """Gaussian regression task for objects.
 
@@ -537,6 +544,7 @@ class ObjectGaussianRegressionTask(GaussianRegressionTask):
             loss_weight: Weight for the loss function.
             cost_weight: Weight for the cost function.
             dim: Embedding dimension.
+            dense_kwargs: Optional arguments for Dense network initialization.
         """
         super().__init__(name, output_object, target_object, fields, loss_weight, cost_weight)
 
@@ -549,7 +557,8 @@ class ObjectGaussianRegressionTask(GaussianRegressionTask):
         ]
 
         self.dim = dim
-        self.net = Dense(self.dim, self.ndofs)
+        dense_kwargs = dense_kwargs or {}
+        self.net = Dense(self.dim, self.ndofs, **dense_kwargs)
 
     def latent(self, x: dict[str, Tensor]) -> Tensor:
         return self.net(x[self.input_object + "_embed"])
@@ -594,6 +603,7 @@ class ObjectRegressionTask(RegressionTask):
         dim: int,
         loss: RegressionLossType = "smooth_l1",
         has_intermediate_loss: bool = True,
+        dense_kwargs: dict | None = None,
     ):
         """Regression task for objects.
 
@@ -608,6 +618,7 @@ class ObjectRegressionTask(RegressionTask):
             dim: Embedding dimension.
             loss: Type of loss function to use.
             has_intermediate_loss: Whether the task has intermediate loss.
+            dense_kwargs: Optional arguments for Dense network initialization.
         """
         super().__init__(name, output_object, target_object, fields, loss_weight, cost_weight, loss=loss, has_intermediate_loss=has_intermediate_loss)
 
@@ -616,7 +627,8 @@ class ObjectRegressionTask(RegressionTask):
         self.outputs = [output_object + "_regr"]
 
         self.dim = dim
-        self.net = Dense(self.dim, self.ndofs)
+        dense_kwargs = dense_kwargs or {}
+        self.net = Dense(self.dim, self.ndofs, **dense_kwargs)
 
     def latent(self, x: dict[str, Tensor]) -> Tensor:
         return self.net(x[self.input_object + "_embed"])
@@ -637,6 +649,127 @@ class ObjectRegressionTask(RegressionTask):
         return {f"regr_{self.loss_fn_name}": self.cost_weight * costs}
 
 
+class ObjectChargeClassificationTask(Task):
+    def __init__(
+        self,
+        name: str,
+        input_object: str,
+        output_object: str,
+        target_object: str,
+        field: str,
+        loss_weight: float,
+        cost_weight: float,
+        dim: int,
+        has_intermediate_loss: bool = True,
+        dense_kwargs: dict | None = None,
+    ):
+        """Binary classification task for charge (+1 or -1).
+
+        This task handles charge classification as a binary classification problem,
+        converting charge values (-1, +1) to class indices (0, 1).
+
+        Args:
+            name: Name of the task.
+            input_object: Name of the input object.
+            output_object: Name of the output object.
+            target_object: Name of the target object.
+            field: Name of the charge field (e.g., 'truthMuon_q').
+            loss_weight: Weight for the loss function.
+            cost_weight: Weight for the cost function.
+            dim: Embedding dimension.
+            has_intermediate_loss: Whether the task has intermediate loss.
+            dense_kwargs: Optional arguments for Dense network initialization.
+        """
+        super().__init__(has_intermediate_loss=has_intermediate_loss, permute_loss=True)
+
+        self.name = name
+        self.input_object = input_object
+        self.output_object = output_object
+        self.target_object = target_object
+        self.field = field
+        self.loss_weight = loss_weight
+        self.cost_weight = cost_weight
+        self.dim = dim
+
+        self.inputs = [input_object + "_embed"]
+        self.outputs = [output_object + "_charge_logits"]
+
+        dense_kwargs = dense_kwargs or {}
+        # Binary classification: output 1 logit for BCE (sigmoid output)
+        self.net = Dense(self.dim, 1, **dense_kwargs)
+
+    def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
+        # Network projects the embedding to 1 logit for binary classification
+        logits = self.net(x[self.input_object + "_embed"]).squeeze(-1)
+        return {self.output_object + "_charge_logits": logits}
+
+    def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        # Convert logits to class predictions via sigmoid, then map to charge
+        logits = outputs[self.output_object + "_charge_logits"].detach()
+        # Sigmoid > 0.5 means class 1 (charge +1), else class 0 (charge -1)
+        class_pred = (torch.sigmoid(logits) > 0.5).float()
+        # Map class 0 -> -1, class 1 -> +1
+        charge_pred = 2 * class_pred - 1
+        return {self.output_object + "_" + self.field: charge_pred}
+
+    def cost(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        logits = outputs[self.output_object + "_charge_logits"].detach().to(torch.float32)
+        charge = targets[self.target_object + "_" + self.field].to(torch.float32)
+        
+        # Map charge (-1, +1) to binary targets (0, 1)
+        # Handle NaN values by setting them to 0 temporarily (they'll be masked out later)
+        target_binary = torch.nan_to_num((charge + 1) / 2, nan=0.0)  # -1 -> 0, +1 -> 1
+        
+        # Compute BCE cost for matching
+        # logits shape: (batch, num_queries)
+        # target_binary shape: (batch, num_targets)
+        batch_size, num_queries = logits.shape
+        num_targets = target_binary.size(1)
+        
+        # Expand for cost matrix: (batch, num_queries, num_targets)
+        logits_expanded = logits.unsqueeze(2).expand(-1, -1, num_targets)
+        target_expanded = target_binary.unsqueeze(1).expand(-1, num_queries, -1)
+        
+        # Compute binary cross entropy cost
+        # BCE = -[y*log(σ(x)) + (1-y)*log(1-σ(x))]
+        probs = torch.sigmoid(logits_expanded)
+        cost = -(target_expanded * torch.log(probs + 1e-8) + (1 - target_expanded) * torch.log(1 - probs + 1e-8))
+        
+        return {"charge_bce": self.cost_weight * cost}
+
+    def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        logits = outputs[self.output_object + "_charge_logits"]
+        charge = targets[self.target_object + "_" + self.field]
+        
+        # Map charge (-1, +1) to binary targets (0, 1)
+        # Handle NaN values by setting them to 0 temporarily (they'll be masked out by valid mask)
+        target_binary = torch.nan_to_num((charge + 1) / 2, nan=0.0)  # -1 -> 0, +1 -> 1
+        
+        # Compute binary cross-entropy loss
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits.view(-1),
+            target_binary.view(-1),
+            reduction="none",
+        )
+        
+        # Only consider valid targets (this will filter out NaN charge values)
+        valid_mask = targets[self.target_object + "_valid"].view(-1)
+        loss = loss[valid_mask]
+        
+        return {"charge_bce": self.loss_weight * loss.mean() if loss.numel() > 0 else torch.tensor(0.0, device=loss.device)}
+
+    def metrics(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        pred_charge = preds[self.output_object + "_" + self.field]
+        true_charge = targets[self.target_object + "_" + self.field]
+        valid_mask = targets[self.target_object + "_valid"]
+        
+        # Calculate accuracy for valid targets
+        correct = (pred_charge[valid_mask] == true_charge[valid_mask]).float()
+        accuracy = correct.mean() if correct.numel() > 0 else torch.tensor(0.0)
+        
+        return {"charge_acc": accuracy}
+
+
 class ObjectHitRegressionTask(RegressionTask):
     def __init__(
         self,
@@ -651,6 +784,7 @@ class ObjectHitRegressionTask(RegressionTask):
         dim: int,
         loss: RegressionLossType = "smooth_l1",
         has_intermediate_loss: bool = True,
+        dense_kwargs: dict | None = None,
     ):
         """Regression task for object-constituent associations.
 
@@ -666,6 +800,7 @@ class ObjectHitRegressionTask(RegressionTask):
             dim: Embedding dimension.
             loss: Type of loss function to use.
             has_intermediate_loss: Whether the task has intermediate loss.
+            dense_kwargs: Optional arguments for Dense network initialization.
         """
         super().__init__(name, output_object, target_object, fields, loss_weight, cost_weight, loss=loss, has_intermediate_loss=has_intermediate_loss)
 
@@ -678,8 +813,9 @@ class ObjectHitRegressionTask(RegressionTask):
         self.dim = dim
         self.dim_per_dof = self.dim // self.ndofs
 
-        self.hit_net = Dense(dim, self.ndofs * self.dim_per_dof)
-        self.object_net = Dense(dim, self.ndofs * self.dim_per_dof)
+        dense_kwargs = dense_kwargs or {}
+        self.hit_net = Dense(dim, self.ndofs * self.dim_per_dof, **dense_kwargs)
+        self.object_net = Dense(dim, self.ndofs * self.dim_per_dof, **dense_kwargs)
 
     def latent(self, x: dict[str, Tensor]) -> Tensor:
         # Embed the hits and tracks and reshape so we have a separate embedding for each DoF
@@ -712,6 +848,7 @@ class ClassificationTask(Task):
         multilabel: bool = False,
         permute_loss: bool = True,
         has_intermediate_loss: bool = True,
+        dense_kwargs: dict | None = None,
     ):
         """Classification task for objects.
 
@@ -727,6 +864,7 @@ class ClassificationTask(Task):
             multilabel: Whether this is a multilabel classification.
             permute_loss: Whether to permute loss.
             has_intermediate_loss: Whether the task has intermediate loss.
+            dense_kwargs: Optional arguments for Dense network initialization.
         """
         super().__init__(has_intermediate_loss=has_intermediate_loss, permute_loss=permute_loss)
 
@@ -739,7 +877,8 @@ class ClassificationTask(Task):
         self.class_weights = class_weights
         self.loss_weight = loss_weight
         self.multilabel = multilabel
-        self.class_net = Dense(dim, len(classes))
+        dense_kwargs = dense_kwargs or {}
+        self.class_net = Dense(dim, len(classes), **dense_kwargs)
 
         if self.class_weights is not None:
             self.class_weights_values = torch.tensor([self.class_weights[class_name] for class_name in self.classes])
@@ -890,107 +1029,6 @@ class ObjectClassificationTask(Task):
             return None
 
         return outputs[self.output_object + "_class_prob"].detach().argmax(-1) < self.num_classes  # Valid if class is less than num_classes
-
-
-class ObjectChargeTask(Task):
-    """Specialised classification task to predict particle charge (q) which has values -1 or 1.
-
-    This task treats charge as a binary classification problem. Internally we map
-    target values {-1, 1} -> {0, 1} so they can be used with the existing
-    classification loss functions. Predictions are returned both as class indices
-    and as the original charge values (-1 or 1) for downstream code expecting
-    charge labels.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        input_object: str,
-        output_object: str,
-        target_object: str,
-        losses: dict[str, float],
-        costs: dict[str, float],
-        net: nn.Module,
-        loss_class_weights: list[float] | None = None,
-        null_weight: float = 1.0,
-        mask_queries: bool = False,
-        has_intermediate_loss: bool = True,
-    ):
-        super().__init__(has_intermediate_loss=has_intermediate_loss)
-
-        self.name = name
-        self.input_object = input_object
-        self.output_object = output_object
-        self.target_object = target_object
-        self.losses = losses
-        self.costs = costs
-        self.net = net
-        self.mask_queries = mask_queries
-
-        # Binary + null class (null used to mark unused prediction slot)
-        class_weights = torch.ones(2 + 1, dtype=torch.float32)
-        if loss_class_weights is not None:
-            if len(loss_class_weights) != 2:
-                raise ValueError("loss_class_weights must have length 2 for binary charge classes")
-            class_weights[:2] = torch.tensor(loss_class_weights, dtype=torch.float32)
-        class_weights[-1] = null_weight
-        self.register_buffer("class_weights", class_weights)
-
-        # Inputs/outputs follow object classification naming
-        self.inputs = [input_object + "_embed"]
-        self.outputs = [output_object + "_class_prob"]
-
-    def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
-        # produce logits/probabilities for 2 classes + null
-        x_class = self.net(x[self.input_object + "_embed"])
-        return {self.output_object + "_class_prob": x_class}
-
-    def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
-        # class indices: 0 -> q=-1, 1 -> q=+1, 2 -> null
-        classes = outputs[self.output_object + "_class_prob"].detach().argmax(-1)
-        # Map class index to charge: 0->-1, 1->1, null stays 0 (or False for valid)
-        charge = torch.zeros_like(classes, dtype=torch.int8)
-        charge[classes == 0] = -1
-        charge[classes == 1] = 1
-        valid = classes < 2
-        return {
-            self.output_object + "_class": classes,
-            self.output_object + "_q": charge,
-            self.output_object + "_valid": valid,
-        }
-
-    def cost(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
-        output = outputs[self.output_object + "_class_prob"].detach().to(torch.float32)
-        # Targets are expected to be -1/1; map to 0/1 for classes
-        targ_q = targets[self.target_object + "_q"].long()
-        # map -1->0, 1->1
-        targ_class = (targ_q == 1).long()
-        costs = {}
-        for cost_fn, cost_weight in self.costs.items():
-            costs[cost_fn] = cost_weight * cost_fns[cost_fn](output, targ_class)
-        return costs
-
-    def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
-        losses = {}
-        output = outputs[self.output_object + "_class_prob"]
-        # Map targets -1/1 -> 0/1 and include null class if provided
-        targ_q = targets[self.target_object + "_q"].long()
-        targ_class = (targ_q == 1).long()
-
-        # If there is a validity mask, only compute loss for valid targets
-        mask = None
-        if f"{self.target_object}_valid" in targets:
-            mask = targets[f"{self.target_object}_valid"].bool()
-
-        for loss_fn, loss_weight in self.losses.items():
-            losses[loss_fn] = loss_weight * loss_fns[loss_fn](output, targ_class, mask=mask, weight=self.class_weights)
-
-        return losses
-
-    def query_mask(self, outputs: dict[str, Tensor]) -> Tensor | None:
-        if not self.mask_queries:
-            return None
-        return outputs[self.output_object + "_class_prob"].detach().argmax(-1) < 2
 
 
 class IncidenceRegressionTask(Task):

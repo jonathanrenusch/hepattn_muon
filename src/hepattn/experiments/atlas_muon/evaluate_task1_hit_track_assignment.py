@@ -441,19 +441,20 @@ class Task1HitTrackEvaluator:
             bin_truth = [self.true_assignments[j] for j in range(len(self.true_assignments)) if mask[j]]
             
             # Calculate efficiency and purity
-            total_true_hits = sum(truth.sum() for truth in bin_truth)
-            total_pred_hits = sum(pred.sum() for pred in bin_predictions) 
-            total_correct_hits = sum((pred & truth).sum() for pred, truth in zip(bin_predictions, bin_truth))
+            total_true_hits = bin_truth.sum()
+            total_pred_hits = bin_predictions.sum() 
+            efficiencies = [sum(pred & truth).sum() / truth.sum() if truth.sum() > 0 else 0 for pred, truth in zip(bin_predictions, bin_truth)]
+            purities = [sum(pred & truth).sum() / pred.sum() if pred.sum() > 0 else 0 for pred, truth in zip(bin_predictions, bin_truth)]
             
             if total_true_hits > 0:
-                efficiency = total_correct_hits / total_true_hits
+                efficiency = np.mean(efficiencies)
                 eff_error = np.sqrt(efficiency * (1 - efficiency) / total_true_hits)
             else:
                 efficiency = 0
                 eff_error = 0
                 
             if total_pred_hits > 0:
-                purity = total_correct_hits / total_pred_hits
+                purity = np.mean(purities)
                 pur_error = np.sqrt(purity * (1 - purity) / total_pred_hits)
             else:
                 purity = 0
@@ -902,14 +903,16 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 1: Hit-Track Assignment with Categories')
     parser.add_argument('--eval_path', type=str, 
                        default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
                        default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
                        help='Path to processed test data directory')
     parser.add_argument('--output_dir', type=str, 
                        default='./tracking_evaluation_results/task1_hit_track',
                        help='Base output directory for plots and results')
-    parser.add_argument('--max_events', "-m", type=int, default=1000,
+    parser.add_argument('--max_events', "-m", type=int, default=10000,
                        help='Maximum number of events to process (for testing)')
     
     args = parser.parse_args()

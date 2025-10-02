@@ -70,7 +70,7 @@ trainer:
   num_sanity_val_steps: 1
   accelerator: gpu
   # devices: [0,1,2]
-  devices: [0]
+  devices: [1]
   # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
@@ -93,6 +93,8 @@ trainer:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
       project_name: atlas_muon_tracking
+      experiment_name: TRK-ATLAS-Muon-smallModel-better-run
+      save_dir: logs  # Required for log_dir property to work
 
   callbacks:
     # - class_path: hepattn.callbacks.Compile
@@ -150,11 +152,8 @@ model:
     class_path: hepattn.models.MaskFormer
     init_args:
       dim: &dim 32
-      num_queries: *num_objects
       input_sort_field: phi
       # record_intermediate_embeddings: false
-      use_attn_masks: true
-      use_query_masks: false
       input_nets:
         class_path: torch.nn.ModuleList
         init_args:
@@ -194,6 +193,15 @@ model:
                   init_args:
                     input_size: 22
                     output_size: *dim
+                    # Dense network arguments with defaults:
+                    # output_size: None  # If None, defaults to input_size
+                    # hidden_layers: null  # If null, defaults to [input_size * hidden_dim_scale]
+                    hidden_dim_scale: 2  # Scale factor for hidden layer size
+                    # activation: null  # If null, defaults to SwiGLU()
+                    # final_activation: null  # Activation for output layer
+                    dropout: 0.0  # Dropout probability
+                    bias: true  # Whether to use bias in linear layers
+                    norm_input: false  # Whether to apply LayerNorm to input
                 posenc:
                   class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
@@ -226,11 +234,11 @@ model:
         num_queries: *num_objects
         mask_attention: true
         use_query_masks: false
-        attn_kwargs: 
-          num_heads: 8
         decoder_layer_config:
           dim: *dim
           norm: RMSNorm
+          attn_kwargs: 
+            num_heads: 8
 
       matcher:
         class_path: hepattn.models.matcher.Matcher
@@ -259,6 +267,16 @@ model:
                 dim: *dim
                 null_weight: 1.0
                 mask_queries: false
+                # Dense network arguments (defaults shown):
+                dense_kwargs:
+                  # output_size: null  # If null, defaults to input_size
+                  # hidden_layers: null  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # activation: null  # If null, defaults to SwiGLU()
+                  # final_activation: null  # Activation for output layer
+                  dropout: 0.0  # Dropout probability
+                  bias: true  # Whether to use bias in linear layers
+                  norm_input: false  # Whether to apply LayerNorm to input
             - class_path: hepattn.models.task.ObjectHitMaskTask
               init_args:
                 name: track_hit_valid
@@ -270,11 +288,21 @@ model:
                   mask_bce: 1.0
                   # mask_dice: 1.0
                   # mask_focal: 1.0
-                  costs:
+                costs:
                   mask_bce: 1.0
                   # mask_focal: 1.0
                 dim: *dim
                 null_weight: 1.0
+                # Dense network arguments (defaults shown, applies to both hit_net and object_net):
+                dense_kwargs:
+                  # output_size: null  # If null, defaults to input_size
+                  # hidden_layers: null  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # activation: null  # If null, defaults to SwiGLU()
+                  # final_activation: null  # Activation for output layer
+                  dropout: 0.0  # Dropout probability
+                  bias: true  # Whether to use bias in linear layers
+                  norm_input: false  # Whether to apply LayerNorm to input
 
             - class_path: hepattn.models.task.ObjectRegressionTask
               init_args:
@@ -286,46 +314,36 @@ model:
                 - truthMuon_eta
                 - truthMuon_phi
                 - truthMuon_pt
-                # charge (q) moved to a classification task below
                 loss_weight: 1.0
+                cost_weight: 1.0
                 dim: *dim
-<<<<<<< HEAD:src/hepattn/experiments/atlas_muon/configs/NGT/smallCuts/atlas_muon_tracking_NGT_small2track_regression_betterun_inference.yaml
+                # Dense network arguments (defaults shown):
+                dense_kwargs:
+                  # output_size: null  # If null, defaults to input_size
+                  # hidden_layers: null  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # activation: null  # If null, defaults to SwiGLU()
+                  # final_activation: null  # Activation for output layer
+                  dropout: 0.0  # Dropout probability
+                  bias: true  # Whether to use bias in linear layers
+                  norm_input: false  # Whether to apply LayerNorm to input
             
-            - class_path: hepattn.models.task.ObjectRegressionTask
-              init_args:
-                name: parameter_regression_2
-                input_object: query
-                output_object: track
-                target_object: particle
-                fields:
-                - truthMuon_eta
-                - truthMuon_phi
-                - truthMuon_pt
-                - truthMuon_q
-                loss_weight: 1.0
-                dim: *dim
-          
-=======
-
-            - class_path: hepattn.models.task.ObjectChargeTask
+            - class_path: hepattn.models.task.ObjectChargeClassificationTask
               init_args:
                 name: charge_classification
                 input_object: query
                 output_object: track
                 target_object: particle
-                losses:
-                  bce: 1.0
-                costs:
-                  bce: 10.0
-                net:
-                  class_path: hepattn.models.Dense
-                  init_args:
-                    input_size: *dim
-                    output_size: 3  # two charge classes + null class
-                loss_class_weights: [1.0, 1.0]
-                null_weight: 1.0
-                mask_queries: false
-                has_intermediate_loss: true
+                field: truthMuon_q
+                loss_weight: 1.0
+                cost_weight: 1.0
+                dim: *dim
+                # Dense network arguments (defaults shown):
+                dense_kwargs:
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  dropout: 0.0  # Dropout probability
+                  bias: true  # Whether to use bias in linear layers
+                  norm_input: false  # Whether to apply LayerNorm to input
 
-      # Make a object regression cl
->>>>>>> ac55819970af8044ef56841c3751b48172388aa5:src/hepattn/experiments/atlas_muon/configs/NGT/smallCuts/atlas_muon_tracking_NGT_small2track_regression.yaml
+
+

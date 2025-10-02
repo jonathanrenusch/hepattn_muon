@@ -240,7 +240,7 @@ class Attention(nn.Module):
         # Flatten for flash attention which expects (total_valid_tokens, num_heads, head_dim)
         q_flat, k_flat, v_flat = q.squeeze(0), k.squeeze(0), v.squeeze(0)
         out = self.attn(q_flat, k_flat, v_flat, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, window_size=self.window_size)
-        return out.view(q.shape[0], -1, self.dim)
+        return out.reshape(q.shape[0], -1, self.dim)
 
     def forward(
         self,

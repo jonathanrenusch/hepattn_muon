@@ -143,6 +143,7 @@ def main(args: ArgsType = None) -> None:
         datamodule_class=AtlasMuonDataModule,
         args=args,
         parser_kwargs={"default_env": True},
+        save_config_kwargs={"overwrite": True},  # Allow overwriting config to avoid conflicts
     )
 
 
