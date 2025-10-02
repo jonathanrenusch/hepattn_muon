@@ -90,11 +90,11 @@ trainer:
 
   # Specify loggers here
   logger:
-    class_path: lightning.pytorch.loggers.CometLogger
+    class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
+      name: TRK-ATLAS-Muon-smallModel-better-run
+      offline_directory: logs
       project_name: atlas_muon_tracking
-      experiment_name: TRK-ATLAS-Muon-smallModel-better-run
-      save_dir: logs  # Required for log_dir property to work
 
   callbacks:
     # - class_path: hepattn.callbacks.Compile
