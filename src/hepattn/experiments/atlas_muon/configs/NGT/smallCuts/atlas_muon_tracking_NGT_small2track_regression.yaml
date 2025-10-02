@@ -282,6 +282,28 @@ model:
                 - truthMuon_eta
                 - truthMuon_phi
                 - truthMuon_pt
-                - truthMuon_q
+                # charge (q) moved to a classification task below
                 loss_weight: 1.0
                 dim: *dim
+
+            - class_path: hepattn.models.task.ObjectChargeTask
+              init_args:
+                name: charge_classification
+                input_object: query
+                output_object: track
+                target_object: particle
+                losses:
+                  bce: 1.0
+                costs:
+                  bce: 10.0
+                net:
+                  class_path: hepattn.models.Dense
+                  init_args:
+                    input_size: *dim
+                    output_size: 3  # two charge classes + null class
+                loss_class_weights: [1.0, 1.0]
+                null_weight: 1.0
+                mask_queries: false
+                has_intermediate_loss: true
+
+      # Make a object regression cl

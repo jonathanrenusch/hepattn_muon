@@ -892,6 +892,107 @@ class ObjectClassificationTask(Task):
         return outputs[self.output_object + "_class_prob"].detach().argmax(-1) < self.num_classes  # Valid if class is less than num_classes
 
 
+class ObjectChargeTask(Task):
+    """Specialised classification task to predict particle charge (q) which has values -1 or 1.
+
+    This task treats charge as a binary classification problem. Internally we map
+    target values {-1, 1} -> {0, 1} so they can be used with the existing
+    classification loss functions. Predictions are returned both as class indices
+    and as the original charge values (-1 or 1) for downstream code expecting
+    charge labels.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        input_object: str,
+        output_object: str,
+        target_object: str,
+        losses: dict[str, float],
+        costs: dict[str, float],
+        net: nn.Module,
+        loss_class_weights: list[float] | None = None,
+        null_weight: float = 1.0,
+        mask_queries: bool = False,
+        has_intermediate_loss: bool = True,
+    ):
+        super().__init__(has_intermediate_loss=has_intermediate_loss)
+
+        self.name = name
+        self.input_object = input_object
+        self.output_object = output_object
+        self.target_object = target_object
+        self.losses = losses
+        self.costs = costs
+        self.net = net
+        self.mask_queries = mask_queries
+
+        # Binary + null class (null used to mark unused prediction slot)
+        class_weights = torch.ones(2 + 1, dtype=torch.float32)
+        if loss_class_weights is not None:
+            if len(loss_class_weights) != 2:
+                raise ValueError("loss_class_weights must have length 2 for binary charge classes")
+            class_weights[:2] = torch.tensor(loss_class_weights, dtype=torch.float32)
+        class_weights[-1] = null_weight
+        self.register_buffer("class_weights", class_weights)
+
+        # Inputs/outputs follow object classification naming
+        self.inputs = [input_object + "_embed"]
+        self.outputs = [output_object + "_class_prob"]
+
+    def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
+        # produce logits/probabilities for 2 classes + null
+        x_class = self.net(x[self.input_object + "_embed"])
+        return {self.output_object + "_class_prob": x_class}
+
+    def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        # class indices: 0 -> q=-1, 1 -> q=+1, 2 -> null
+        classes = outputs[self.output_object + "_class_prob"].detach().argmax(-1)
+        # Map class index to charge: 0->-1, 1->1, null stays 0 (or False for valid)
+        charge = torch.zeros_like(classes, dtype=torch.int8)
+        charge[classes == 0] = -1
+        charge[classes == 1] = 1
+        valid = classes < 2
+        return {
+            self.output_object + "_class": classes,
+            self.output_object + "_q": charge,
+            self.output_object + "_valid": valid,
+        }
+
+    def cost(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        output = outputs[self.output_object + "_class_prob"].detach().to(torch.float32)
+        # Targets are expected to be -1/1; map to 0/1 for classes
+        targ_q = targets[self.target_object + "_q"].long()
+        # map -1->0, 1->1
+        targ_class = (targ_q == 1).long()
+        costs = {}
+        for cost_fn, cost_weight in self.costs.items():
+            costs[cost_fn] = cost_weight * cost_fns[cost_fn](output, targ_class)
+        return costs
+
+    def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        losses = {}
+        output = outputs[self.output_object + "_class_prob"]
+        # Map targets -1/1 -> 0/1 and include null class if provided
+        targ_q = targets[self.target_object + "_q"].long()
+        targ_class = (targ_q == 1).long()
+
+        # If there is a validity mask, only compute loss for valid targets
+        mask = None
+        if f"{self.target_object}_valid" in targets:
+            mask = targets[f"{self.target_object}_valid"].bool()
+
+        for loss_fn, loss_weight in self.losses.items():
+            losses[loss_fn] = loss_weight * loss_fns[loss_fn](output, targ_class, mask=mask, weight=self.class_weights)
+
+        return losses
+
+    def query_mask(self, outputs: dict[str, Tensor]) -> Tensor | None:
+        if not self.mask_queries:
+            return None
+        return outputs[self.output_object + "_class_prob"].detach().argmax(-1) < 2
+
+
 class IncidenceRegressionTask(Task):
     def __init__(
         self,
