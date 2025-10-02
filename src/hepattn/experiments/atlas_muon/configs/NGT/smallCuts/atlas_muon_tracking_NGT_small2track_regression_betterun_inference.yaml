@@ -102,7 +102,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 25
+        save_top_k: 1
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
@@ -118,7 +118,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 15
+        patience: 5
         min_delta: 0.0
         mode: min
         verbose: True
@@ -220,6 +220,17 @@ model:
           # num_register_tokens: 8
           attn_kwargs:
             num_heads: 8
+      
+      decoder:
+        num_decoder_layers: 2
+        num_queries: *num_objects
+        mask_attention: true
+        use_query_masks: false
+        attn_kwargs: 
+          num_heads: 8
+        decoder_layer_config:
+          dim: *dim
+          norm: RMSNorm
 
       matcher:
         class_path: hepattn.models.matcher.Matcher
@@ -229,15 +240,6 @@ model:
           adaptive_check_interval: 1000
           parallel_solver: true
           n_jobs: 16
-
-      num_decoder_layers: 2
-      # intermediate_losses: true
-      decoder_layer_config:
-        dim: *dim
-        norm: RMSNorm
-        # hybrid_norm: true
-        mask_attention: true
-
 
     # You should try to enable the dense networks to have different layers norms and sizes for better regression here, there must be arguments to enable this
       tasks:
@@ -260,17 +262,19 @@ model:
             - class_path: hepattn.models.task.ObjectHitMaskTask
               init_args:
                 name: track_hit_valid
-                input_hit: hit
+                input_constituent: hit
                 input_object: query
                 output_object: track
                 target_object: particle
                 losses:
                   mask_bce: 1.0
-                costs:
+                  # mask_dice: 1.0
+                  # mask_focal: 1.0
+                  costs:
                   mask_bce: 1.0
+                  # mask_focal: 1.0
                 dim: *dim
                 null_weight: 1.0
-                mask_attn: true
 
             - class_path: hepattn.models.task.ObjectRegressionTask
               init_args:
@@ -285,3 +289,18 @@ model:
                 - truthMuon_q
                 loss_weight: 1.0
                 dim: *dim
+            
+            - class_path: hepattn.models.task.ObjectRegressionTask
+              init_args:
+                name: parameter_regression_2
+                input_object: query
+                output_object: track
+                target_object: particle
+                fields:
+                - truthMuon_eta
+                - truthMuon_phi
+                - truthMuon_pt
+                - truthMuon_q
+                loss_weight: 1.0
+                dim: *dim
+          
