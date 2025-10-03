@@ -94,6 +94,8 @@ class HitFilterDatasetReducer:
             'total_tracks_before': 0,
             'total_tracks_after': 0,
             'excluded_tracks_count': 0,
+            # Track reconstructability after hit filtering
+            'tracks_reconstructable_after_hit_filter': 0,
             # Detailed track filtering statistics
             'tracks_excluded_pt': 0,
             'tracks_excluded_eta': 0,
@@ -417,6 +419,10 @@ class HitFilterDatasetReducer:
         
         hit_reduction_rate = (1 - self.stats['total_hits_after'] / 
                              max(1, self.stats['total_hits_before'])) * 100
+        track_reduction_rate = (1 - self.stats['total_tracks_after'] / 
+                              max(1, self.stats['total_tracks_before'])) * 100
+        tracks_reconstructable_rate = (self.stats['tracks_reconstructable_after_hit_filter'] / 
+                                     max(1, self.stats['total_tracks_before']) * 100)
         
         # Create new metadata
         filtered_metadata = {
@@ -435,6 +441,8 @@ class HitFilterDatasetReducer:
                 'events_failed_track_filtering': int(self.stats['events_failed_track_filtering']),
                 'events_final_output': int(self.stats['events_final_output']),
                 'excluded_tracks_count': int(self.stats['excluded_tracks_count']),
+                # Track reconstructability metric
+                'tracks_reconstructable_after_hit_filter': int(self.stats['tracks_reconstructable_after_hit_filter']),
                 # Detailed track filtering statistics
                 'tracks_excluded_pt': int(self.stats['tracks_excluded_pt']),
                 'tracks_excluded_eta': int(self.stats['tracks_excluded_eta']),
@@ -449,6 +457,8 @@ class HitFilterDatasetReducer:
                 'hit_reduction_rate_percent': float(hit_reduction_rate),
                 'total_tracks_before': int(self.stats['total_tracks_before']),
                 'total_tracks_after': int(self.stats['total_tracks_after']),
+                'track_reduction_rate_percent': float(track_reduction_rate),
+                'tracks_reconstructable_after_hit_filter_percent': float(tracks_reconstructable_rate),
                 'processing_time_seconds': float(processing_time),
                 'num_workers': int(self.num_workers)
             },
@@ -538,6 +548,7 @@ class HitFilterDatasetReducer:
         print(f"  Total tracks before: {self.stats['total_tracks_before']:,}")
         print(f"  Total tracks after: {self.stats['total_tracks_after']:,}")
         print(f"  Track reduction: {(1-self.stats['total_tracks_after']/max(1,self.stats['total_tracks_before']))*100:.2f}%")
+        print(f"  Tracks reconstructable after hit filtering (>3 true hits): {self.stats['tracks_reconstructable_after_hit_filter']:,} ({self.stats['tracks_reconstructable_after_hit_filter']/max(1,self.stats['total_tracks_before'])*100:.2f}%)")
         if not self.disable_track_filtering:
             print(f"  Tracks excluded by filtering: {self.stats['excluded_tracks_count']:,}")
             total_tracks = self.stats['total_tracks_before']
@@ -584,6 +595,8 @@ def process_worker_events(args: Tuple) -> Dict:
         'total_tracks_before': 0,
         'total_tracks_after': 0,
         'excluded_tracks_count': 0,
+        # Track reconstructability after hit filtering
+        'tracks_reconstructable_after_hit_filter': 0,
         # Detailed track filtering statistics
         'tracks_excluded_pt': 0,
         'tracks_excluded_eta': 0,
@@ -687,6 +700,13 @@ def process_worker_events(args: Tuple) -> Dict:
                 if len(valid_track_ids) == 0:
                     worker_stats['events_failed_no_hits_after_filter'] += 1
                     continue
+                
+                # Count tracks that remain reconstructable after hit filtering (have >3 true hits)
+                # This metric is independent of all other cuts
+                for track_idx in valid_track_ids:
+                    true_hits_count = np.sum(hits_dict['spacePoint_truthLink'] == track_idx)
+                    if true_hits_count > 3:  # Using > 3 instead of >= 3 to match "more than 3"
+                        worker_stats['tracks_reconstructable_after_hit_filter'] += 1
                 
                 # ALWAYS filter tracks that have zero hits after hit filtering
                 # This ensures consistency between hit and track data

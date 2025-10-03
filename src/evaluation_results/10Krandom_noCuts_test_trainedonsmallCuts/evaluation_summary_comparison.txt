@@ -1,0 +1,152 @@
+================================================================================
+ATLAS MUON HIT FILTER EVALUATION - COMPREHENSIVE SUMMARY
+================================================================================
+Timestamp: 2025-10-03 22:27:34
+Max events processed: 10000
+
+EVALUATION REGIONS:
+1. ALL TRACKS: All tracks in the dataset (baseline for comparison)
+2. BASELINE FILTERED: High-quality tracks meeting strict criteria
+3. ML REGION: Tracks meeting ML training criteria (preprocessing filters)
+4. REJECTED TRACKS: Tracks outside the ML region
+
+BASELINE FILTERING CRITERIA:
+- Tracks must have hits in at least 3 different stations
+- Each station must have at least 3 hits from the track
+- This ensures tracks have at least 9 hits total
+- Detector acceptance: 0.1 <= |eta| <= 2.7
+- Minimum pT threshold: >= 5.0 GeV
+
+ML REGION FILTERING CRITERIA (matches preprocessing):
+- Minimum 3 hits per track
+- Detector acceptance: |eta| <= 2.7
+- Minimum pT threshold: >= 5.0 GeV
+
+NOTE: The rejected tracks region is now defined as tracks that fall
+outside the ML region (not outside the baseline region).
+
+FILTERING STRATEGY:
+- Keep ALL noise hits from all events in all categories
+- Each category keeps true hits only from tracks meeting its criteria
+- This maintains realistic signal-to-noise ratio for all evaluations
+
+==================================================
+BASELINE FILTERING BREAKDOWN
+==================================================
+Total tracks evaluated: 18,709
+Tracks failing minimum hits (>=9): 331 (1.77%)
+Tracks failing eta cuts (0.1 <= |eta| <= 2.7): 588 (3.14%)
+Tracks failing pT cuts (pT >= 5.0 GeV): 1,253 (6.70%)
+Tracks failing station cuts (>=3 stations, >=3 hits/station): 9,109 (48.69%)
+Tracks passing ALL criteria: 7,428 (39.70%)
+
+BASELINE FILTERING EFFICIENCY:
+Track retention rate: 39.70%
+Hit retention rate: 100.00%
+
+==================================================
+ML REGION FILTERING BREAKDOWN
+==================================================
+Total tracks evaluated: 18,709
+Tracks failing minimum hits (>=3): 0 (0.00%)
+Tracks failing eta cuts (|eta| <= 2.7): 78 (0.42%)
+Tracks failing pT cuts (pT >= 5.0 GeV): 1,431 (7.65%)
+Tracks passing ALL criteria: 17,200 (91.93%)
+
+ML REGION FILTERING EFFICIENCY:
+Track retention rate: 91.93%
+Hit retention rate: 100.00%
+
+==================================================
+ALL TRACKS ANALYSIS
+==================================================
+Total hits analyzed: 68,849,292
+True hits: 490,002
+Noise hits: 68,359,290
+Unique tracks: 18,709
+Truth hit ratio: 0.71%
+AUC Score: 0.9873
+
+==================================================
+BASELINE FILTERED TRACKS ANALYSIS
+==================================================
+Total hits analyzed: 68,542,599
+True hits: 183,309
+Noise hits: 68,359,290
+Unique tracks: 7,428
+Truth hit ratio: 0.27%
+AUC Score: 0.9991
+
+==================================================
+ML REGION TRACKS ANALYSIS
+==================================================
+Total hits analyzed: 68,815,529
+True hits: 456,239
+Noise hits: 68,359,290
+Unique tracks: 17,200
+Truth hit ratio: 0.66%
+AUC Score: 0.9993
+
+==================================================
+REJECTED TRACKS ANALYSIS (outside ML region)
+==================================================
+Total hits analyzed: 68,393,053
+True hits: 33,763
+Noise hits: 68,359,290
+Unique tracks: 1,509
+Truth hit ratio: 0.05%
+AUC Score: 0.8243
+
+==================================================
+COMPARISON METRICS
+==================================================
+BASELINE vs ALL TRACKS:
+Hit retention rate: 99.55%
+True hit retention: 37.41%
+Noise hit retention: 100.00%
+Track retention rate: 39.70%
+AUC improvement: 0.0118
+
+ML REGION vs ALL TRACKS:
+Hit retention rate: 99.95%
+True hit retention: 93.11%
+Noise hit retention: 100.00%
+Track retention rate: 91.93%
+AUC improvement: 0.0121
+
+REJECTED vs ALL TRACKS:
+Hit retention rate: 99.34%
+True hit retention: 6.89%
+Noise hit retention: 100.00%
+Track retention rate: 8.07%
+AUC improvement: -0.1630
+
+ML REGION vs BASELINE:
+Hit retention rate: 100.40%
+True hit retention: 248.89%
+Noise hit retention: 100.00%
+Track retention rate: 231.56%
+AUC improvement: 0.0003
+
+Dataset purity (all tracks): 0.0071
+Dataset purity (baseline): 0.0027
+Dataset purity (ML region): 0.0066
+Dataset purity (rejected): 0.0005
+Baseline purity improvement: -0.0044
+ML region purity improvement: -0.0005
+Rejected purity change: -0.0066
+
+PLOTS GENERATED:
+- ROC curve (all four datasets)
+- Efficiency vs pT (all four datasets)
+- Working point performance (all four datasets)
+- Track lengths (all four datasets)
+- Efficiency vs eta/phi (SKIPPED)
+- Technology-specific plots (SKIPPED)
+- Individual working point plots (SKIPPED)
+
+Outputs saved to:
+  All tracks: evaluation_results/run_20251003_221142/all_tracks
+  Baseline filtered: evaluation_results/run_20251003_221142/baseline_filtered_tracks
+  ML region: evaluation_results/run_20251003_221142/ml_region
+  Rejected tracks: evaluation_results/run_20251003_221142/rejected_tracks

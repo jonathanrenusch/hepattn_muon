@@ -1203,7 +1203,6 @@ class AtlasMuonEvaluatorDataLoader:
         print("Generating efficiency plots (optimized)...")
         
         # Only create the main combined plots, skip individual plots by default
-        self._plot_efficiency_vs_pt_general(working_points, skip_individual_plots, output_subdir)
         
         if not skip_individual_plots:
             # Only create technology-specific plots if explicitly requested
@@ -2185,8 +2184,6 @@ class AtlasMuonEvaluatorDataLoader:
             working_points = DEFAULT_WORKING_POINTS
         print("Generating efficiency vs eta plots...")
         
-        # First, create the general (all technologies) plots
-        self._plot_efficiency_vs_eta_general(working_points, skip_individual_plots, output_subdir)
         
         # Then, create technology-specific plots
         self._plot_efficiency_vs_eta_by_technology(working_points, output_subdir)
@@ -2289,8 +2286,7 @@ class AtlasMuonEvaluatorDataLoader:
             working_points = DEFAULT_WORKING_POINTS
         print("Generating efficiency vs phi plots...")
         
-        # First, create the general (all technologies) plots
-        self._plot_efficiency_vs_phi_general(working_points, skip_individual_plots, output_subdir)
+
         
         # Then, create technology-specific plots
         self._plot_efficiency_vs_phi_by_technology(working_points, output_subdir)
@@ -3116,13 +3112,22 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate ATLAS muon hit filter using DataLoader (OPTIMIZED)')
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
-    parser.add_argument('--eval_path', "-e",type=str, default="/shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130_ml_test_data_156000_hdf5_noCuts_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_validation_data_144000_hdf5_eval.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130_ml_test_data_156000_hdf5_noCuts_eval.h5",
         help='Path to evaluation HDF5 file')
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/bestfiltermodel/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
                     #    help='Path to evaluation HDF5 file') # CAREFUL the checkpoint is still referring to the old cuts!
-    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_validation_data_144000_hdf5",
     parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_training_data_2694000_hdf5",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
                        help='Path to processed test data directory')
     parser.add_argument('--config_path', "-c",type=str, default="/shared/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml",
                        help='Path to config YAML file')

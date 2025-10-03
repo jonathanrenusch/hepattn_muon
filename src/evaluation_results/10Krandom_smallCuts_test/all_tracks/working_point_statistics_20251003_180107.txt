@@ -1,0 +1,95 @@
+================================================================================
+WORKING POINT PERFORMANCE STATISTICS
+================================================================================
+Analysis timestamp: 2025-10-03 18:01:07
+Max events analyzed: 10000
+
+OVERALL PERFORMANCE SUMMARY:
+--------------------------------------------------
+Working Point 0.975: Purity = 0.7542 ± 0.0006
+Working Point 0.985: Purity = 0.6424 ± 0.0006
+Working Point 0.990: Purity = 0.5569 ± 0.0005
+Working Point 0.995: Purity = 0.4137 ± 0.0005
+
+TECHNOLOGY DISTRIBUTION IN TRUTH LABELS:
+--------------------------------------------------
+Technology   True Hits    Total Hits   % of True   
+--------------------------------------------------
+MDT          322,814      40,173,204   68.7        %
+RPC          66,783       3,138,846    14.2        %
+TGC          76,936       1,750,767    16.4        %
+STGC         1,943        11,111,993   0.4         %
+MM           1,433        12,615,888   0.3         %
+
+Total true hits across all technologies: 469,909
+Total hits across all technologies: 68,790,698
+Overall true hit rate: 0.7%
+
+DETAILED TRACK STATISTICS BY WORKING POINT:
+============================================================
+
+Working Point 0.975:
+------------------------------
+Events analyzed: 10000
+Total valid tracks: 17712
+Tracks completely lost (0 hits): 74 (0.42%)
+Tracks with <3 hits: 22 (0.12%)
+Tracks with ≥3 hits: 17616 (99.46%)
+Track survival rate: 99.58%
+
+Working Point 0.985:
+------------------------------
+Events analyzed: 10000
+Total valid tracks: 17712
+Tracks completely lost (0 hits): 42 (0.24%)
+Tracks with <3 hits: 16 (0.09%)
+Tracks with ≥3 hits: 17654 (99.67%)
+Track survival rate: 99.76%
+
+Working Point 0.990:
+------------------------------
+Events analyzed: 10000
+Total valid tracks: 17712
+Tracks completely lost (0 hits): 27 (0.15%)
+Tracks with <3 hits: 9 (0.05%)
+Tracks with ≥3 hits: 17676 (99.80%)
+Track survival rate: 99.85%
+
+Working Point 0.995:
+------------------------------
+Events analyzed: 10000
+Total valid tracks: 17712
+Tracks completely lost (0 hits): 8 (0.05%)
+Tracks with <3 hits: 7 (0.04%)
+Tracks with ≥3 hits: 17697 (99.92%)
+Track survival rate: 99.95%
+
+================================================================================
+COMPARISON TABLE:
+================================================================================
+WP     Purity   Total   Lost   Lost%   <3hits  <3hits%  ≥3hits  ≥3hits% 
+--------------------------------------------------------------------------------
+0.975  0.7542   17712   74     0.4     22      0.1      17616   99.5    
+0.985  0.6424   17712   42     0.2     16      0.1      17654   99.7    
+0.990  0.5569   17712   27     0.2     9       0.1      17676   99.8    
+0.995  0.4137   17712   8      0.0     7       0.0      17697   99.9    
+
+================================================================================
+LEGEND:
+WP      = Working Point (target efficiency)
+Purity  = Hit filter purity (precision)
+Total   = Total number of valid tracks
+Lost    = Tracks with 0 predicted hits
+Lost%   = Percentage of tracks completely lost
+<3hits  = Tracks with 1-2 predicted hits
+<3hits% = Percentage of tracks with <3 hits
+≥3hits  = Tracks with 3 or more predicted hits
+≥3hits% = Percentage of tracks with ≥3 hits
+
+TECHNOLOGY CODES:
+MDT    = 0
+RPC    = 2
+TGC    = 3
+STGC   = 4
+MM     = 5
+================================================================================

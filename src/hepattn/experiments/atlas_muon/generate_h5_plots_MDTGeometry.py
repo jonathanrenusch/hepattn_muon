@@ -126,10 +126,10 @@ def generate_plots_for_file(
         save_path=file_output_dir / f"{config_key}_true_hits_histogram.png",
     )
 
-    # Generate 10 random event displays: 
+    # Generate 100 random event displays: 
     print("\n--- Generating random event displays ---")
-    # picking 10 random numbers from the range of available events
-    random_indices = np.random.choice(num_events, size=10, replace=False)
+    # picking 100 random numbers from the range of available events
+    random_indices = np.random.choice(num_events, size=100, replace=False)
     # make new directory for random events
     (file_output_dir / "events").mkdir(parents=True, exist_ok=True)
     for idx in random_indices:
@@ -203,7 +203,7 @@ def main() -> None:
     output_dir = create_output_directory(args.output_dir)
     print(f"Output directory: {output_dir}")
 
-    config_path = "./hepattn/experiments/atlas_muon/configs/atlas_muon_event_plotting.yaml"
+    config_path = "/shared/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/NGT/atlas_muon_event_NGT_plotting.yaml"
 
     # Load inputs and targets fresh each time to avoid corruption
     inputs, targets = load_inputs_targets_from_config(config_path)
