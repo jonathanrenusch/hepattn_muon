@@ -469,30 +469,30 @@ def process_worker_files(args: Tuple) -> Dict:
                             # Apply track filters
                             exclude_tracks = []
                             for track_idx in valid_tracks:
-                                track_excluded = False
                                 exclude_reasons = []
                                 
                                 # Check pT threshold
                                 if track_features_chunk['truthMuon_pt'][event_idx_in_chunk][track_idx] < pt_threshold:
                                     exclude_reasons.append('pt')
                                     tracks_excluded_pt += 1
-                                    track_excluded = True
-                                
+                                    exclude_tracks.append(track_idx)
+                                    excluded_tracks_count += 1
+
                                 # Check eta threshold
                                 if abs(track_features_chunk['truthMuon_eta'][event_idx_in_chunk][track_idx]) > eta_threshold:
                                     exclude_reasons.append('eta')
                                     tracks_excluded_eta += 1
-                                    track_excluded = True
+
+                                    exclude_tracks.append(track_idx)
+                                    excluded_tracks_count += 1
                                 
                                 # Check minimum hits threshold
                                 if np.sum(hits['spacePoint_truthLink'] == track_idx) < num_hits_threshold:
                                     exclude_reasons.append('hits')
                                     tracks_excluded_hits += 1
-                                    track_excluded = True
-                                
-                                if track_excluded:
                                     exclude_tracks.append(track_idx)
                                     excluded_tracks_count += 1
+                                
                             
                             remaining_tracks = np.setdiff1d(valid_tracks, exclude_tracks)
                             

@@ -17,6 +17,7 @@ import copy
 import os
 import sqlite3
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 import yaml
@@ -295,9 +296,21 @@ def objective(trial: optuna.Trial, base_config: Dict[str, Any], gpu_id: int) -> 
     trial_name = f"optuna_trial_{trial.number}_gpu_{gpu_id}"
     config["name"] = trial_name
     
-    # Set up logger with trial-specific name
+    # Create proper optuna directory structure with timestamp for uniqueness
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+    optuna_log_dir = Path("logs/optuna")
+    trial_log_dir = optuna_log_dir / f"trial_{trial.number}_{timestamp}"
+    
+    # Ensure the directories exist
+    trial_log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Update trainer default_root_dir to point to the trial-specific directory
+    config["trainer"]["default_root_dir"] = str(trial_log_dir)
+    
+    # Set up logger with trial-specific name and directory
     if "logger" in config["trainer"]:
         config["trainer"]["logger"]["init_args"]["experiment_name"] = trial_name
+        config["trainer"]["logger"]["init_args"]["save_dir"] = str(trial_log_dir)
     
     # Add learning rate configuration if not present
     if "lrs_config" not in config["model"]:
@@ -316,17 +329,16 @@ def objective(trial: optuna.Trial, base_config: Dict[str, Any], gpu_id: int) -> 
         config_path = f.name
     
     try:
-        # Create CLI with the temporary config
+        # Create CLI with the temporary config and fit subcommand
         cli = CLI(
             model_class=OptimizedWrapperModule,
             datamodule_class=AtlasMuonDataModule,
-            args=["--config", config_path],
+            args=["fit", "--config", config_path],
             parser_kwargs={"default_env": True},
             save_config_kwargs={"overwrite": True},
         )
         
-        # Run training
-        cli.trainer.fit(cli.model, cli.datamodule)
+        # Training is automatically run by the CLI with the fit subcommand
         
         # Get the best validation loss
         best_val_loss = cli.trainer.callback_metrics.get("val/loss", float('inf'))
@@ -379,7 +391,7 @@ def main():
     parser.add_argument("--base-config", type=str, 
                         default="/shared/tracking/hepattn_muon/src/hepattn/experiments/atlas_muon/configs/NGT/smallCuts/optuna_base_config.yaml",
                         help="Path to base configuration file")
-    parser.add_argument("--n-warmup", type=int, default=50, help="Number of warmup trials for TPE sampler")
+    parser.add_argument("--n-warmup", type=int, default=100, help="Number of warmup trials for TPE sampler")
     parser.add_argument("--pruner", action="store_true", help="Enable pruning of unpromising trials")
     
     args = parser.parse_args()
@@ -413,6 +425,12 @@ def main():
     print(f"Database: {args.db_path}")
     print(f"Number of trials: {args.n_trials}")
     print(f"Number of warmup trials: {args.n_warmup}")
+    print(f"Logs will be saved to: logs/optuna/trial_<trial_number>_<timestamp>/")
+    
+    # Create the main optuna logs directory if it doesn't exist
+    optuna_log_dir = Path("logs/optuna")
+    optuna_log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Created optuna log directory: {optuna_log_dir}")
     
     # Run optimization
     study.optimize(

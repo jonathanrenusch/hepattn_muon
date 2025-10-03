@@ -7,7 +7,7 @@ name = "hepattn"
 requires-python = "== 3.12"
 version = "0.1.0"
 dependencies = [
-    "packaging",
+    "packaging>=20.0,<25.0",
     "wheel",
     "numpy",
     "scipy",
@@ -32,6 +32,7 @@ dependencies = [
     "numba>=0.61.2",
     "onnx>=1.18.0",
     "onnxruntime>=1.22.0",
+    "optuna>=4.0.0",
 ]
 
 [build-system]

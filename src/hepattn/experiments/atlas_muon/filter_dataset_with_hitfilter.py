@@ -760,6 +760,7 @@ def process_worker_events(args: Tuple) -> Dict:
                 
                 # Filter hits to only keep those from remaining tracks
                 hit2track_mask = np.isin(hits_dict['spacePoint_truthLink'], remaining_tracks)
+                hit2track_mask |= (hits_dict['spacePoint_truthLink'] == -1)  # Keep background hits
                 modified_truth_link = hits_dict['spacePoint_truthLink'].copy()
                 modified_truth_link[~hit2track_mask] = -1
                 

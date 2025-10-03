@@ -5,7 +5,7 @@ data:
   val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
   
-  num_workers: 24
+  num_workers: 12 # This allows 4 parrallel runs per H100 node (48 cores)
   num_train: -1
   num_test: -1
   num_val: -1
@@ -52,7 +52,8 @@ data:
 
 trainer:
   # Training stuff here
-  max_epochs: 50
+  # max_epochs: 50
+  max_epochs: 2
   num_sanity_val_steps: 1
   accelerator: gpu
   precision: bf16-mixed
@@ -60,6 +61,14 @@ trainer:
   default_root_dir: logs
   gradient_clip_val: 0.1
   enable_progress_bar: true
+
+  # Specify loggers here
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: atlas_muon_tracking_optuna
+      experiment_name: optuna_baseline  # Will be overridden in optuna_tune.py
+      save_dir: logs
 
   # Callbacks for optuna optimization
   callbacks:
@@ -85,7 +94,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 5
+        patience: 1
         min_delta: 0.0
         mode: min
         verbose: True

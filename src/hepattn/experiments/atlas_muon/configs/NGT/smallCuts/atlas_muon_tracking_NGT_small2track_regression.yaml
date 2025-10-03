@@ -14,11 +14,11 @@ data:
   # hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
-  num_workers: 24
+  num_workers: 10
   num_train: -1
   num_test: -1
   num_val: -1
-  batch_size: 1024
+  batch_size: 200
   # batch_size: 32
   # use_smart_batching: false  # Disable smart batching as requested
 
@@ -70,6 +70,7 @@ trainer:
   num_sanity_val_steps: 1
   accelerator: gpu
   # devices: [0,1,2]
+  # devices: [1]
   devices: [1]
   # devices: -1
   precision: bf16-mixed
@@ -195,13 +196,13 @@ model:
                     output_size: *dim
                     # Dense network arguments with defaults:
                     # output_size: None  # If None, defaults to input_size
-                    hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                    # hidden_dim_scale: 2  # Scale factor for hidden layer size
+                    # hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
+                    hidden_dim_scale: 2  # Scale factor for hidden layer size
                     activation: null  # If null, defaults to SwiGLU()
                     # final_activation: null  # Activation for output layer
-                    dropout: 0.3  # Dropout probability
+                    dropout: 0.0  # Dropout probability
                     bias: true  # Whether to use bias in linear layers
-                    norm_input: true  # Whether to apply LayerNorm to input
+                    norm_input: false  # Whether to apply LayerNorm to input
                 posenc:
                   class_path: hepattn.models.posenc.PositionEncoder
                   init_args:
@@ -270,13 +271,13 @@ model:
                 # Dense network arguments (defaults shown):
                 dense_kwargs:
                   # output_size: null  # If null, defaults to input_size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
                   activation: null  # If null, defaults to SwiGLU()
                   # final_activation: null  # Activation for output layer
-                  dropout: 0.3  # Dropout probability
+                  dropout: 0.0  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
-                  norm_input: true  # Whether to apply LayerNorm to input
+                  norm_input: false  # Whether to apply LayerNorm to input
             - class_path: hepattn.models.task.ObjectHitMaskTask
               init_args:
                 name: track_hit_valid
@@ -287,7 +288,7 @@ model:
                 losses:
                   mask_bce: 1.0
                   # mask_dice: 1.0
-                  # mask_focal: 1.0
+                  mask_focal: 1.0
                 costs:
                   mask_bce: 1.0
                   # mask_focal: 1.0
@@ -296,13 +297,13 @@ model:
                 # Dense network arguments (defaults shown, applies to both hit_net and object_net):
                 dense_kwargs:
                   # output_size: null  # If null, defaults to input_size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
                   activation: null  # If null, defaults to SwiGLU()
                   # final_activation: null  # Activation for output layer
-                  dropout: 0.3  # Dropout probability
+                  dropout: 0.0  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
-                  norm_input: true  # Whether to apply LayerNorm to input
+                  norm_input: false  # Whether to apply LayerNorm to input
 
             - class_path: hepattn.models.task.ObjectRegressionTask
               init_args:
@@ -314,19 +315,20 @@ model:
                 - truthMuon_eta
                 - truthMuon_phi
                 - truthMuon_pt
+                # - truthMuon_q
                 loss_weight: 1.0
                 cost_weight: 1.0
                 dim: *dim
                 # Dense network arguments (defaults shown):
                 dense_kwargs:
                   # output_size: null  # If null, defaults to input_size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
                   activation: null  # If null, defaults to SwiGLU()
                   # final_activation: null  # Activation for output layer
-                  dropout: 0.3  # Dropout probability
+                  dropout: 0.0  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
-                  norm_input: true  # Whether to apply LayerNorm to input
+                  norm_input: false  # Whether to apply LayerNorm to input
             
             - class_path: hepattn.models.task.ObjectChargeClassificationTask
               init_args:
@@ -340,12 +342,12 @@ model:
                 dim: *dim
                 # Dense network arguments (defaults shown):
                 dense_kwargs:
-                  # hidden_dim_scale: 2  # Scale factor for hidden layer size
-                  hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
+                  hidden_dim_scale: 2  # Scale factor for hidden layer size
+                  # hidden_layers: [128]  # If null, defaults to [input_size * hidden_dim_scale]
                   activation: null  # If null, defaults to SwiGLU()
-                  dropout: 0.3  # Dropout probability
+                  dropout: 0.0  # Dropout probability
                   bias: true  # Whether to use bias in linear layers
-                  norm_input: true  # Whether to apply LayerNorm to input
+                  norm_input: false  # Whether to apply LayerNorm to input
 
 
 
