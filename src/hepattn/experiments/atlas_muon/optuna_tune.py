@@ -24,6 +24,7 @@ import yaml
 
 import optuna
 import torch
+import lightning.pytorch as pl
 from lightning.pytorch.cli import ArgsType
 from torch import nn
 
@@ -133,26 +134,58 @@ class OptimizedWrapperModule(ModelWrapper):
         self.log(f"{stage}/num_particles", torch.mean(true_num.float()), sync_dist=True)
 
     def compute_raw_losses(self, outputs, targets):
-        """Compute raw losses from all tasks without weighting."""
+        """Compute raw losses from all tasks without weighting.
+        
+        This function attempts to compute unweighted losses by calling each task's
+        loss function and then extracting the raw loss components by dividing out
+        the loss weights. This provides a fairer comparison across different 
+        hyperparameter configurations since the raw loss values are independent
+        of the specific loss weights being tuned.
+        
+        Note: This approach works by reverse-engineering the raw losses from the
+        weighted losses returned by each task. While not perfect, it's more robust
+        than trying to reimplement each task's loss computation.
+        """
         raw_losses = {}
         
-        # Get losses from the model
-        losses, _ = self.model.loss(outputs, targets)
-        
-        # Extract raw losses from each task and layer
-        for layer_name, layer_losses in losses.items():
-            for task_name, task_losses in layer_losses.items():
+        # Iterate through each layer and task to compute raw losses
+        for layer_name, layer_outputs in outputs.items():
+            for task in self.model.tasks:
+                # Skip tasks that do not contribute intermediate losses for non-final layers
+                if layer_name != "final" and not task.has_intermediate_loss:
+                    continue
+                
+                task_outputs = layer_outputs[task.name]
+                task_losses = task.loss(task_outputs, targets)
+                
+                # Attempt to extract raw losses based on task characteristics
                 for loss_name, loss_value in task_losses.items():
-                    # Store loss without the weight multiplier
-                    # Get the task to access its loss_weight
-                    task = next(task for task in self.model.tasks if task.name == task_name)
-                    if hasattr(task, 'loss_weight'):
-                        # Remove the weight by dividing
-                        raw_loss = loss_value / task.loss_weight if task.loss_weight != 0 else loss_value
-                    else:
-                        raw_loss = loss_value
-                    
-                    raw_losses[f"{layer_name}_{task_name}_{loss_name}"] = raw_loss
+                    try:
+                        if hasattr(task, 'losses') and isinstance(task.losses, dict):
+                            # For dict-based losses (ObjectValidTask, ObjectHitMaskTask)
+                            # The loss value already includes the weight, so divide by it
+                            if loss_name in task.losses:
+                                weight = task.losses[loss_name]
+                                raw_loss = loss_value / weight if weight != 0 else loss_value
+                            else:
+                                raw_loss = loss_value
+                        elif hasattr(task, 'loss_weight'):
+                            # For weight-based losses (ObjectRegressionTask, ObjectChargeClassificationTask)
+                            # The loss value already includes the weight, so divide by it
+                            raw_loss = loss_value / task.loss_weight if task.loss_weight != 0 else loss_value
+                        else:
+                            # Fallback: assume the loss is already raw
+                            raw_loss = loss_value
+                        
+                        # Store with descriptive keys
+                        key = f"{layer_name}_{task.name}_raw_{loss_name}"
+                        raw_losses[key] = raw_loss
+                        
+                    except Exception as e:
+                        # If we can't extract raw loss, store the weighted version
+                        print(f"Warning: Could not extract raw loss for {task.name}_{loss_name}: {e}")
+                        key = f"{layer_name}_{task.name}_weighted_{loss_name}"
+                        raw_losses[key] = loss_value
         
         return raw_losses
 
@@ -185,6 +218,25 @@ class OptimizedWrapperModule(ModelWrapper):
         self.validation_raw_losses = []
 
 
+class OptunaReportCallback(pl.Callback):
+    """Callback to report validation metrics to Optuna for pruning."""
+    
+    def __init__(self, trial: optuna.Trial):
+        self.trial = trial
+    
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Report validation loss to Optuna after each validation epoch."""
+        # Get current validation loss
+        current_val_loss = trainer.callback_metrics.get("val/loss", float('inf'))
+        
+        # Report to Optuna for pruning decisions
+        self.trial.report(current_val_loss, trainer.current_epoch)
+        
+        # Check if trial should be pruned
+        if self.trial.should_prune():
+            raise optuna.TrialPruned()
+
+
 def suggest_hyperparameters(trial: optuna.Trial) -> Dict[str, Any]:
     """Suggest hyperparameters for the trial."""
     
@@ -192,6 +244,7 @@ def suggest_hyperparameters(trial: optuna.Trial) -> Dict[str, Any]:
     num_encoder_layers = trial.suggest_categorical("num_encoder_layers", [1, 2, 3, 4])
     num_decoder_layers = trial.suggest_categorical("num_decoder_layers", [1, 2, 3, 4])
     dim = trial.suggest_categorical("dim", [16, 32, 64])
+    num_heads = trial.suggest_categorical("num_heads", [4, 8, 16])
     
     # Task hyperparameters
     # Cost weights for all tasks
@@ -217,6 +270,7 @@ def suggest_hyperparameters(trial: optuna.Trial) -> Dict[str, Any]:
         "num_encoder_layers": num_encoder_layers,
         "num_decoder_layers": num_decoder_layers,
         "dim": dim,
+        "num_heads": num_heads,
         "track_valid_cost_weight": track_valid_cost_weight,
         "track_hit_valid_cost_weight": track_hit_valid_cost_weight,
         "parameter_regression_cost_weight": parameter_regression_cost_weight,
@@ -241,8 +295,10 @@ def create_config_from_trial(base_config: Dict[str, Any], trial_params: Dict[str
     config["model"]["model"]["init_args"]["dim"] = trial_params["dim"]
     config["model"]["model"]["init_args"]["encoder"]["init_args"]["num_layers"] = trial_params["num_encoder_layers"]
     config["model"]["model"]["init_args"]["encoder"]["init_args"]["dim"] = trial_params["dim"]
+    config["model"]["model"]["init_args"]["encoder"]["init_args"]["attn_kwargs"]["num_heads"] = trial_params["num_heads"]
     config["model"]["model"]["init_args"]["decoder"]["num_decoder_layers"] = trial_params["num_decoder_layers"]
     config["model"]["model"]["init_args"]["decoder"]["decoder_layer_config"]["dim"] = trial_params["dim"]
+    config["model"]["model"]["init_args"]["decoder"]["decoder_layer_config"]["attn_kwargs"]["num_heads"] = trial_params["num_heads"]
     config["model"]["model"]["init_args"]["decoder"]["num_queries"] = 2  # Keep fixed
     
     # Update input net
@@ -358,16 +414,12 @@ def objective(trial: optuna.Trial, base_config: Dict[str, Any], gpu_id: int) -> 
             total_raw_loss = sum(
                 sum(losses) / len(losses) for losses in raw_loss_sums.values()
             )
-            
+            print("="*30,"raw_losses_were used")
             # Use raw loss sum as objective (lower is better)
             objective_value = total_raw_loss
         else:
             # Fallback to validation loss if raw losses are not available
             objective_value = float(best_val_loss)
-        
-        # Report intermediate values for pruning
-        if hasattr(cli.trainer, 'current_epoch'):
-            trial.report(objective_value, cli.trainer.current_epoch)
         
         return objective_value
         

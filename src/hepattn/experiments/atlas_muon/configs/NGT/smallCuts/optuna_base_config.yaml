@@ -102,6 +102,15 @@ trainer:
 model:
   optimizer: Lion
   
+  # Learning rate schedule configuration
+  lrs_config:
+    initial: 1e-5
+    max: 5e-5
+    end: 1e-5
+    pct_start: 0.05
+    skip_scheduler: false
+    weight_decay: 1e-5
+  
   # Whether to use multi task learning or not
   mtl: false
 
@@ -200,7 +209,7 @@ model:
                 input_object: query
                 output_object: track
                 target_object: particle
-                null_weight: 1.0
+                null_weight: 0.1
                 mask_queries: false
                 dense_kwargs:
                   activation: null  # If null, defaults to SwiGLU()
@@ -214,7 +223,7 @@ model:
                 input_object: query
                 output_object: track
                 target_object: particle
-                null_weight: 1.0
+                null_weight: 0.1
                 dense_kwargs:
                   activation: null  # If null, defaults to SwiGLU()
                   dropout: 0.3  # Dropout probability
