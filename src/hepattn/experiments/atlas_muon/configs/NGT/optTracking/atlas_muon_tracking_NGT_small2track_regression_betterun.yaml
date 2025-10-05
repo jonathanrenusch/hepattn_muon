@@ -4,8 +4,8 @@ name: TRK-ATLAS-Muon-smallModel-better-run
 
 data:
 
-  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
-  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
   # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
@@ -102,7 +102,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 25
+        save_top_k: 5
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
