@@ -1,0 +1,89 @@
+============================================================
+TRACK ANALYSIS STATISTICS
+============================================================
+Analysis timestamp: 2025-10-05 21:58:48
+Max events analyzed: 5
+
+EVENT STATISTICS:
+------------------------------
+Total events analyzed: 5
+
+TRACKS PER EVENT DISTRIBUTION:
+----------------------------------------
+1 tracks: 1 events (20.00%)
+2 tracks: 4 events (80.00%)
+
+Mean tracks per event: 1.80
+Standard deviation: 0.40
+Min tracks per event: 1
+Max tracks per event: 2
+
+TRACK LENGTH STATISTICS:
+-----------------------------------
+Total number of tracks: 9
+Tracks with length < 3 hits: 0
+Percentage of tracks with < 3 hits: 0.00%
+Tracks with length > 3 hits: 9
+Percentage of tracks with > 3 hits: 100.00%
+
+Mean track length: 25.44 hits
+Standard deviation: 6.00 hits
+Min track length: 18 hits
+Max track length: 35 hits
+
+TRACK LENGTH DISTRIBUTION:
+-----------------------------------
+18 hits: 3 tracks (33.33%)
+24 hits: 1 tracks (11.11%)
+26 hits: 1 tracks (11.11%)
+29 hits: 1 tracks (11.11%)
+30 hits: 1 tracks (11.11%)
+31 hits: 1 tracks (11.11%)
+35 hits: 1 tracks (11.11%)
+
+============================================================
+DETECTOR TECHNOLOGY STATISTICS
+============================================================
+Events processed: 5
+Total hits: 285
+Total true hits: 214
+
+TECHNOLOGY DISTRIBUTION (ABSOLUTE NUMBERS):
+--------------------------------------------------
+MDT:
+  Total hits: 184
+  True hits: 139
+
+RPC:
+  Total hits: 20
+  True hits: 17
+
+TGC:
+  Total hits: 81
+  True hits: 58
+
+STGC:
+  Total hits: 0
+  True hits: 0
+
+MM:
+  Total hits: 0
+  True hits: 0
+
+TECHNOLOGY DISTRIBUTION (PERCENTAGES):
+--------------------------------------------------
+Percentage of total hits by technology:
+  MDT: 64.56%
+  RPC: 7.02%
+  TGC: 28.42%
+  STGC: 0.00%
+  MM: 0.00%
+
+Percentage of true hits by technology:
+  MDT: 64.95%
+  RPC: 7.94%
+  TGC: 27.10%
+  STGC: 0.00%
+  MM: 0.00%
+
+============================================================

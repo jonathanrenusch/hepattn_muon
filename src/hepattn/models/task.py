@@ -45,6 +45,17 @@ class Task(nn.Module, ABC):
     def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
         """Compute loss between outputs and targets."""
 
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses between outputs and targets.
+        
+        This method should be overridden by subclasses to return unweighted loss values.
+        By default, it falls back to the regular loss method (which may be weighted).
+        
+        Returns:
+            Dictionary mapping loss names to raw (unweighted) loss values.
+        """
+        return self.loss(outputs, targets)
+
     def cost(self, outputs: dict[str, Tensor], targets: dict[str, Tensor], **kwargs) -> dict[str, Tensor]:
         return {}
 
@@ -133,6 +144,16 @@ class ObjectValidTask(Task):
             losses[loss_fn] = loss_weight * loss_fns[loss_fn](output, target, sample_weight=sample_weight)
         return losses
 
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for ObjectValidTask."""
+        raw_losses = {}
+        output = outputs[self.output_object + "_logit"]
+        target = targets[self.target_object + "_valid"].type_as(output)
+        sample_weight = target + self.null_weight * (1 - target)
+        for loss_fn in self.losses.keys():
+            raw_losses[loss_fn] = loss_fns[loss_fn](output, target, sample_weight=sample_weight)
+        return raw_losses
+
     def query_mask(self, outputs: dict[str, Tensor], threshold: float = 0.1) -> Tensor | None:
         if not self.mask_queries:
             return None
@@ -191,6 +212,30 @@ class HitFilterTask(Task):
         target = targets[f"{self.input_object}_{self.target_field}"].type_as(output)
 
         # Calculate the BCE loss with class weighting
+        if self.loss_fn == "bce":
+            pos_weight = 1 / target.float().mean()
+            loss = nn.functional.binary_cross_entropy_with_logits(output, target, pos_weight=pos_weight)
+            return {f"{self.input_object}_{self.loss_fn}": loss}
+        if self.loss_fn == "focal":
+            loss = mask_focal_loss(output, target)
+            return {f"{self.input_object}_{self.loss_fn}": loss}
+        if self.loss_fn == "both":
+            pos_weight = 1 / target.float().mean()
+            bce_loss = nn.functional.binary_cross_entropy_with_logits(output, target, pos_weight=pos_weight)
+            focal_loss_value = mask_focal_loss(output, target)
+            return {
+                f"{self.input_object}_bce": bce_loss,
+                f"{self.input_object}_focal": focal_loss_value,
+            }
+        raise ValueError(f"Unknown loss function: {self.loss_fn}")
+
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for HitFilterTask."""
+        # Pick out the field that denotes whether a hit is on a reconstructable object or not
+        output = outputs[f"{self.input_object}_logit"]
+        target = targets[f"{self.input_object}_{self.target_field}"].type_as(output)
+
+        # Calculate the BCE loss with class weighting (but without additional loss weighting)
         if self.loss_fn == "bce":
             pos_weight = 1 / target.float().mean()
             loss = nn.functional.binary_cross_entropy_with_logits(output, target, pos_weight=pos_weight)
@@ -334,6 +379,22 @@ class ObjectHitMaskTask(Task):
             )
         return losses
 
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for ObjectHitMaskTask."""
+        output = outputs[self.output_object_hit + "_logit"]
+        target = targets[self.target_object_hit + "_" + self.target_field].type_as(output)
+
+        hit_pad = targets[self.input_constituent + "_valid"]
+        object_pad = targets[self.target_object + "_valid"]
+
+        sample_weight = target + self.null_weight * (1 - target)
+        raw_losses = {}
+        for loss_fn in self.losses.keys():
+            raw_losses[loss_fn] = loss_fns[loss_fn](
+                output, target, object_valid_mask=object_pad, input_pad_mask=hit_pad, sample_weight=sample_weight
+            )
+        return raw_losses
+
 
 class RegressionTask(Task):
     def __init__(
@@ -400,6 +461,25 @@ class RegressionTask(Task):
 
         # Compute the regression loss only for valid objects
         return {self.loss_fn_name: self.loss_weight * loss.mean()}
+
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for RegressionTask."""
+        target = torch.stack([targets[self.target_object + "_" + field] for field in self.fields], dim=-1)
+        output = outputs[self.output_object + "_regr"]
+
+        # Only compute loss for valid targets
+        mask = targets[self.target_object + "_valid"].clone()
+        target = target[mask]
+        output = output[mask]
+
+        # Compute the loss
+        loss = self.loss_fn(output, target, reduction="none")
+
+        # Average over all the objects
+        loss = torch.mean(loss, dim=-1)
+
+        # Return raw loss without weighting
+        return {self.loss_fn_name: loss.mean()}
 
     def metrics(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
         metrics = {}
@@ -501,6 +581,22 @@ class GaussianRegressionTask(Task):
         log_likelihood *= targets[self.target_object + "_valid"].type_as(log_likelihood)
         # Take the average and apply the task weight
         return {"nll": -self.loss_weight * log_likelihood.mean()}
+
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for GaussianRegressionTask."""
+        y = torch.stack([targets[self.target_object + "_" + field] for field in self.fields], dim=-1)
+
+        # Compute the standardised score vector between the targets and the predicted distribution paramaters
+        z = torch.einsum("...ij,...j->...i", outputs[self.output_object + "_ubar"], y - outputs[self.output_object + "_mu"])
+        # Compute the NLL from the score vector
+        zsq = torch.einsum("...i,...i->...", z, z)
+        jac = torch.sum(torch.diagonal(outputs[self.output_object + "_u"], offset=0, dim1=-2, dim2=-1), dim=-1)
+        log_likelihood = self.likelihood_norm - 0.5 * zsq + jac
+
+        # Only compute NLL for valid tracks or track-hit pairs
+        log_likelihood *= targets[self.target_object + "_valid"].type_as(log_likelihood)
+        # Return raw loss without weighting
+        return {"nll": -log_likelihood.mean()}
 
     def metrics(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
         y = torch.stack([targets[self.target_object + "_" + field] for field in self.fields], dim=-1)  # Point target
@@ -733,7 +829,8 @@ class ObjectChargeClassificationTask(Task):
         # Compute binary cross entropy cost
         # BCE = -[y*log(σ(x)) + (1-y)*log(1-σ(x))]
         probs = torch.sigmoid(logits_expanded)
-        cost = -(target_expanded * torch.log(probs + 1e-8) + (1 - target_expanded) * torch.log(1 - probs + 1e-8))
+        epsilon = torch.tensor(1e-8, device=probs.device, dtype=probs.dtype)
+        cost = -(target_expanded * torch.log(probs + epsilon) + (1 - target_expanded) * torch.log(1 - probs + epsilon))
         
         return {"charge_bce": self.cost_weight * cost}
 
@@ -756,16 +853,57 @@ class ObjectChargeClassificationTask(Task):
         valid_mask = targets[self.target_object + "_valid"].view(-1)
         loss = loss[valid_mask]
         
-        return {"charge_bce": self.loss_weight * loss.mean() if loss.numel() > 0 else torch.tensor(0.0, device=loss.device)}
+        if loss.numel() > 0:
+            return {"charge_bce": self.loss_weight * loss.mean()}
+        else:
+            return {"charge_bce": torch.tensor(0.0, device=logits.device, dtype=logits.dtype)}
+
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for ObjectChargeClassificationTask."""
+        logits = outputs[self.output_object + "_charge_logits"]
+        charge = targets[self.target_object + "_" + self.field]
+        
+        # Map charge (-1, +1) to binary targets (0, 1)
+        # Handle NaN values by setting them to 0 temporarily (they'll be masked out by valid mask)
+        target_binary = torch.nan_to_num((charge + 1) / 2, nan=0.0)  # -1 -> 0, +1 -> 1
+        
+        # Compute binary cross-entropy loss
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits.view(-1),
+            target_binary.view(-1),
+            reduction="none",
+        )
+        
+        # Only consider valid targets (this will filter out NaN charge values)
+        valid_mask = targets[self.target_object + "_valid"].view(-1)
+        loss = loss[valid_mask]
+        
+        # Return raw loss without weighting
+        if loss.numel() > 0:
+            return {"charge_bce": loss.mean()}
+        else:
+            return {"charge_bce": torch.tensor(0.0, device=logits.device, dtype=logits.dtype)}
 
     def metrics(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
         pred_charge = preds[self.output_object + "_" + self.field]
         true_charge = targets[self.target_object + "_" + self.field]
         valid_mask = targets[self.target_object + "_valid"]
         
-        # Calculate accuracy for valid targets
-        correct = (pred_charge[valid_mask] == true_charge[valid_mask]).float()
-        accuracy = correct.mean() if correct.numel() > 0 else torch.tensor(0.0)
+        # Filter for valid targets only (this handles NaN charge values)
+        valid_pred_charge = pred_charge[valid_mask]
+        valid_true_charge = true_charge[valid_mask]
+        
+        # Remove any remaining NaN values from true charge (extra safety)
+        charge_valid_mask = ~torch.isnan(valid_true_charge)
+        if charge_valid_mask.any():
+            final_pred_charge = valid_pred_charge[charge_valid_mask]
+            final_true_charge = valid_true_charge[charge_valid_mask]
+            
+            # Calculate accuracy for valid targets
+            correct = (final_pred_charge == final_true_charge).float()
+            accuracy = correct.mean() if correct.numel() > 0 else torch.tensor(0.0, device=pred_charge.device)
+        else:
+            accuracy = torch.tensor(0.0, device=pred_charge.device)
         
         return {"charge_acc": accuracy}
 
@@ -922,6 +1060,30 @@ class ClassificationTask(Task):
         losses = losses[targets[f"{self.target_object}_valid"].view(-1)]
         return {"bce": self.loss_weight * losses.mean()}
 
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for ClassificationTask."""
+        # Get the targets and predictions
+        target = torch.stack([targets[self.target_object + "_" + class_name] for class_name in self.classes], dim=-1)
+        logits = outputs[f"{self.output_object}_logits"]
+
+        # Put the class weights into a tensor with the correct dtype
+        class_weights = None
+        if self.class_weights is not None:
+            class_weights = self.class_weights_values.type_as(target)
+
+        # Compute the loss, using the class weights
+        losses = torch.nn.functional.cross_entropy(
+            logits.view(-1, logits.shape[-1]),
+            target.view(-1, target.shape[-1]),
+            weight=class_weights,
+            reduction="none",
+        )
+
+        # Only consider valid targets
+        losses = losses[targets[f"{self.target_object}_valid"].view(-1)]
+        # Return raw loss without weighting
+        return {"bce": losses.mean()}
+
     def metrics(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
         metrics = {}
         for class_name in self.classes:
@@ -1024,6 +1186,16 @@ class ObjectClassificationTask(Task):
             losses[loss_fn] = loss_weight * loss_fns[loss_fn](output, target, mask=None, weight=self.class_weights)
         return losses
 
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for ObjectClassificationTask."""
+        raw_losses = {}
+        output = outputs[self.output_object + "_class_prob"]
+        target = targets[self.target_object + "_class"].long()
+        # Calculate the loss from each specified loss function without weights.
+        for loss_fn in self.losses.keys():
+            raw_losses[loss_fn] = loss_fns[loss_fn](output, target, mask=None, weight=self.class_weights)
+        return raw_losses
+
     def query_mask(self, outputs: dict[str, Tensor]) -> Tensor | None:
         if not self.mask_queries:
             return None
@@ -1108,6 +1280,22 @@ class IncidenceRegressionTask(Task):
             losses[loss_fn] = loss_weight * loss_fns[loss_fn](output, target, mask=mask)
 
         return losses
+
+    def raw_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute raw unweighted losses for IncidenceRegressionTask."""
+        raw_losses = {}
+        output = outputs[self.output_object + "_incidence"]
+        target = targets[self.target_object + "_incidence"].type_as(output)
+
+        # Create a mask for valid nodes and objects
+        node_mask = targets[self.input_constituent + "_valid"].unsqueeze(1).expand_as(output)
+        object_mask = targets[self.target_object + "_valid"].unsqueeze(-1).expand_as(output)
+        mask = node_mask & object_mask
+        # Calculate the loss from each specified loss function without weights.
+        for loss_fn in self.losses.keys():
+            raw_losses[loss_fn] = loss_fns[loss_fn](output, target, mask=mask)
+
+        return raw_losses
 
 
 class IncidenceBasedRegressionTask(RegressionTask):

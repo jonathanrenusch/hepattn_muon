@@ -27,10 +27,12 @@ import torch
 import lightning.pytorch as pl
 from lightning.pytorch.cli import ArgsType
 from torch import nn
+import sys
 
 from hepattn.experiments.atlas_muon.data import AtlasMuonDataModule
 from hepattn.models.wrapper import ModelWrapper
 from hepattn.utils.cli import CLI
+
 
 
 class OptimizedWrapperModule(ModelWrapper):
@@ -45,6 +47,7 @@ class OptimizedWrapperModule(ModelWrapper):
         super().__init__(name, model, lrs_config, optimizer, mtl)
         # Store raw losses for objective function
         self.validation_raw_losses = []
+        self.final_validation_raw_losses = []  # Store final raw losses for objective function
 
     def log_custom_metrics(self, preds, targets, stage):
         # Just log predictions from the final layer
@@ -136,15 +139,10 @@ class OptimizedWrapperModule(ModelWrapper):
     def compute_raw_losses(self, outputs, targets):
         """Compute raw losses from all tasks without weighting.
         
-        This function attempts to compute unweighted losses by calling each task's
-        loss function and then extracting the raw loss components by dividing out
-        the loss weights. This provides a fairer comparison across different 
-        hyperparameter configurations since the raw loss values are independent
-        of the specific loss weights being tuned.
-        
-        Note: This approach works by reverse-engineering the raw losses from the
-        weighted losses returned by each task. While not perfect, it's more robust
-        than trying to reimplement each task's loss computation.
+        This function computes unweighted losses by calling each task's new
+        raw_loss() method, which returns the loss values before applying 
+        the task-specific loss weights. This provides a fair comparison 
+        across different hyperparameter configurations.
         """
         raw_losses = {}
         
@@ -156,36 +154,12 @@ class OptimizedWrapperModule(ModelWrapper):
                     continue
                 
                 task_outputs = layer_outputs[task.name]
-                task_losses = task.loss(task_outputs, targets)
+                task_raw_losses = task.raw_loss(task_outputs, targets)
                 
-                # Attempt to extract raw losses based on task characteristics
-                for loss_name, loss_value in task_losses.items():
-                    try:
-                        if hasattr(task, 'losses') and isinstance(task.losses, dict):
-                            # For dict-based losses (ObjectValidTask, ObjectHitMaskTask)
-                            # The loss value already includes the weight, so divide by it
-                            if loss_name in task.losses:
-                                weight = task.losses[loss_name]
-                                raw_loss = loss_value / weight if weight != 0 else loss_value
-                            else:
-                                raw_loss = loss_value
-                        elif hasattr(task, 'loss_weight'):
-                            # For weight-based losses (ObjectRegressionTask, ObjectChargeClassificationTask)
-                            # The loss value already includes the weight, so divide by it
-                            raw_loss = loss_value / task.loss_weight if task.loss_weight != 0 else loss_value
-                        else:
-                            # Fallback: assume the loss is already raw
-                            raw_loss = loss_value
-                        
-                        # Store with descriptive keys
-                        key = f"{layer_name}_{task.name}_raw_{loss_name}"
-                        raw_losses[key] = raw_loss
-                        
-                    except Exception as e:
-                        # If we can't extract raw loss, store the weighted version
-                        print(f"Warning: Could not extract raw loss for {task.name}_{loss_name}: {e}")
-                        key = f"{layer_name}_{task.name}_weighted_{loss_name}"
-                        raw_losses[key] = loss_value
+                # Store with descriptive keys
+                for loss_name, loss_value in task_raw_losses.items():
+                    key = f"{layer_name}_{task.name}_raw_{loss_name}"
+                    raw_losses[key] = loss_value
         
         return raw_losses
 
@@ -213,28 +187,12 @@ class OptimizedWrapperModule(ModelWrapper):
 
     def on_validation_epoch_end(self):
         """Called at the end of validation epoch."""
+        # Store raw losses before calling super() which might clear them
+        self.final_validation_raw_losses = self.validation_raw_losses.copy()
+        
         super().on_validation_epoch_end()
         # Clear the raw losses for next epoch
         self.validation_raw_losses = []
-
-
-class OptunaReportCallback(pl.Callback):
-    """Callback to report validation metrics to Optuna for pruning."""
-    
-    def __init__(self, trial: optuna.Trial):
-        self.trial = trial
-    
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Report validation loss to Optuna after each validation epoch."""
-        # Get current validation loss
-        current_val_loss = trainer.callback_metrics.get("val/loss", float('inf'))
-        
-        # Report to Optuna for pruning decisions
-        self.trial.report(current_val_loss, trainer.current_epoch)
-        
-        # Check if trial should be pruned
-        if self.trial.should_prune():
-            raise optuna.TrialPruned()
 
 
 def suggest_hyperparameters(trial: optuna.Trial) -> Dict[str, Any]:
@@ -399,12 +357,15 @@ def objective(trial: optuna.Trial, base_config: Dict[str, Any], gpu_id: int) -> 
         # Get the best validation loss
         best_val_loss = cli.trainer.callback_metrics.get("val/loss", float('inf'))
         
+
+        sys.stdout.flush()
+        
         # Also compute the sum of raw losses from the final validation epoch
         # This provides an unweighted objective for optimization
-        if hasattr(cli.model, 'validation_raw_losses') and cli.model.validation_raw_losses:
+        if hasattr(cli.model, 'final_validation_raw_losses') and cli.model.final_validation_raw_losses:
             # Average the raw losses across all validation batches
             raw_loss_sums = {}
-            for batch_losses in cli.model.validation_raw_losses:
+            for batch_losses in cli.model.final_validation_raw_losses:
                 for loss_name, loss_value in batch_losses.items():
                     if loss_name not in raw_loss_sums:
                         raw_loss_sums[loss_name] = []
@@ -415,11 +376,16 @@ def objective(trial: optuna.Trial, base_config: Dict[str, Any], gpu_id: int) -> 
                 sum(losses) / len(losses) for losses in raw_loss_sums.values()
             )
             print("="*30,"raw_losses_were used")
+            print(f"Trial {trial.number} completed. Best val loss: {best_val_loss:.4f}, Total raw loss: {total_raw_loss:.4f}")
+            sys.stdout.flush()
             # Use raw loss sum as objective (lower is better)
             objective_value = total_raw_loss
         else:
+            print(f"DEBUG: Trial {trial.number} - No raw losses found, falling back to validation loss")
+            sys.stdout.flush()
             # Fallback to validation loss if raw losses are not available
             objective_value = float(best_val_loss)
+
         
         return objective_value
         

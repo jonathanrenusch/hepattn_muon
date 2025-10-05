@@ -1,8 +1,8 @@
 seed_everything: 42
 
 data:
-  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500
-  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
   test_dir: /scratch/user/j/jorenusc/tracking/data_gen/ml_test_data_150K_processed
   
   num_workers: 12 # This allows 4 parrallel runs per H100 node (48 cores)
@@ -52,8 +52,8 @@ data:
 
 trainer:
   # Training stuff here
-  # max_epochs: 50
-  max_epochs: 2
+  max_epochs: 50
+  # max_epochs: 2
   num_sanity_val_steps: 1
   accelerator: gpu
   precision: bf16-mixed
@@ -94,7 +94,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 1
+        patience: 5
         min_delta: 0.0
         mode: min
         verbose: True
@@ -159,7 +159,7 @@ model:
                   init_args:
                     input_size: 22
                     activation: null  # If null, defaults to SwiGLU()
-                    bias: true  # Whether to use bias in linear layers
+                    bias: false  # Whether to use bias in linear layers
                     norm_input: true  # Whether to apply LayerNorm to input
                 posenc:
                   class_path: hepattn.models.posenc.PositionEncoder
@@ -213,8 +213,8 @@ model:
                 mask_queries: false
                 dense_kwargs:
                   activation: null  # If null, defaults to SwiGLU()
-                  dropout: 0.3  # Dropout probability
-                  bias: true  # Whether to use bias in linear layers
+                  dropout: 0.1  # Dropout probability
+                  bias: false  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
             - class_path: hepattn.models.task.ObjectHitMaskTask
               init_args:
@@ -226,8 +226,8 @@ model:
                 null_weight: 0.1
                 dense_kwargs:
                   activation: null  # If null, defaults to SwiGLU()
-                  dropout: 0.3  # Dropout probability
-                  bias: true  # Whether to use bias in linear layers
+                  dropout: 0.1  # Dropout probability
+                  bias: false  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
             - class_path: hepattn.models.task.ObjectRegressionTask
               init_args:
@@ -241,8 +241,8 @@ model:
                 - truthMuon_pt
                 dense_kwargs:
                   activation: null  # If null, defaults to SwiGLU()
-                  dropout: 0.3  # Dropout probability
-                  bias: true  # Whether to use bias in linear layers
+                  dropout: 0.1  # Dropout probability
+                  bias: false  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input
             - class_path: hepattn.models.task.ObjectChargeClassificationTask
               init_args:
@@ -253,6 +253,6 @@ model:
                 field: truthMuon_q
                 dense_kwargs:
                   activation: null  # If null, defaults to SwiGLU()
-                  dropout: 0.3  # Dropout probability
-                  bias: true  # Whether to use bias in linear layers
+                  dropout: 0.1  # Dropout probability
+                  bias: false  # Whether to use bias in linear layers
                   norm_input: true  # Whether to apply LayerNorm to input

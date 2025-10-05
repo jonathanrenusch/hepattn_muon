@@ -508,23 +508,77 @@ def process_worker_files(args: Tuple) -> Dict:
                             hit2track_mask = np.isin(hits['spacePoint_truthLink'], remaining_tracks)
                             modified_truth_link = hits['spacePoint_truthLink'].copy()
                             modified_truth_link[~hit2track_mask] = -1
+                            
+                            # CRITICAL FIX: Renormalize truthLink values to sequential [0,1,2,...]
+                            # to match track array indices
+                            remaining_tracks_sorted = np.sort(remaining_tracks)
+                            for new_idx, original_track_id in enumerate(remaining_tracks_sorted):
+                                track_mask = (hits['spacePoint_truthLink'] == original_track_id)
+                                modified_truth_link[track_mask] = new_idx
+                            
                             hits["spacePoint_truthLink"] = modified_truth_link
                             
-                            # Create track mask based on original track indices after technology filtering
-                            og_links_filtered = np.unique(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk][keep_mask])
-                            track_mask = np.isin(og_links_filtered[og_links_filtered != -1], remaining_tracks)
-                            tracks = {branch: track_features_chunk[branch][event_idx_in_chunk][og_links_filtered != -1][track_mask] for branch in track_features}
+                            # Create track data - we need to reorder tracks to match the new truthLink indices
+                            # The tracks should be ordered by the remaining_tracks_sorted order
+                            all_tracks_for_event = {}
+                            for branch in track_features:
+                                all_tracks_for_event[branch] = track_features_chunk[branch][event_idx_in_chunk]
+                            
+                            # Keep only tracks that correspond to remaining_tracks_sorted, in order
+                            # FIXED: Use original track IDs directly as indices into the track array
+                            track_data_ordered = {branch: [] for branch in track_features}
+                            for original_track_id in remaining_tracks_sorted:
+                                # Use original_track_id directly as index into the track array
+                                # Add this track's data to our ordered list
+                                for branch in track_features:
+                                    track_data_ordered[branch].append(all_tracks_for_event[branch][original_track_id])
+                            
+                            # Convert lists to numpy arrays
+                            tracks = {}
+                            for branch in track_features:
+                                if len(track_data_ordered[branch]) > 0:
+                                    tracks[branch] = np.array(track_data_ordered[branch])
+                                else:
+                                    tracks[branch] = np.array([], dtype=np.float32)
                             
                         else:
                             # No track filtering - use all valid tracks
                             valid_tracks_count += len(valid_tracks)
                             total_valid_events += 1  # Count this as a valid event
                             
-                            # For tracks, we keep all tracks regardless of technology filtering
-                            # since technology filtering only affects hits, not tracks themselves
-                            og_links_filtered = np.unique(hit_features_chunk['spacePoint_truthLink'][event_idx_in_chunk][keep_mask])
-                            track_mask = og_links_filtered != -1
-                            tracks = {branch: track_features_chunk[branch][event_idx_in_chunk][og_links_filtered != -1] for branch in track_features}
+                            # CRITICAL FIX: Even when not filtering tracks, we need to renormalize 
+                            # truthLink values to sequential [0,1,2,...] to match track array indices
+                            valid_tracks_sorted = np.sort(valid_tracks)
+                            modified_truth_link = hits['spacePoint_truthLink'].copy()
+                            
+                            # Renormalize truthLink values to [0,1,2,...]
+                            for new_idx, original_track_id in enumerate(valid_tracks_sorted):
+                                track_mask = (hits['spacePoint_truthLink'] == original_track_id)
+                                modified_truth_link[track_mask] = new_idx
+                            
+                            hits["spacePoint_truthLink"] = modified_truth_link
+                            
+                            # Create track data - reorder tracks to match valid_tracks_sorted
+                            all_tracks_for_event = {}
+                            for branch in track_features:
+                                all_tracks_for_event[branch] = track_features_chunk[branch][event_idx_in_chunk]
+                            
+                            # Keep only tracks that correspond to valid_tracks_sorted, in order
+                            # FIXED: Use original track IDs directly as indices into the track array
+                            track_data_ordered = {branch: [] for branch in track_features}
+                            for original_track_id in valid_tracks_sorted:
+                                # Use original_track_id directly as index into the track array
+                                # Add this track's data to our ordered list
+                                for branch in track_features:
+                                    track_data_ordered[branch].append(all_tracks_for_event[branch][original_track_id])
+                            
+                            # Convert lists to numpy arrays
+                            tracks = {}
+                            for branch in track_features:
+                                if len(track_data_ordered[branch]) > 0:
+                                    tracks[branch] = np.array(track_data_ordered[branch])
+                                else:
+                                    tracks[branch] = np.array([], dtype=np.float32)
                         
                         hits_chunk.append(hits)
                         tracks_chunk.append(tracks)

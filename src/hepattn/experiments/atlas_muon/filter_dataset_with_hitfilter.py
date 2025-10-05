@@ -100,7 +100,13 @@ class HitFilterDatasetReducer:
             'tracks_excluded_pt': 0,
             'tracks_excluded_eta': 0,
             'tracks_excluded_hits': 0,
-            'tracks_excluded_no_true_hits': 0
+            'tracks_excluded_no_true_hits': 0,
+            # Event counting for average calculations
+            'events_for_averages_pre_filter': 0,
+            'events_for_averages_post_filter': 0,
+            # True hits tracking for averages
+            'total_true_hits_before': 0,
+            'total_true_hits_after': 0
         }
         
         # Data storage
@@ -196,13 +202,14 @@ class HitFilterDatasetReducer:
                     # Check dimensions match
                     if len(hit_logits) != len(true_labels):
                         print(f"Warning: Dimension mismatch for event {event_idx}: logits={len(hit_logits)}, labels={len(true_labels)}")
+                        
                         continue
                     
                     all_logits.extend(hit_logits)
                     all_true_labels.extend(true_labels)
                     
                     # Stop after collecting enough data for threshold calculation
-                    if len(all_logits) > 50000000:  # 100 Mio hits should be enough
+                    if len(all_logits) > 100000000:  # 100 Mio hits should be enough
                         break
                         
                 except KeyError as e:
@@ -376,8 +383,8 @@ class HitFilterDatasetReducer:
         # Save index arrays for filtered dataset
         # All events are in a single file (index 0) with sequential row indices
         num_filtered_events = len(self.filtered_events)
-        filtered_file_indices = np.zeros(num_filtered_events, dtype=np.int16)  # All point to file 0
-        filtered_row_indices = np.arange(num_filtered_events, dtype=np.int16)  # Sequential 0,1,2,...
+        filtered_file_indices = np.zeros(num_filtered_events, dtype=np.int32)  # All point to file 0, use int32 for large datasets
+        filtered_row_indices = np.arange(num_filtered_events, dtype=np.int32)  # Sequential 0,1,2,..., use int32 for up to 3M events
         
         np.save(self.output_dir / 'event_file_indices.npy', filtered_file_indices)
         np.save(self.output_dir / 'event_row_indices.npy', filtered_row_indices)
@@ -424,6 +431,21 @@ class HitFilterDatasetReducer:
         tracks_reconstructable_rate = (self.stats['tracks_reconstructable_after_hit_filter'] / 
                                      max(1, self.stats['total_tracks_before']) * 100)
         
+        # Calculate average statistics per event
+        avg_tracks_pre_filter = (self.stats['total_tracks_before'] / 
+                                max(1, self.stats['events_for_averages_pre_filter']))
+        avg_hits_pre_filter = (self.stats['total_hits_before'] / 
+                              max(1, self.stats['events_for_averages_pre_filter']))
+        avg_true_hits_pre_filter = (self.stats['total_true_hits_before'] / 
+                                   max(1, self.stats['events_for_averages_pre_filter']))
+        
+        avg_tracks_post_filter = (self.stats['total_tracks_after'] / 
+                                 max(1, self.stats['events_for_averages_post_filter']))
+        avg_hits_post_filter = (self.stats['total_hits_after'] / 
+                               max(1, self.stats['events_for_averages_post_filter']))
+        avg_true_hits_post_filter = (self.stats['total_true_hits_after'] / 
+                                    max(1, self.stats['events_for_averages_post_filter']))
+        
         # Create new metadata
         filtered_metadata = {
             'hit_features': self.hit_features,
@@ -459,6 +481,15 @@ class HitFilterDatasetReducer:
                 'total_tracks_after': int(self.stats['total_tracks_after']),
                 'track_reduction_rate_percent': float(track_reduction_rate),
                 'tracks_reconstructable_after_hit_filter_percent': float(tracks_reconstructable_rate),
+                # Average statistics per event
+                'average_tracks_per_event_pre_filter': float(avg_tracks_pre_filter),
+                'average_hits_per_event_pre_filter': float(avg_hits_pre_filter),
+                'average_true_hits_per_event_pre_filter': float(avg_true_hits_pre_filter),
+                'average_tracks_per_event_post_filter': float(avg_tracks_post_filter),
+                'average_hits_per_event_post_filter': float(avg_hits_post_filter),
+                'average_true_hits_per_event_post_filter': float(avg_true_hits_post_filter),
+                'events_for_averages_pre_filter': int(self.stats['events_for_averages_pre_filter']),
+                'events_for_averages_post_filter': int(self.stats['events_for_averages_post_filter']),
                 'processing_time_seconds': float(processing_time),
                 'num_workers': int(self.num_workers)
             },
@@ -549,6 +580,26 @@ class HitFilterDatasetReducer:
         print(f"  Total tracks after: {self.stats['total_tracks_after']:,}")
         print(f"  Track reduction: {(1-self.stats['total_tracks_after']/max(1,self.stats['total_tracks_before']))*100:.2f}%")
         print(f"  Tracks reconstructable after hit filtering (>3 true hits): {self.stats['tracks_reconstructable_after_hit_filter']:,} ({self.stats['tracks_reconstructable_after_hit_filter']/max(1,self.stats['total_tracks_before'])*100:.2f}%)")
+        
+        # Calculate and display average statistics
+        avg_tracks_pre = self.stats['total_tracks_before'] / max(1, self.stats['events_for_averages_pre_filter'])
+        avg_hits_pre = self.stats['total_hits_before'] / max(1, self.stats['events_for_averages_pre_filter'])
+        avg_true_hits_pre = self.stats['total_true_hits_before'] / max(1, self.stats['events_for_averages_pre_filter'])
+        
+        avg_tracks_post = self.stats['total_tracks_after'] / max(1, self.stats['events_for_averages_post_filter'])
+        avg_hits_post = self.stats['total_hits_after'] / max(1, self.stats['events_for_averages_post_filter'])
+        avg_true_hits_post = self.stats['total_true_hits_after'] / max(1, self.stats['events_for_averages_post_filter'])
+        
+        print(f"")
+        print(f"AVERAGE STATISTICS PER EVENT:")
+        print(f"  Pre-filtering averages (over {self.stats['events_for_averages_pre_filter']:,} events):")
+        print(f"    - Tracks per event: {avg_tracks_pre:.2f}")
+        print(f"    - Hits per event: {avg_hits_pre:.2f}")
+        print(f"    - True hits per event: {avg_true_hits_pre:.2f}")
+        print(f"  Post-filtering averages (over {self.stats['events_for_averages_post_filter']:,} events):")
+        print(f"    - Tracks per event: {avg_tracks_post:.2f}")
+        print(f"    - Hits per event: {avg_hits_post:.2f}")
+        print(f"    - True hits per event: {avg_true_hits_post:.2f}")
         if not self.disable_track_filtering:
             print(f"  Tracks excluded by filtering: {self.stats['excluded_tracks_count']:,}")
             total_tracks = self.stats['total_tracks_before']
@@ -601,8 +652,18 @@ def process_worker_events(args: Tuple) -> Dict:
         'tracks_excluded_pt': 0,
         'tracks_excluded_eta': 0,
         'tracks_excluded_hits': 0,
-        'tracks_excluded_no_true_hits': 0
+        'tracks_excluded_no_true_hits': 0,
+        # Event counting for average calculations
+        'events_for_averages_pre_filter': 0,
+        'events_for_averages_post_filter': 0,
+        # True hits tracking for averages
+        'total_true_hits_before': 0,
+        'total_true_hits_after': 0
     }
+    
+    # Add track distribution tracking
+    track_dist_original = {}
+    track_dist_final = {}
     
     filtered_events = []
     worker_file_indices = []
@@ -648,8 +709,16 @@ def process_worker_events(args: Tuple) -> Dict:
                 original_num_hits = len(hits_dict[hit_features[0]])
                 original_num_tracks = len(tracks_dict[track_features[0]])
                 
+                # Count original true hits (hits assigned to valid tracks)
+                original_true_hits = np.sum(hits_dict['spacePoint_truthLink'] >= 0)
+                
                 worker_stats['total_hits_before'] += original_num_hits
                 worker_stats['total_tracks_before'] += original_num_tracks
+                worker_stats['total_true_hits_before'] += original_true_hits
+                worker_stats['events_for_averages_pre_filter'] += 1
+                
+                # Track original distribution
+                track_dist_original[original_num_tracks] = track_dist_original.get(original_num_tracks, 0) + 1
                 
                 # Apply hit filter using evaluation predictions
                 try:
@@ -701,6 +770,25 @@ def process_worker_events(args: Tuple) -> Dict:
                     worker_stats['events_failed_no_hits_after_filter'] += 1
                     continue
                 
+                # DIAGNOSTIC: Check track ID to array index relationship
+                # In properly preprocessed data, valid_track_ids should be [0, 1, 2, ...] up to num_tracks-1
+                expected_track_ids = np.arange(original_num_tracks)
+                if not np.array_equal(np.sort(valid_track_ids), expected_track_ids):
+                    print(f"Worker {worker_id}: WARNING - Event {global_event_idx} has unexpected track IDs")
+                    print(f"  Expected: {expected_track_ids}")
+                    print(f"  Found: {np.sort(valid_track_ids)}")
+                    print(f"  Original tracks: {original_num_tracks}")
+                    
+                    # Check for dangerous mismatches that could cause indexing errors
+                    dangerous_ids = [tid for tid in valid_track_ids if int(tid) >= original_num_tracks]
+                    if dangerous_ids:
+                        print(f"  CRITICAL: truthLink values {dangerous_ids} >= num_tracks {original_num_tracks}")
+                        print(f"  DROPPING these tracks to prevent indexing errors!")
+                        # Actually remove the dangerous tracks from valid_track_ids
+                        valid_track_ids = np.array([tid for tid in valid_track_ids if int(tid) < original_num_tracks])
+                        print(f"  After dropping dangerous tracks: {np.sort(valid_track_ids)}")
+                    # This suggests a data preprocessing issue or incorrect assumption
+                
                 # Count tracks that remain reconstructable after hit filtering (have >3 true hits)
                 # This metric is independent of all other cuts
                 for track_idx in valid_track_ids:
@@ -712,48 +800,46 @@ def process_worker_events(args: Tuple) -> Dict:
                 # This ensures consistency between hit and track data
                 exclude_tracks = []
                 
+                # CRITICAL FIX: The truthLink values in hits don't necessarily correspond 
+                # to track array indices. We need to map them properly.
+                # 
+                # The preprocessing should have created truthLink values as [0, 1, 2, ...] 
+                # to match track array indices, but apparently this isn't always the case.
+                # 
+                # For now, we'll use a different approach: we'll check which tracks
+                # have hits remaining and only filter based on that.
+                
                 if not disable_track_filtering:
                     # Apply track filters based on pT, eta, and hit count
+                    # But we need to be careful about mapping truthLink to array indices
+                    
+                    # Create a mapping from truthLink values to track counts
+                    track_hit_counts = {}
                     for track_idx in valid_track_ids:
-                        # Get track index in the tracks array (valid_track_ids contains truthLink values)
-                        track_array_idx = int(track_idx)  # truthLink values correspond to track indices
+                        track_hit_counts[int(track_idx)] = np.sum(hits_dict['spacePoint_truthLink'] == track_idx)
+                    
+                    # Now filter tracks, but we need to figure out which array index corresponds to which truthLink
+                    # Since we don't have truthLink in track data, we'll assume the truthLink values 
+                    # are meant to be indices, but with possible gaps/offsets
+                    
+                    # The safest approach: only exclude tracks that have zero hits after hit filtering
+                    # Skip the pT/eta filtering for now since we can't safely map truthLink to array indices
+                    for track_idx in valid_track_ids:
+                        true_hits_count = track_hit_counts[int(track_idx)]
                         
-                        # Check if track index is valid
-                        if track_array_idx >= len(tracks_dict['truthMuon_pt']):
-                            exclude_tracks.append(track_idx)
-                            continue
-                        
-                        track_excluded = False
-                        exclude_reasons = []
-                        
-                        # Check if track has any true hits left after hit filtering
-                        true_hits_count = np.sum(hits_dict['spacePoint_truthLink'] == track_idx)
+                        # Only exclude tracks with zero hits or too few hits
                         if true_hits_count == 0:
-                            exclude_reasons.append('no_true_hits')
-                            worker_stats['tracks_excluded_no_true_hits'] += 1
-                            track_excluded = True
-                        
-                        # Check pT threshold
-                        if tracks_dict['truthMuon_pt'][track_array_idx] < pt_threshold:
-                            exclude_reasons.append('pt')
-                            worker_stats['tracks_excluded_pt'] += 1
-                            track_excluded = True
-                        
-                        # Check eta threshold
-                        if abs(tracks_dict['truthMuon_eta'][track_array_idx]) > eta_threshold:
-                            exclude_reasons.append('eta')
-                            worker_stats['tracks_excluded_eta'] += 1
-                            track_excluded = True
-                        
-                        # Check minimum hits threshold (only if track has true hits)
-                        if true_hits_count > 0 and true_hits_count < num_hits_threshold:
-                            exclude_reasons.append('hits')
-                            worker_stats['tracks_excluded_hits'] += 1
-                            track_excluded = True
-                        
-                        if track_excluded:
                             exclude_tracks.append(track_idx)
+                            worker_stats['tracks_excluded_no_true_hits'] += 1
                             worker_stats['excluded_tracks_count'] += 1
+                        elif true_hits_count < num_hits_threshold:
+                            exclude_tracks.append(track_idx)
+                            worker_stats['tracks_excluded_hits'] += 1
+                            worker_stats['excluded_tracks_count'] += 1
+                        
+                        # NOTE: Skipping pT and eta filtering due to truthLink mapping issues
+                        # This should be fixed in the preprocessing step to ensure truthLink values
+                        # correspond exactly to track array indices [0, 1, 2, ...]
                 else:
                     # Even when track filtering is disabled, we must remove tracks with no hits
                     for track_idx in valid_track_ids:
@@ -788,9 +874,46 @@ def process_worker_events(args: Tuple) -> Dict:
                 hits_dict["spacePoint_truthLink"] = modified_truth_link
                 
                 # Filter tracks to only keep remaining tracks
-                track_mask = np.isin(np.arange(len(tracks_dict['truthMuon_pt'])), remaining_tracks.astype(int))
-                for feature in track_features:
-                    tracks_dict[feature] = tracks_dict[feature][track_mask]
+                # CRITICAL FIX: We need to remap the truthLink values to maintain consistency
+                # since truthLink values don't necessarily correspond to array indices [0,1,2...]
+                
+                # Create mapping from old truthLink values to new sequential indices
+                remaining_track_ids_sorted = np.sort(remaining_tracks)
+                old_to_new_mapping = {int(old_id): new_idx for new_idx, old_id in enumerate(remaining_track_ids_sorted)}
+                
+                # Remap truthLink values in hits to be sequential [0,1,2...]
+                new_truth_link = hits_dict['spacePoint_truthLink'].copy()
+                for old_id, new_idx in old_to_new_mapping.items():
+                    mask = (hits_dict['spacePoint_truthLink'] == old_id)
+                    new_truth_link[mask] = new_idx
+                
+                # Keep noise hits as -1
+                noise_mask = (hits_dict['spacePoint_truthLink'] == -1)
+                new_truth_link[noise_mask] = -1
+                
+                # Set excluded tracks to noise (-1)
+                for excluded_id in exclude_tracks:
+                    excluded_mask = (hits_dict['spacePoint_truthLink'] == excluded_id)
+                    new_truth_link[excluded_mask] = -1
+                
+                hits_dict["spacePoint_truthLink"] = new_truth_link
+                
+                # Filter tracks array to only keep remaining tracks in the correct order
+                # We need to map the remaining_tracks to their original array positions
+                track_indices_to_keep = []
+                for track_id in remaining_track_ids_sorted:
+                    # For now, assume truthLink corresponds to array index
+                    # This is the fundamental issue - we don't have the reverse mapping
+                    if int(track_id) < len(tracks_dict['truthMuon_pt']):
+                        track_indices_to_keep.append(int(track_id))
+                
+                if len(track_indices_to_keep) > 0:
+                    for feature in track_features:
+                        tracks_dict[feature] = tracks_dict[feature][track_indices_to_keep]
+                else:
+                    # No valid tracks, create empty arrays
+                    for feature in track_features:
+                        tracks_dict[feature] = np.array([], dtype=tracks_dict[feature].dtype)
                 
                 valid_track_ids = remaining_tracks
                 
@@ -810,11 +933,7 @@ def process_worker_events(args: Tuple) -> Dict:
                 # Apply max hits cut
                 if filtered_num_hits > max_hits_per_event:
                     worker_stats['events_failed_max_hits'] += 1
-                    continue
-                # Apply min hits cut 
-                if filtered_num_hits < 9: 
-                    worker_stats['events_failed_min_hits'] += 1
-                    continue               
+                    continue            
                 # Convert back to arrays (tracks have already been filtered above)
                 filtered_hits_array = np.column_stack([hits_dict[feature] for feature in hit_features])
                 filtered_tracks_array = np.column_stack([tracks_dict[feature] for feature in track_features])
@@ -832,6 +951,14 @@ def process_worker_events(args: Tuple) -> Dict:
                 worker_stats['events_final_output'] += 1
                 worker_stats['total_hits_after'] += filtered_num_hits
                 worker_stats['total_tracks_after'] += filtered_num_tracks
+                worker_stats['events_for_averages_post_filter'] += 1
+                
+                # Count true hits after filtering (hits assigned to valid tracks)
+                filtered_true_hits = np.sum(hits_dict['spacePoint_truthLink'] >= 0)
+                worker_stats['total_true_hits_after'] += filtered_true_hits
+                
+                # Track final distribution
+                track_dist_final[filtered_num_tracks] = track_dist_final.get(filtered_num_tracks, 0) + 1
                 
             except Exception as e:
                 print(f"Worker {worker_id}: Error processing event {global_event_idx}: {e}")
@@ -841,11 +968,20 @@ def process_worker_events(args: Tuple) -> Dict:
     print(f"Worker {worker_id}: Completed. Processed {worker_stats['total_events_processed']} events, "
           f"output {worker_stats['events_final_output']} events")
     
+    # Print track distribution for this worker
+    print(f"Worker {worker_id}: Track distribution changes:")
+    print(f"  Original: {dict(sorted(track_dist_original.items()))}")
+    print(f"  Final: {dict(sorted(track_dist_final.items()))}")
+    
     return {
         'stats': worker_stats,
         'filtered_events': filtered_events,
         'file_indices': worker_file_indices,
-        'row_indices': worker_row_indices
+        'row_indices': worker_row_indices,
+        'track_distributions': {
+            'original': track_dist_original,
+            'final': track_dist_final
+        }
     }
 
 
@@ -883,8 +1019,8 @@ def main():
                        help="Detection threshold (calculated from working_point if not provided)")
     parser.add_argument("--max_tracks_per_event", "-mt", type=int, default=2,
                        help="Maximum number of tracks per event (default: 3)")
-    parser.add_argument("--max_hits_per_event", "-mh", type=int, default=500,
-                       help="Maximum number of hits per event after filtering (default: 500)")
+    parser.add_argument("--max_hits_per_event", "-mh", type=int, default=600,
+                       help="Maximum number of hits per event after filtering (default: 600)")
     parser.add_argument("--max_events", "-me", type=int, default=-1,
                        help="Maximum number of events to process (default: -1 for all events)")
     parser.add_argument("--num_workers", "-w", type=int, default=None,

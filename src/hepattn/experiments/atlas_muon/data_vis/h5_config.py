@@ -11,8 +11,16 @@ from networkx import hits
 # H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5_no-NSW_no-RPC"
 # H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
 # H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts"
-H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
+# H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600"
+H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5"
+# H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600"
+# H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5"
+# H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600"
+# H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5"
+# H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5"
+# H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
 # H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
+# H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5"
 # H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
 # H5_FILEPATH = "/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts"
 # H5_FILEPATH = "/eos/project/e/end-to-end-muon-tracking/tracking/data/noNSW/ml_validation_data_144000_no-NSW"
@@ -21,7 +29,6 @@ H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_ma
 # H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5_no-NSW"
 # H5_FILEPATH = "/scratch/_no-NSW"
 # H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit500"
-# H5_FILEPATH = None
 
 # HIT_EVAL_FILEPATH = "/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5"
 HIT_EVAL_FILEPATH = None
