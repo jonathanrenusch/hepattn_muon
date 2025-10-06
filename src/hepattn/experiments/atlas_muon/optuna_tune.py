@@ -413,7 +413,7 @@ def main():
     parser.add_argument("--pruner", action="store_true", help="Enable pruning of unpromising trials")
     
     args = parser.parse_args()
-    
+
     # Load base configuration
     with open(args.base_config, 'r') as f:
         base_config = yaml.safe_load(f)
