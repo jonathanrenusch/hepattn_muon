@@ -121,7 +121,7 @@ def generate_plots_for_file(
     )
     print("\n--- Plotting number of true hits ---")
     track_analyzer.plot_and_save_true_hits_histogram(
-        dataloader=datamodule.test_dataloader(), 
+        dataloader=datamodule.test_dataloader(shuffle=True), 
         num_events=num_events,
         save_path=file_output_dir / f"{config_key}_true_hits_histogram.png",
     )
@@ -227,7 +227,7 @@ def main() -> None:
         targets=targets_eval,
     )
         datamodule_eval.setup("test")
-        test_dataloader_eval = datamodule_eval.test_dataloader()
+        test_dataloader_eval = datamodule_eval.test_dataloader(shuffle=True)
 
         print("Running quick performance stats, since HIT_EVAL_FILEPATH is not None!")
         

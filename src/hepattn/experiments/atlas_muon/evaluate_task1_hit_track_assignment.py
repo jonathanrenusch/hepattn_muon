@@ -46,10 +46,11 @@ plt.rcParams.update({
 class Task1HitTrackEvaluator:
     """Evaluator for hit-track assignment task with baseline filtering and categories."""
     
-    def __init__(self, eval_path, data_dir, output_dir, max_events=None):
+    def __init__(self, eval_path, data_dir, output_dir, max_events=None, random_seed=42):
         self.eval_path = eval_path
         self.data_dir = data_dir
         self.max_events = max_events
+        self.random_seed = random_seed
         
         # Create timestamped output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -60,9 +61,10 @@ class Task1HitTrackEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.all_tracks_dir = self.output_dir / "all_tracks"
         self.baseline_dir = self.output_dir / "baseline_tracks"
+        self.ml_region_dir = self.output_dir / "ml_region_tracks"
         self.rejected_dir = self.output_dir / "rejected_tracks"
         
-        for subdir in [self.all_tracks_dir, self.baseline_dir, self.rejected_dir]:
+        for subdir in [self.all_tracks_dir, self.baseline_dir, self.ml_region_dir, self.rejected_dir]:
             subdir.mkdir(parents=True, exist_ok=True)
         
         print(f"Task 1 Evaluator initialized")
@@ -93,7 +95,8 @@ class Task1HitTrackEvaluator:
                     'spacePoint_covXX', 'spacePoint_covXY', 'spacePoint_covYX', 'spacePoint_covYY',
                     'spacePoint_channel', 'spacePoint_layer', 'spacePoint_stationPhi', 'spacePoint_stationEta',
                     'spacePoint_stationIndex', 'spacePoint_technology',
-                    'r', 's', 'theta', 'phi'
+                    'r', 's', 'theta', 'phi' 
+                    # 'spacePoint_truthLink'
                 ]
             },
             targets={
@@ -102,14 +105,28 @@ class Task1HitTrackEvaluator:
         )
         
         self.data_module.setup("test")
-        self.test_dataloader = self.data_module.test_dataloader()
-        print(f"Data module setup complete. Test dataset size: {len(self.test_dataloader.dataset)}")
+        self.test_dataloader = self.data_module.test_dataloader(shuffle=False)
+        
+        # Create random sampling order for reproducible random evaluation
+        dataset_size = len(self.test_dataloader.dataset)
+        if self.max_events:
+            num_events_to_process = min(self.max_events, dataset_size)
+        else:
+            num_events_to_process = dataset_size
+            
+        # Create random indices for sampling
+        np.random.seed(self.random_seed)  # Use configurable random seed
+        self.random_indices = np.random.permutation(dataset_size)[:num_events_to_process]
+        
+        print(f"Data module setup complete. Test dataset size: {dataset_size}")
+        print(f"Random sampling {num_events_to_process} events with seed {self.random_seed}")
+        print(f"Random indices: {self.random_indices[:10]}{'...' if len(self.random_indices) > 10 else ''}")
 
     def collect_and_process_data(self):
-        """Collect and process data on-the-fly, applying baseline filtering."""
-        print("Collecting and processing data with baseline filtering...")
+        """Collect and process data with random sampling, applying baseline filtering."""
+        print("Collecting and processing data with random sampling and baseline filtering...")
         
-        # Data storage for all three categories
+        # Data storage for all four categories
         all_data = {
             'predictions': [], 'logits': [], 'true_assignments': [], 
             'track_info': [], 'station_indices': []
@@ -118,80 +135,100 @@ class Task1HitTrackEvaluator:
             'predictions': [], 'logits': [], 'true_assignments': [], 
             'track_info': [], 'station_indices': []
         }
+        ml_region_data = {
+            'predictions': [], 'logits': [], 'true_assignments': [], 
+            'track_info': [], 'station_indices': []
+        }
         rejected_data = {
             'predictions': [], 'logits': [], 'true_assignments': [], 
             'track_info': [], 'station_indices': []
         }
         
-        # Baseline filtering statistics
+        # Baseline filtering statistics (more granular)
         baseline_stats = {
             'total_tracks_checked': 0,
             'tracks_failed_min_hits': 0,
             'tracks_failed_eta_cuts': 0,
             'tracks_failed_pt_cuts': 0,
-            'tracks_failed_station_cuts': 0,
+            'tracks_failed_insufficient_stations': 0,  # < 3 stations total
+            'tracks_failed_hits_per_station': 0,      # >= 3 stations but < 3 stations with >= 3 hits
+            'tracks_passed_all_cuts': 0
+        }
+        
+        # ML region filtering statistics
+        ml_region_stats = {
+            'total_tracks_checked': 0,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
             'tracks_passed_all_cuts': 0
         }
         
         with h5py.File(self.eval_path, 'r') as pred_file:
-            event_count = 0
-            
-            for batch in tqdm(self.test_dataloader, desc="Processing events"):
-                if self.max_events and event_count >= self.max_events:
-                    break
-                    
-                event_id = str(event_count)
+            # Use the randomly sampled indices to access both dataset and eval file
+            for i, dataset_idx in enumerate(tqdm(self.random_indices, desc="Processing events")):
+                # Get the batch from dataset using the random index
+                batch = self.test_dataloader.dataset[dataset_idx]
+                
+                # Use the dataset index as the event_id for the eval file
+                event_id = str(dataset_idx)
                 
                 if event_id not in pred_file:
                     print(f"Warning: Event {event_id} not found in predictions file")
-                    event_count += 1
                     continue
                 
-                # Get truth information from batch
+                # Get truth information from batch (dataset still has batch dimension of 1)
                 inputs, targets = batch
-                true_station_index = inputs["hit_spacePoint_stationIndex"][0]
+                true_station_index = inputs["hit_spacePoint_stationIndex"][0].numpy().astype(np.int32)  # Remove batch dimension
+                
                 
                 # Get predictions and logits
                 pred_group = pred_file[event_id]
+                # print(targets.keys())
                 
                 # Hit-track assignment predictions and logits
                 hit_track_pred = pred_group['preds/final/track_hit_valid/track_hit_valid'][...]
                 hit_track_logits = pred_group['outputs/final/track_hit_valid/track_hit_logit'][...]
                 
-                # Truth track parameters
-                true_particle_valid = targets['particle_valid'][0]
-                true_hit_assignments = targets['particle_hit_valid'][0]
-                
+                # Truth track parameters (dataset still has batch dimension of 1)
+                true_particle_valid = targets['particle_valid'][0]  # Remove batch dimension
+                true_hit_assignments = targets['particle_hit_valid'][0]  # Remove batch dimension
+                # print("hits.keys", inputs.keys())
+                # truth_links = inputs["hit_spacePoint_truthLink"][0].numpy().astype(np.int32)
                 # Extract true particle parameters (only for valid particles)
                 valid_particles = true_particle_valid.numpy()
-                num_valid = valid_particles.sum()
+                num_valid = int(valid_particles.sum())
                 
+                # print("This is the true particle valid: ", true_particle_valid.shape)
+                # print("sum", (sum(true_hit_assignments[0] & true_hit_assignments[1]) if num_valid > 0 else 0))
+                # print("This is the true hit assignments: ", true_hit_assignments.shape)
+                # print("This is the true stations: ", true_station_index.shape)
+                # print("=" * 20)
                 if num_valid == 0:
-                    event_count += 1
                     continue
                 
                 for track_idx in range(num_valid):
                     true_hits = true_hit_assignments[track_idx].numpy()
+                    # true_hits = (truth_links == track_idx)
+                    # print("This is the true hits: ", true_hits)
                     pred_hits = hit_track_pred[0, track_idx]
                     logit_hits = hit_track_logits[0, track_idx]
+                    track_mask = true_hits.astype(bool)
+                    # Get true track parameters (handle dataset structure with batch dimension)
+                    eta_tensor = targets["particle_truthMuon_eta"][0, track_idx]  # Remove batch dimension
+                    phi_tensor = targets["particle_truthMuon_phi"][0, track_idx]  # Remove batch dimension
+                    pt_tensor = targets["particle_truthMuon_pt"][0, track_idx]    # Remove batch dimension
                     
-                    # Handle shape mismatch by taking minimum length
-                    min_hits = min(pred_hits.shape[0], true_hits.shape[0])
-                    if pred_hits.shape[0] != true_hits.shape[0]:
-                        pred_hits = pred_hits[:min_hits]
-                        true_hits = true_hits[:min_hits]
-                        logit_hits = logit_hits[:min_hits]
-                    
-                    # Get true track parameters
-                    true_eta = targets["particle_truthMuon_eta"][0, track_idx]
-                    true_phi = targets["particle_truthMuon_phi"][0, track_idx]
-                    true_pt = targets["particle_truthMuon_pt"][0, track_idx]
+                    # Handle potential multi-dimensional tensors by taking the first element if needed
+                    true_eta = eta_tensor.item() if eta_tensor.numel() == 1 else eta_tensor[0].item()
+                    true_phi = phi_tensor.item() if phi_tensor.numel() == 1 else phi_tensor[0].item()
+                    true_pt = pt_tensor.item() if pt_tensor.numel() == 1 else pt_tensor[0].item()
                     
                     track_info = {
                         'pt': true_pt,
                         'eta': true_eta, 
                         'phi': true_phi,
-                        'event_id': event_count,
+                        'event_id': dataset_idx,
                         'track_id': track_idx
                     }
                     
@@ -200,88 +237,112 @@ class Task1HitTrackEvaluator:
                     all_data['logits'].append(logit_hits)
                     all_data['true_assignments'].append(true_hits)
                     all_data['track_info'].append(track_info)
-                    all_data['station_indices'].append(true_station_index)
+                    all_data['station_indices'].append(true_station_index[track_mask])
                     
                     # Apply baseline filtering
                     baseline_stats['total_tracks_checked'] += 1
                     
+                    # Apply ML region filtering (in parallel with baseline)
+                    ml_region_stats['total_tracks_checked'] += 1
+                    
                     # Check baseline criteria
                     total_hits = np.sum(true_hits)
+
+                    baseline_passed = True
+                    ml_region_passed = True
+                    
+                    # Baseline criterion 1: >= 9 hits
                     if total_hits < 9:
                         baseline_stats['tracks_failed_min_hits'] += 1
-                        rejected_data['predictions'].append(pred_hits)
-                        rejected_data['logits'].append(logit_hits)
-                        rejected_data['true_assignments'].append(true_hits)
-                        rejected_data['track_info'].append(track_info)
-                        rejected_data['station_indices'].append(true_station_index)
-                        continue
+                        baseline_passed = False
                     
+                    # Baseline criterion 2: eta cuts (0.1 <= |eta| <= 2.7)
                     if np.abs(true_eta) < 0.1 or np.abs(true_eta) > 2.7:
                         baseline_stats['tracks_failed_eta_cuts'] += 1
-                        rejected_data['predictions'].append(pred_hits)
-                        rejected_data['logits'].append(logit_hits)
-                        rejected_data['true_assignments'].append(true_hits)
-                        rejected_data['track_info'].append(track_info)
-                        rejected_data['station_indices'].append(true_station_index)
-                        continue
+                        baseline_passed = False
                         
+                    # Baseline criterion 3: pt >= 3.0 GeV
                     if true_pt < 3.0:
                         baseline_stats['tracks_failed_pt_cuts'] += 1
-                        rejected_data['predictions'].append(pred_hits)
-                        rejected_data['logits'].append(logit_hits)
-                        rejected_data['true_assignments'].append(true_hits)
-                        rejected_data['track_info'].append(track_info)
-                        rejected_data['station_indices'].append(true_station_index)
-                        continue
+                        baseline_passed = False
                     
-                    # Station requirements check
-                    unique_stations, station_counts = np.unique(true_station_index, return_counts=True)
+                    # Baseline criterion 4: Station requirements (>= 3 stations, >= 3 hits per station)
+                    # print("len of true stations: ", len(true_station_index))
+                    # print(len(true_station_index[true_hits]))
+                    unique_stations, station_counts = np.unique(true_station_index[true_hits], return_counts=True)
                     if len(unique_stations) < 3:
-                        baseline_stats['tracks_failed_station_cuts'] += 1
-                        rejected_data['predictions'].append(pred_hits)
-                        rejected_data['logits'].append(logit_hits)
-                        rejected_data['true_assignments'].append(true_hits)
-                        rejected_data['track_info'].append(track_info)
-                        rejected_data['station_indices'].append(true_station_index)
-                        continue
-                        
-                    n_good_stations = np.sum(station_counts >= 3)
-                    if n_good_stations < 3:
-                        baseline_stats['tracks_failed_station_cuts'] += 1
-                        rejected_data['predictions'].append(pred_hits)
-                        rejected_data['logits'].append(logit_hits)
-                        rejected_data['true_assignments'].append(true_hits)
-                        rejected_data['track_info'].append(track_info)
-                        rejected_data['station_indices'].append(true_station_index)
-                        continue
+                        baseline_stats['tracks_failed_insufficient_stations'] += 1
+                        baseline_passed = False
+                    elif np.sum(station_counts >= 3) < 3:  # Need at least 3 stations with >= 3 hits each
+                        baseline_stats['tracks_failed_hits_per_station'] += 1
+                        baseline_passed = False
                     
-                    # Track passed all criteria - add to baseline
-                    baseline_stats['tracks_passed_all_cuts'] += 1
-                    baseline_data['predictions'].append(pred_hits)
-                    baseline_data['logits'].append(logit_hits)
-                    baseline_data['true_assignments'].append(true_hits)
-                    baseline_data['track_info'].append(track_info)
-                    baseline_data['station_indices'].append(true_station_index)
-                
-                event_count += 1
+                    # print("Unique stations: ", unique_stations, " with counts: ", station_counts)
+                    
+                    # ML region criteria (pt >= 5.0 GeV, |eta| <= 2.7, >= 3 hits)
+                    if total_hits < 3:
+                        ml_region_stats['tracks_failed_min_hits'] += 1
+                        ml_region_passed = False
+                    
+                    if np.abs(true_eta) > 2.7:
+                        ml_region_stats['tracks_failed_eta_cuts'] += 1
+                        ml_region_passed = False
+                    
+                    if true_pt < 5.0:
+                        ml_region_stats['tracks_failed_pt_cuts'] += 1
+                        ml_region_passed = False
+                    
+                    # Add to appropriate categories
+                    if baseline_passed:
+                        baseline_stats['tracks_passed_all_cuts'] += 1
+                        baseline_data['predictions'].append(pred_hits)
+                        baseline_data['logits'].append(logit_hits)
+                        baseline_data['true_assignments'].append(true_hits)
+                        baseline_data['track_info'].append(track_info)
+                        baseline_data['station_indices'].append(true_station_index)
+                    
+                    if ml_region_passed:
+                        ml_region_stats['tracks_passed_all_cuts'] += 1
+                        ml_region_data['predictions'].append(pred_hits)
+                        ml_region_data['logits'].append(logit_hits)
+                        ml_region_data['true_assignments'].append(true_hits)
+                        ml_region_data['track_info'].append(track_info)
+                        ml_region_data['station_indices'].append(true_station_index)
+                    
+                    # Add to rejected if it doesn't pass baseline (keeping original logic for compatibility)
+                    if not ml_region_passed:
+                        rejected_data['predictions'].append(pred_hits)
+                        rejected_data['logits'].append(logit_hits)
+                        rejected_data['true_assignments'].append(true_hits)
+                        rejected_data['track_info'].append(track_info)
+                        rejected_data['station_indices'].append(true_station_index)
         
         print(f"\nData collection complete!")
-        print(f"Total events processed: {event_count}")
+        print(f"Total events processed: {len(self.random_indices)}")
         print(f"")
         print(f"Baseline Filtering Statistics:")
         print(f"  Total tracks checked: {baseline_stats['total_tracks_checked']}")
         print(f"  Failed minimum hits (>=9): {baseline_stats['tracks_failed_min_hits']} ({baseline_stats['tracks_failed_min_hits']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats['tracks_failed_eta_cuts']} ({baseline_stats['tracks_failed_eta_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed pt cuts (pt >= 3.0 GeV): {baseline_stats['tracks_failed_pt_cuts']} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
-        print(f"  Failed station cuts: {baseline_stats['tracks_failed_station_cuts']} ({baseline_stats['tracks_failed_station_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed insufficient stations (<3 stations): {baseline_stats['tracks_failed_insufficient_stations']} ({baseline_stats['tracks_failed_insufficient_stations']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed hits per station (<3 stations with >=3 hits): {baseline_stats['tracks_failed_hits_per_station']} ({baseline_stats['tracks_failed_hits_per_station']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Tracks passing all cuts: {baseline_stats['tracks_passed_all_cuts']} ({baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"")
+        print(f"ML Region Filtering Statistics:")
+        print(f"  Total tracks checked: {ml_region_stats['total_tracks_checked']}")
+        print(f"  Failed minimum hits (>=3): {ml_region_stats['tracks_failed_min_hits']} ({ml_region_stats['tracks_failed_min_hits']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (|eta| <= 2.7): {ml_region_stats['tracks_failed_eta_cuts']} ({ml_region_stats['tracks_failed_eta_cuts']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 5.0 GeV): {ml_region_stats['tracks_failed_pt_cuts']} ({ml_region_stats['tracks_failed_pt_cuts']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {ml_region_stats['tracks_passed_all_cuts']} ({ml_region_stats['tracks_passed_all_cuts']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
         print(f"")
         print(f"Category Statistics:")
         print(f"  All tracks: {len(all_data['predictions'])}")
         print(f"  Baseline tracks: {len(baseline_data['predictions'])}")
+        print(f"  ML region tracks: {len(ml_region_data['predictions'])}")
         print(f"  Rejected tracks: {len(rejected_data['predictions'])}")
         
-        return all_data, baseline_data, rejected_data, baseline_stats
+        return all_data, baseline_data, ml_region_data, rejected_data, baseline_stats, ml_region_stats
 
     def run_evaluation_with_categories(self):
         """Run evaluation for all tracks, baseline tracks, and rejected tracks."""
@@ -291,7 +352,7 @@ class Task1HitTrackEvaluator:
         
         # Setup and collect data
         self.setup_data_module()
-        all_data, baseline_data, rejected_data, baseline_stats = self.collect_and_process_data()
+        all_data, baseline_data, ml_region_data, rejected_data, baseline_stats, ml_region_stats = self.collect_and_process_data()
         
         if len(all_data['predictions']) == 0:
             print("Error: No data collected. Check file paths and data format.")
@@ -314,7 +375,14 @@ class Task1HitTrackEvaluator:
         self._set_data(baseline_data)
         results['baseline_tracks'] = self._run_single_evaluation("baseline_tracks", self.baseline_dir)
         
-        # 3. Evaluate rejected tracks
+        # 3. Evaluate ML region tracks
+        print("\n" + "="*50)
+        print("EVALUATING ML REGION TRACKS")
+        print("="*50)
+        self._set_data(ml_region_data)
+        results['ml_region_tracks'] = self._run_single_evaluation("ml_region_tracks", self.ml_region_dir)
+        
+        # 4. Evaluate rejected tracks
         print("\n" + "="*50)
         print("EVALUATING REJECTED TRACKS")
         print("="*50)
@@ -322,7 +390,7 @@ class Task1HitTrackEvaluator:
         results['rejected_tracks'] = self._run_single_evaluation("rejected_tracks", self.rejected_dir)
         
         # Write comprehensive summary
-        self._write_comparative_summary(results, baseline_stats)
+        self._write_comparative_summary(results, baseline_stats, ml_region_stats)
         
         print(f"\nTask 1 evaluation with categories complete. Results saved to {self.output_dir}")
 
@@ -424,8 +492,8 @@ class Task1HitTrackEvaluator:
         # Calculate bin indices
         bin_indices = np.digitize(var_values, bins) - 1
         
-        efficiencies = []
-        purities = []
+        bin_efficiencies = []
+        bin_purities = []
         bin_centers = []
         eff_errors = []
         pur_errors = []
@@ -440,33 +508,37 @@ class Task1HitTrackEvaluator:
             bin_predictions = [self.predictions[j] for j in range(len(self.predictions)) if mask[j]]
             bin_truth = [self.true_assignments[j] for j in range(len(self.true_assignments)) if mask[j]]
             
-            # Calculate efficiency and purity
-            total_true_hits = bin_truth.sum()
-            total_pred_hits = bin_predictions.sum() 
-            efficiencies = [sum(pred & truth).sum() / truth.sum() if truth.sum() > 0 else 0 for pred, truth in zip(bin_predictions, bin_truth)]
-            purities = [sum(pred & truth).sum() / pred.sum() if pred.sum() > 0 else 0 for pred, truth in zip(bin_predictions, bin_truth)]
+            # Calculate per-track efficiency and purity for this bin
+            track_efficiencies = [np.sum(pred & truth) / np.sum(truth) if np.sum(truth) > 0 else 0 
+                                for pred, truth in zip(bin_predictions, bin_truth)]
+            track_purities = [np.sum(pred & truth) / np.sum(pred) if np.sum(pred) > 0 else 0 
+                            for pred, truth in zip(bin_predictions, bin_truth)]
+            
+            # Calculate total hits for error estimation
+            total_true_hits = np.sum([np.sum(truth) for truth in bin_truth])
+            total_pred_hits = np.sum([np.sum(pred) for pred in bin_predictions])
             
             if total_true_hits > 0:
-                efficiency = np.mean(efficiencies)
+                efficiency = np.mean(track_efficiencies)
                 eff_error = np.sqrt(efficiency * (1 - efficiency) / total_true_hits)
             else:
                 efficiency = 0
                 eff_error = 0
                 
             if total_pred_hits > 0:
-                purity = np.mean(purities)
+                purity = np.mean(track_purities)
                 pur_error = np.sqrt(purity * (1 - purity) / total_pred_hits)
             else:
                 purity = 0
                 pur_error = 0
             
-            efficiencies.append(efficiency)
-            purities.append(purity)
+            bin_efficiencies.append(efficiency)
+            bin_purities.append(purity)
             eff_errors.append(eff_error)
             pur_errors.append(pur_error)
             bin_centers.append((bins[i] + bins[i+1]) / 2)
         
-        return np.array(bin_centers), np.array(efficiencies), np.array(purities), np.array(eff_errors), np.array(pur_errors)
+        return np.array(bin_centers), np.array(bin_efficiencies), np.array(bin_purities), np.array(eff_errors), np.array(pur_errors)
 
     def calculate_double_matching_efficiency_by_variable(self, variable='pt', bins=None):
         """Calculate double matching efficiency binned by a kinematic variable.
@@ -735,12 +807,15 @@ class Task1HitTrackEvaluator:
         # Calculate overall metrics across all tracks
         total_true_hits = sum(truth.sum() for truth in self.true_assignments)
         total_pred_hits = sum(pred.sum() for pred in self.predictions)
-        total_correct_hits = sum((pred & truth).sum() for pred, truth in zip(self.predictions, self.true_assignments))
-        
+        efficiencies = [sum(pred & truth) / sum(truth) if sum(truth) > 0 else 0 
+                        for pred, truth in zip(self.predictions, self.true_assignments)]
+        purities = [sum(pred & truth) / sum(pred) if sum(pred) > 0 else 0
+                    for pred, truth in zip(self.predictions, self.true_assignments)]
+
         # Calculate efficiency and purity
-        efficiency = total_correct_hits / total_true_hits if total_true_hits > 0 else 0.0
-        purity = total_correct_hits / total_pred_hits if total_pred_hits > 0 else 0.0
-        
+        efficiency = np.mean(efficiencies) if total_true_hits > 0 else 0.0
+        purity = np.mean(purities) if total_pred_hits > 0 else 0.0
+
         return efficiency, purity
 
     def calculate_overall_double_matching_efficiency(self):
@@ -807,7 +882,7 @@ class Task1HitTrackEvaluator:
         
         print(f"Individual summary for {category_name} written to {summary_path}")
 
-    def _write_comparative_summary(self, results, filter_stats):
+    def _write_comparative_summary(self, results, baseline_stats, ml_region_stats):
         """Write comprehensive summary comparing all categories."""
         summary_path = self.output_dir / 'task1_comparative_summary.txt'
         
@@ -823,17 +898,26 @@ class Task1HitTrackEvaluator:
             # Write filtering statistics
             f.write("BASELINE FILTERING STATISTICS\n")
             f.write("-" * 35 + "\n")
-            f.write(f"Total tracks checked: {filter_stats.get('total_tracks_checked', 0):,}\n")
-            f.write(f"Failed minimum hits (>=9): {filter_stats.get('tracks_failed_min_hits', 0):,}\n")
-            f.write(f"Failed eta cuts (0.1 <= |eta| <= 2.7): {filter_stats.get('tracks_failed_eta_cuts', 0):,}\n")
-            f.write(f"Failed pt cuts (pt >= 3 GeV): {filter_stats.get('tracks_failed_pt_cuts', 0):,}\n")
-            f.write(f"Failed station cuts: {filter_stats.get('tracks_failed_station_cuts', 0):,}\n")
-            f.write(f"Tracks passing all cuts: {filter_stats.get('tracks_passed_all_cuts', 0):,}\n")
+            f.write(f"Total tracks checked: {baseline_stats.get('total_tracks_checked', 0):,}\n")
+            f.write(f"Failed minimum hits (>=9): {baseline_stats.get('tracks_failed_min_hits', 0):,}\n")
+            f.write(f"Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats.get('tracks_failed_eta_cuts', 0):,}\n")
+            f.write(f"Failed pt cuts (pt >= 3 GeV): {baseline_stats.get('tracks_failed_pt_cuts', 0):,}\n")
+            f.write(f"Failed insufficient stations (<3 stations): {baseline_stats.get('tracks_failed_insufficient_stations', 0):,}\n")
+            f.write(f"Failed hits per station (<3 stations with >=3 hits): {baseline_stats.get('tracks_failed_hits_per_station', 0):,}\n")
+            f.write(f"Tracks passing all cuts: {baseline_stats.get('tracks_passed_all_cuts', 0):,}\n")
+            
+            f.write("\nML REGION FILTERING STATISTICS\n")
+            f.write("-" * 35 + "\n")
+            f.write(f"Total tracks checked: {ml_region_stats.get('total_tracks_checked', 0):,}\n")
+            f.write(f"Failed minimum hits (>=3): {ml_region_stats.get('tracks_failed_min_hits', 0):,}\n")
+            f.write(f"Failed eta cuts (|eta| <= 2.7): {ml_region_stats.get('tracks_failed_eta_cuts', 0):,}\n")
+            f.write(f"Failed pt cuts (pt >= 5.0 GeV): {ml_region_stats.get('tracks_failed_pt_cuts', 0):,}\n")
+            f.write(f"Tracks passing all cuts: {ml_region_stats.get('tracks_passed_all_cuts', 0):,}\n")
             
             # Write track counts per category
             f.write("\nTRACKS ANALYZED PER CATEGORY\n")
             f.write("-" * 30 + "\n")
-            for category in ['all_tracks', 'baseline_tracks', 'rejected_tracks']:
+            for category in ['all_tracks', 'baseline_tracks', 'ml_region_tracks', 'rejected_tracks']:
                 if category in results:
                     num_tracks = results[category].get('num_tracks', 0)
                     f.write(f"{category.replace('_', ' ').title()}: {num_tracks:,} tracks\n")
@@ -845,7 +929,7 @@ class Task1HitTrackEvaluator:
             f.write("COMPARATIVE METRICS\n")
             f.write("-" * 20 + "\n")
             
-            categories = ['all_tracks', 'baseline_tracks', 'rejected_tracks']
+            categories = ['all_tracks', 'baseline_tracks', 'ml_region_tracks', 'rejected_tracks']
             metrics = ['roc_auc', 'overall_efficiency', 'overall_purity', 'overall_double_matching']
             
             # Header
@@ -902,18 +986,21 @@ class Task1HitTrackEvaluator:
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 1: Hit-Track Assignment with Categories')
     parser.add_argument('--eval_path', type=str, 
-                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                       default="/scratch/epoch=048-val_loss=3.04778_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
-                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                       default="/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600",
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
                        help='Path to processed test data directory')
     parser.add_argument('--output_dir', type=str, 
                        default='./tracking_evaluation_results/task1_hit_track',
                        help='Base output directory for plots and results')
-    parser.add_argument('--max_events', "-m", type=int, default=10000,
+    parser.add_argument('--max_events', "-m", type=int, default=None,
                        help='Maximum number of events to process (for testing)')
+    parser.add_argument('--random_seed', type=int, default=42,
+                       help='Random seed for reproducible random sampling')
     
     args = parser.parse_args()
     
@@ -923,13 +1010,15 @@ def main():
     print(f"Data directory: {args.data_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Max events: {args.max_events}")
+    print(f"Random seed: {args.random_seed}")
     
     try:
         evaluator = Task1HitTrackEvaluator(
             eval_path=args.eval_path,
             data_dir=args.data_dir,
             output_dir=args.output_dir,
-            max_events=args.max_events
+            max_events=args.max_events,
+            random_seed=args.random_seed
         )
         
         evaluator.run_evaluation_with_categories()

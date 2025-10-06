@@ -51,7 +51,7 @@ class h5Analyzer:
         dict : Dictionary with event numbers as keys and hit counts as values
         """
         # try:
-        test_dataloader = self.data_module.test_dataloader()
+        test_dataloader = self.data_module.test_dataloader(shuffle=True)
         
         hits_per_event = {}
         event_count = 0
@@ -148,7 +148,7 @@ class h5Analyzer:
         dict : Dictionary containing analysis results
         """
         # try:
-        test_dataloader = self.data_module.test_dataloader()
+        test_dataloader = self.data_module.test_dataloader(shuffle=True)
         
         tracks_per_event = {}
         all_event_track_lengths = []
@@ -325,7 +325,7 @@ class h5Analyzer:
         total_hits = 0
         
         try:
-            test_dataloader = self.data_module.test_dataloader()
+            test_dataloader = self.data_module.test_dataloader(shuffle=True)
             
             for i, batch in tqdm(enumerate(test_dataloader), desc="Processing technology statistics", total=self.max_events):
                 if i >= self.max_events:
@@ -546,7 +546,7 @@ class h5Analyzer:
         results = {}
         
         # Get test dataloader
-        test_dataloader = self.data_module.test_dataloader()
+        test_dataloader = self.data_module.test_dataloader(shuffle=True)
         # print(histogram_settings)
         # Collect data from all batches
         collected_data = {}
@@ -726,7 +726,7 @@ class h5Analyzer:
         results = {}
         
         # Get test dataloader
-        test_dataloader = self.data_module.test_dataloader()
+        test_dataloader = self.data_module.test_dataloader(shuffle=True)
         
         # Collect data from all batches with signal/background separation
         collected_signal_data = {}

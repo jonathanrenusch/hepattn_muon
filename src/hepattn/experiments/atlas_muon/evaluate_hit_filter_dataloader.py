@@ -99,7 +99,9 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
     }
     
     qualified_tracks = set()
-    
+    print("This is events ids unique: ", np.unique(all_particle_ids) )
+    print("This is the number of unique event ids: ", len(np.unique(all_event_ids)) )
+    print("sum true hits: ", np.sum(true_hit_mask))
     for event_id, particle_id in track_chunk:
         chunk_stats['total_tracks_checked'] += 1
         
@@ -109,6 +111,7 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
             (all_particle_ids == particle_id) & 
             true_hit_mask
         )
+        # print("this is the track mask sum: ", np.sum(track_mask) )
         track_hits = np.sum(track_mask)
         
         # Pre-filter 1: tracks must have at least 9 hits total
@@ -140,6 +143,7 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
         # Get station indices for this track
         track_stations = all_station_indices[track_mask]
         unique_stations, station_counts = np.unique(track_stations, return_counts=True)
+        print("this is unique stations: ", unique_stations)
         
         # Check station requirements:
         # 1. At least 3 different stations
@@ -326,7 +330,7 @@ class AtlasMuonEvaluatorDataLoader:
         
         # Setup the data module
         self.data_module.setup(stage='test')
-        self.test_dataloader = self.data_module.test_dataloader()
+        self.test_dataloader = self.data_module.test_dataloader(shuffle=True)
         
         # print(f"DataLoader setup complete with 100 workers, processing {num_test_events} events")
     
@@ -426,6 +430,7 @@ class AtlasMuonEvaluatorDataLoader:
                         hit_particle_ids = inputs_batch["plotting_spacePoint_truthLink"][0].numpy().astype(np.int32)
                         hit_technologies = inputs_batch["hit_spacePoint_technology"][0].numpy().astype(np.int8)
                         hit_station_indices = inputs_batch["hit_spacePoint_stationIndex"][0].numpy().astype(np.int32)
+                        print ("This is hit_station_indices: ", hit_station_indices / 0.1)
                         
                         # Verify shapes match
                         n_hits = len(hit_logits)
@@ -436,7 +441,7 @@ class AtlasMuonEvaluatorDataLoader:
                         # Get particle pt values
                         if "particle_truthMuon_pt" not in targets_batch:
                             continue
-                        
+
                         particle_pts = targets_batch["particle_truthMuon_pt"][0].numpy().astype(np.float32)
                         particle_etas = targets_batch["particle_truthMuon_eta"][0].numpy().astype(np.float32)
                         particle_phis = targets_batch["particle_truthMuon_phi"][0].numpy().astype(np.float32)
@@ -3113,7 +3118,8 @@ def main():
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
-    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_validation_data_144000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
@@ -3123,9 +3129,10 @@ def main():
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/bestfiltermodel/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
                     #    help='Path to evaluation HDF5 file') # CAREFUL the checkpoint is still referring to the old cuts!
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_validation_data_144000_hdf5",
-    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
+
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_training_data_2694000_hdf5",
-    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
                        help='Path to processed test data directory')
