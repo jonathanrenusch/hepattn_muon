@@ -1,6 +1,8 @@
 seed_everything: 42
 name: TRK-ATLAS-Muon-smallModel-better-run
-ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run_20251005-T234835/ckpts/epoch=048-val_loss=3.04778.ckpt
+# ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run_20251005-T234835/ckpts/epoch=048-val_loss=3.04778.ckpt
+# ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run-nopos_20251006-T201846/ckpts/epoch=069-val_loss=2.92863.ckpt
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run_20251006-T192904/ckpts/epoch=069-val_loss=2.87600.ckpt
 
 data:
 
