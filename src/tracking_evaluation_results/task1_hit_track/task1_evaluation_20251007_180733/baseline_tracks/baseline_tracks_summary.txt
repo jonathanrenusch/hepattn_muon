@@ -1,0 +1,34 @@
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - BASELINE_TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-10-07 18:10:07
+Category: Baseline Tracks
+
+DATASET INFORMATION
+--------------------
+Number of tracks analyzed: 57,149
+
+OVERALL PERFORMANCE METRICS
+------------------------------
+ROC AUC: 0.9685
+Overall Hit Assignment Efficiency: 0.9248
+Overall Hit Assignment Purity: 0.8735
+Overall Double Matching Efficiency: 0.9365
+
+AVERAGE METRICS BY KINEMATIC VARIABLE
+----------------------------------------
+PT:
+  Average Efficiency: 0.9248
+  Average Purity: 0.8735
+  Average Double Matching: 0.9365
+
+ETA:
+  Average Efficiency: 0.9248
+  Average Purity: 0.8735
+  Average Double Matching: 0.9365
+
+PHI:
+  Average Efficiency: 0.9248
+  Average Purity: 0.8735
+  Average Double Matching: 0.9365
+

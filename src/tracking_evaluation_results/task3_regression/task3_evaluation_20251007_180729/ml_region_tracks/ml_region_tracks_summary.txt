@@ -1,0 +1,34 @@
+TASK 3: REGRESSION EVALUATION - ML REGION TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-10-07 18:09:48
+Category: ML Region Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 127,672
+
+REGRESSION AND CLASSIFICATION STATISTICS
+----------------------------------------
+PHI:
+  Mean normalized residual: -0.141684
+  STD normalized residual:  62.344607
+  Number of tracks: 127672
+
+ETA:
+  Mean normalized residual: 0.096067
+  STD normalized residual:  25.226616
+  Number of tracks: 127672
+
+PT:
+  Mean normalized residual: 0.068509
+  STD normalized residual:  0.469874
+  Number of tracks: 127672
+
+Q:
+  Classification accuracy: 0.9604
+  Correct predictions: 122613/127672
+  Number of tracks: 127672
+
+
+Generated at: 2025-10-07 18:09:48.478514

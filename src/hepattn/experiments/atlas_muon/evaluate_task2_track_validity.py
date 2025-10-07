@@ -21,7 +21,7 @@ matplotlib.use('Agg')  # Set backend before importing pyplot
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
-from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import roc_curve, auc, roc_auc_score
 import argparse
 from datetime import datetime
 import warnings
@@ -47,10 +47,11 @@ plt.rcParams.update({
 class Task2TrackValidityEvaluator:
     """Evaluator for track validity classification task with baseline filtering."""
     
-    def __init__(self, eval_path, data_dir, output_dir, max_events=None):
+    def __init__(self, eval_path, data_dir, output_dir, max_events=None, random_seed=42):
         self.eval_path = eval_path
         self.data_dir = data_dir
         self.max_events = max_events
+        self.random_seed = random_seed
         
         # Create timestamped output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -60,10 +61,11 @@ class Task2TrackValidityEvaluator:
         # Create output directory and subdirectories for categories
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.all_tracks_dir = self.output_dir / "all_tracks"
-        self.baseline_dir = self.output_dir / "baseline_tracks" 
+        self.baseline_dir = self.output_dir / "baseline_tracks"
+        self.ml_region_dir = self.output_dir / "ml_region_tracks"
         self.rejected_dir = self.output_dir / "rejected_tracks"
         
-        for subdir in [self.all_tracks_dir, self.baseline_dir, self.rejected_dir]:
+        for subdir in [self.all_tracks_dir, self.baseline_dir, self.ml_region_dir, self.rejected_dir]:
             subdir.mkdir(parents=True, exist_ok=True)
         
         print(f"Task 2 Evaluator initialized")
@@ -71,6 +73,7 @@ class Task2TrackValidityEvaluator:
         print(f"Data directory: {data_dir}")
         print(f"Output directory: {self.output_dir}")
         print(f"Max events: {max_events}")
+        print(f"Random seed: {random_seed}")
         
     def setup_data_module(self):
         """Setup the data module for loading truth information."""
@@ -80,7 +83,7 @@ class Task2TrackValidityEvaluator:
             train_dir=self.data_dir,
             val_dir=self.data_dir,
             test_dir=self.data_dir,
-            num_workers=4,  # Reduced from 100
+            num_workers=1,  # Reduced to avoid threading issues
             num_train=1,
             num_val=1,
             num_test=self.max_events if self.max_events else -1,
@@ -98,64 +101,93 @@ class Task2TrackValidityEvaluator:
                 ]
             },
             targets={
-                'particle': ['truthMuon_pt', 'truthMuon_q', 'truthMuon_eta', 'truthMuon_phi', 'truthMuon_qpt']
+                'particle': ['truthMuon_pt', 'truthMuon_q', 'truthMuon_eta', 'truthMuon_phi']
             }
         )
         
         self.data_module.setup("test")
-        self.test_dataloader = self.data_module.test_dataloader()
-        print(f"Data module setup complete. Test dataset size: {len(self.test_dataloader.dataset)}")
+        self.test_dataloader = self.data_module.test_dataloader(shuffle=False)
+        
+        # Create random sampling order for reproducible random evaluation
+        dataset_size = len(self.test_dataloader.dataset)
+        if self.max_events:
+            num_events_to_process = min(self.max_events, dataset_size)
+        else:
+            num_events_to_process = dataset_size
+            
+        # Create random indices for sampling
+        np.random.seed(self.random_seed)  # Use configurable random seed
+        self.random_indices = np.random.permutation(dataset_size)[:num_events_to_process]
+        
+        print(f"Data module setup complete. Test dataset size: {dataset_size}")
+        print(f"Random sampling {num_events_to_process} events with seed {self.random_seed}")
+        print(f"Random indices: {self.random_indices[:10]}{'...' if len(self.random_indices) > 10 else ''}")
         
     def collect_and_process_data(self):
-        """Collect and process data on-the-fly, applying baseline filtering."""
-        print("Collecting and processing data with baseline filtering...")
+        """Collect and process data with random sampling, applying baseline and ML region filtering."""
+        print("Collecting and processing data with random sampling and filtering...")
         
-        # Data storage for all three categories
+        # Data storage for all four categories
         all_data = {
             'logits': [], 'true_validity': [], 'predictions': [],
-            'track_pts': [], 'track_etas': [], 'track_phis': []
+            'track_pts': [], 'track_etas': [], 'track_phis': [], 'track_info': []
         }
         baseline_data = {
             'logits': [], 'true_validity': [], 'predictions': [],
-            'track_pts': [], 'track_etas': [], 'track_phis': []
+            'track_pts': [], 'track_etas': [], 'track_phis': [], 'track_info': []
+        }
+        ml_region_data = {
+            'logits': [], 'true_validity': [], 'predictions': [],
+            'track_pts': [], 'track_etas': [], 'track_phis': [], 'track_info': []
         }
         rejected_data = {
             'logits': [], 'true_validity': [], 'predictions': [],
-            'track_pts': [], 'track_etas': [], 'track_phis': []
+            'track_pts': [], 'track_etas': [], 'track_phis': [], 'track_info': []
         }
         
-        # Baseline filtering statistics
+        # Baseline filtering statistics (more granular)
         baseline_stats = {
             'total_tracks_checked': 0,
             'tracks_failed_min_hits': 0,
             'tracks_failed_eta_cuts': 0,
             'tracks_failed_pt_cuts': 0,
-            'tracks_failed_station_cuts': 0,
+            'tracks_failed_insufficient_stations': 0,  # < 3 stations total
+            'tracks_failed_hits_per_station': 0,      # >= 3 stations but < 3 stations with >= 3 hits
+            'tracks_passed_all_cuts': 0
+        }
+        
+        # ML region filtering statistics
+        ml_region_stats = {
+            'total_tracks_checked': 0,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
             'tracks_passed_all_cuts': 0
         }
         
         with h5py.File(self.eval_path, 'r') as pred_file:
-            event_count = 0
-            
-            for batch in tqdm(self.test_dataloader, desc="Processing events"):
-                if self.max_events and event_count >= self.max_events:
-                    break
-                    
-                event_id = str(event_count)
+            # Use the randomly sampled indices to access both dataset and eval file
+            for i, dataset_idx in enumerate(tqdm(self.random_indices, desc="Processing events")):
+                # Get the batch from dataset using the random index
+                batch = self.test_dataloader.dataset[dataset_idx]
+                
+                # Use the dataset index as the event_id for the eval file
+                event_id = str(dataset_idx)
                 
                 if event_id not in pred_file:
                     print(f"Warning: Event {event_id} not found in predictions file")
-                    event_count += 1
                     continue
                 
-                # Get truth information from batch
+                # Get truth information from batch (dataset still has batch dimension of 1)
                 inputs, targets = batch
+                true_station_index = inputs["hit_spacePoint_stationIndex"][0].numpy().astype(np.int32)  # Remove batch dimension
+                
+                # Get predictions and truth
                 pred_group = pred_file[event_id]
                 
                 # Get predictions
                 track_valid_pred = pred_group['preds/final/track_valid/track_valid'][...]  # Shape: (1, 2)
                 track_valid_logits = pred_group['outputs/final/track_valid/track_logit'][...]  # Shape: (1, 2)
-                track_hit_pred = pred_group['preds/final/track_hit_valid/track_hit_valid'][...]  # Shape: (1, 2, num_hits)
                 
                 # Get predicted track parameters for binning (available for both real and fake tracks)
                 pred_eta = pred_group['preds/final/parameter_regression/track_truthMuon_eta'][...]  # Shape: (1, 2)
@@ -169,12 +201,12 @@ class Task2TrackValidityEvaluator:
                     pred_pt = None
                 
                 # Get truth
-                true_particle_valid = targets['particle_valid'][0]  # Shape: (2,)
-                true_hit_assignments = targets['particle_hit_valid'][0]  # Shape: (2, num_hits)
+                true_particle_valid = targets['particle_valid'][0]  # Remove batch dimension
+                true_hit_assignments = targets['particle_hit_valid'][0]  # Remove batch dimension
                 
-                # First pass: check if this event contains any baseline tracks
-                event_has_baseline_track = False
-                event_tracks = []
+                # Extract true particle parameters (only for valid particles)
+                valid_particles = true_particle_valid.numpy()
+                num_valid = int(valid_particles.sum())
                 
                 # Process both potential tracks (max 2 tracks per event)
                 for track_idx in range(2):
@@ -188,167 +220,236 @@ class Task2TrackValidityEvaluator:
                     track_phi = pred_phi[0, track_idx].item()
                     track_pt = pred_pt[0, track_idx].item() if has_pt_pred else 0.0
                     
-                    # Store track info temporarily
+                    # For filtering, we need truth parameters if the particle exists
+                    if true_particle_exists:
+                        # Get true track parameters (handle dataset structure with batch dimension)
+                        eta_tensor = targets["particle_truthMuon_eta"][0, track_idx]  # Remove batch dimension
+                        phi_tensor = targets["particle_truthMuon_phi"][0, track_idx]  # Remove batch dimension
+                        pt_tensor = targets["particle_truthMuon_pt"][0, track_idx]    # Remove batch dimension
+                        
+                        # Handle potential multi-dimensional tensors by taking the first element if needed
+                        true_eta = eta_tensor.item() if eta_tensor.numel() == 1 else eta_tensor[0].item()
+                        true_phi = phi_tensor.item() if phi_tensor.numel() == 1 else phi_tensor[0].item()
+                        true_pt = pt_tensor.item() if pt_tensor.numel() == 1 else pt_tensor[0].item()
+                    else:
+                        # For fake tracks, use predicted parameters for consistency
+                        true_eta = track_eta
+                        true_phi = track_phi
+                        true_pt = track_pt
+                    
                     track_info = {
-                        'predicted_track_valid': predicted_track_valid,
-                        'true_particle_exists': true_particle_exists,
-                        'track_logit': track_logit,
-                        'track_pt': track_pt,
-                        'track_eta': track_eta,
-                        'track_phi': track_phi
+                        'pt': true_pt,
+                        'eta': true_eta, 
+                        'phi': true_phi,
+                        'event_id': dataset_idx,
+                        'track_id': track_idx,
+                        'true_particle_exists': true_particle_exists
                     }
                     
-                    # Apply baseline filtering (only for tracks with true particles)
-                    passes_baseline = False
-                    if true_particle_exists:
-                        baseline_stats['total_tracks_checked'] += 1
-                        passes_baseline = True
-                        
-                        # Get hit assignments for baseline filtering
-                        true_hits = true_hit_assignments[track_idx].numpy().astype(bool)
-                        
-                        # Get truth parameters for baseline filtering criteria
-                        truth_pt = targets["particle_truthMuon_pt"][0, track_idx].item()
-                        truth_eta = targets["particle_truthMuon_eta"][0, track_idx].item()
-                        
-                        # Pre-filter 1: tracks must have at least 9 hits total
-                        total_true_hits = true_hits.sum()
-                        if total_true_hits < 9:
-                            baseline_stats['tracks_failed_min_hits'] += 1
-                            passes_baseline = False
-                        
-                        # Pre-filter 2: eta acceptance cuts |eta| >= 0.1 and |eta| <= 2.7 (use truth eta)
-                        if passes_baseline and (np.abs(truth_eta) < 0.1 or np.abs(truth_eta) > 2.7):
-                            baseline_stats['tracks_failed_eta_cuts'] += 1
-                            passes_baseline = False
-                        
-                        # Pre-filter 3: pt threshold >= 3.0 GeV (use truth pt)
-                        if passes_baseline and truth_pt < 5.0:
-                            baseline_stats['tracks_failed_pt_cuts'] += 1
-                            passes_baseline = False
-                        
-                        # Pre-filter 4: station requirements
-                        if passes_baseline:
-                            true_station_index = inputs["hit_spacePoint_stationIndex"][0]
-                            track_stations = true_station_index[true_hits]
-                            unique_stations, station_counts = np.unique(track_stations, return_counts=True)
-                            
-                            # At least 3 different stations and 3 stations with >=3 hits each
-                            if len(unique_stations) < 3:
-                                baseline_stats['tracks_failed_station_cuts'] += 1
-                                passes_baseline = False
-                            else:
-                                n_good_stations = np.sum(station_counts >= 3)
-                                if n_good_stations < 3:
-                                    baseline_stats['tracks_failed_station_cuts'] += 1
-                                    passes_baseline = False
-                        
-                        if passes_baseline:
-                            baseline_stats['tracks_passed_all_cuts'] += 1
-                            event_has_baseline_track = True
-                    
-                    track_info['passes_baseline'] = passes_baseline
-                    event_tracks.append(track_info)
-                
-                # Second pass: assign tracks to categories based on event-level information
-                for track_info in event_tracks:
-                    predicted_track_valid = track_info['predicted_track_valid']
-                    true_particle_exists = track_info['true_particle_exists']
-                    track_logit = track_info['track_logit']
-                    track_pt = track_info['track_pt']
-                    track_eta = track_info['track_eta']
-                    track_phi = track_info['track_phi']
-                    passes_baseline = track_info['passes_baseline']
-                    
-                    # Add to all tracks category
+                    # Add to all tracks
                     all_data['logits'].append(track_logit)
                     all_data['true_validity'].append(true_particle_exists)
                     all_data['predictions'].append(predicted_track_valid)
                     all_data['track_pts'].append(track_pt)
                     all_data['track_etas'].append(track_eta)
                     all_data['track_phis'].append(track_phi)
+                    all_data['track_info'].append(track_info)
                     
-                    # Add to appropriate category
-                    if true_particle_exists and passes_baseline:
-                        # Baseline tracks (true particles that pass filtering)
+                    baseline_passed = False
+                    ml_region_passed = False
+                    
+                    # Only apply filtering to true particles
+                    if true_particle_exists:
+                        # Apply baseline filtering
+                        baseline_stats['total_tracks_checked'] += 1
+                        
+                        # Apply ML region filtering (in parallel with baseline)
+                        ml_region_stats['total_tracks_checked'] += 1
+                        
+                        # Get hit assignments for filtering
+                        true_hits = true_hit_assignments[track_idx].numpy()
+                        track_mask = true_hits.astype(bool)
+                        
+                        # Check baseline criteria
+                        total_hits = np.sum(true_hits)
+
+                        baseline_passed = True
+                        ml_region_passed = True
+                        
+                        # Baseline criterion 1: >= 9 hits
+                        if total_hits < 9:
+                            baseline_stats['tracks_failed_min_hits'] += 1
+                            baseline_passed = False
+                        
+                        # Baseline criterion 2: eta cuts (0.1 <= |eta| <= 2.7)
+                        if np.abs(true_eta) < 0.1 or np.abs(true_eta) > 2.7:
+                            baseline_stats['tracks_failed_eta_cuts'] += 1
+                            baseline_passed = False
+                            
+                        # Baseline criterion 3: pt >= 3.0 GeV
+                        if true_pt < 3.0:
+                            baseline_stats['tracks_failed_pt_cuts'] += 1
+                            baseline_passed = False
+                        
+                        # Baseline criterion 4: Station requirements (>= 3 stations, >= 3 hits per station)
+                        unique_stations, station_counts = np.unique(true_station_index[track_mask], return_counts=True)
+                        if len(unique_stations) < 3:
+                            baseline_stats['tracks_failed_insufficient_stations'] += 1
+                            baseline_passed = False
+                        elif np.sum(station_counts >= 3) < 3:  # Need at least 3 stations with >= 3 hits each
+                            baseline_stats['tracks_failed_hits_per_station'] += 1
+                            baseline_passed = False
+                        
+                        # ML region criteria (pt >= 5.0 GeV, |eta| <= 2.7, >= 3 hits)
+                        if total_hits < 3:
+                            ml_region_stats['tracks_failed_min_hits'] += 1
+                            ml_region_passed = False
+                        
+                        if np.abs(true_eta) > 2.7:
+                            ml_region_stats['tracks_failed_eta_cuts'] += 1
+                            ml_region_passed = False
+                        
+                        if true_pt < 5.0:
+                            ml_region_stats['tracks_failed_pt_cuts'] += 1
+                            ml_region_passed = False
+                        
+                        # Update passed counts
+                        if baseline_passed:
+                            baseline_stats['tracks_passed_all_cuts'] += 1
+                        
+                        if ml_region_passed:
+                            ml_region_stats['tracks_passed_all_cuts'] += 1
+                    
+                    # Add to appropriate categories (including fake tracks in all categories for ROC calculation)
+                    # Note: fake tracks are always included so we can compute ROC curves properly
+                    
+                    # For baseline: include if real track passes baseline OR if fake track 
+                    if (true_particle_exists and baseline_passed) or not true_particle_exists:
                         baseline_data['logits'].append(track_logit)
                         baseline_data['true_validity'].append(true_particle_exists)
                         baseline_data['predictions'].append(predicted_track_valid)
                         baseline_data['track_pts'].append(track_pt)
                         baseline_data['track_etas'].append(track_eta)
                         baseline_data['track_phis'].append(track_phi)
-                    elif true_particle_exists and not passes_baseline:
-                        # Rejected tracks (true particles that fail filtering)
+                        baseline_data['track_info'].append(track_info)
+                    
+                    # For ML region: include if real track passes ML region OR if fake track
+                    if (true_particle_exists and ml_region_passed) or not true_particle_exists:
+                        ml_region_data['logits'].append(track_logit)
+                        ml_region_data['true_validity'].append(true_particle_exists)
+                        ml_region_data['predictions'].append(predicted_track_valid)
+                        ml_region_data['track_pts'].append(track_pt)
+                        ml_region_data['track_etas'].append(track_eta)
+                        ml_region_data['track_phis'].append(track_phi)
+                        ml_region_data['track_info'].append(track_info)
+                    
+                    # For rejected: include only if real track fails ML region criteria
+                    if true_particle_exists and not ml_region_passed:
                         rejected_data['logits'].append(track_logit)
                         rejected_data['true_validity'].append(true_particle_exists)
                         rejected_data['predictions'].append(predicted_track_valid)
                         rejected_data['track_pts'].append(track_pt)
                         rejected_data['track_etas'].append(track_eta)
                         rejected_data['track_phis'].append(track_phi)
-                    elif not true_particle_exists:
-                        # Fake tracks: add to rejected category, and to baseline if event has baseline tracks
-                        rejected_data['logits'].append(track_logit)
-                        rejected_data['true_validity'].append(true_particle_exists)
-                        rejected_data['predictions'].append(predicted_track_valid)
-                        rejected_data['track_pts'].append(track_pt)
-                        rejected_data['track_etas'].append(track_eta)
-                        rejected_data['track_phis'].append(track_phi)
-                        
-                        # Also add fake tracks to baseline category if event has baseline tracks
-                        # This allows ROC curve calculation for baseline category
-                        if event_has_baseline_track:
-                            baseline_data['logits'].append(track_logit)
-                            baseline_data['true_validity'].append(true_particle_exists)  # False
-                            baseline_data['predictions'].append(predicted_track_valid)
-                            baseline_data['track_pts'].append(track_pt)
-                            baseline_data['track_etas'].append(track_eta)
-                            baseline_data['track_phis'].append(track_phi)
-                
-                event_count += 1
+                        rejected_data['track_info'].append(track_info)
         
         # Convert to numpy arrays
-        for data_dict in [all_data, baseline_data, rejected_data]:
+        for data_dict in [all_data, baseline_data, ml_region_data, rejected_data]:
             for key in data_dict:
-                data_dict[key] = np.array(data_dict[key])
+                if key != 'track_info':  # Don't convert track_info to numpy array
+                    data_dict[key] = np.array(data_dict[key])
         
         print(f"\nData collection complete!")
-        print(f"Total events processed: {event_count}")
-        
-        # Print baseline filtering statistics
-        print(f"\nBaseline Filtering Statistics:")
+        print(f"Total events processed: {len(self.random_indices)}")
+        print(f"")
+        print(f"Baseline Filtering Statistics:")
         print(f"  Total tracks checked: {baseline_stats['total_tracks_checked']}")
         print(f"  Failed minimum hits (>=9): {baseline_stats['tracks_failed_min_hits']} ({baseline_stats['tracks_failed_min_hits']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats['tracks_failed_eta_cuts']} ({baseline_stats['tracks_failed_eta_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed pt cuts (pt >= 3.0 GeV): {baseline_stats['tracks_failed_pt_cuts']} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
-        print(f"  Failed station cuts: {baseline_stats['tracks_failed_station_cuts']} ({baseline_stats['tracks_failed_station_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed insufficient stations (<3 stations): {baseline_stats['tracks_failed_insufficient_stations']} ({baseline_stats['tracks_failed_insufficient_stations']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed hits per station (<3 stations with >=3 hits): {baseline_stats['tracks_failed_hits_per_station']} ({baseline_stats['tracks_failed_hits_per_station']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Tracks passing all cuts: {baseline_stats['tracks_passed_all_cuts']} ({baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
-        
-        # Print category statistics
-        print(f"\nCategory Statistics:")
+        print(f"")
+        print(f"ML Region Filtering Statistics:")
+        print(f"  Total tracks checked: {ml_region_stats['total_tracks_checked']}")
+        print(f"  Failed minimum hits (>=3): {ml_region_stats['tracks_failed_min_hits']} ({ml_region_stats['tracks_failed_min_hits']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (|eta| <= 2.7): {ml_region_stats['tracks_failed_eta_cuts']} ({ml_region_stats['tracks_failed_eta_cuts']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 5.0 GeV): {ml_region_stats['tracks_failed_pt_cuts']} ({ml_region_stats['tracks_failed_pt_cuts']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {ml_region_stats['tracks_passed_all_cuts']} ({ml_region_stats['tracks_passed_all_cuts']/ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"")
+        print(f"Category Statistics:")
         print(f"  All tracks: {len(all_data['logits'])}")
         print(f"  Baseline tracks: {len(baseline_data['logits'])}")
+        print(f"  ML region tracks: {len(ml_region_data['logits'])}")
         print(f"  Rejected tracks: {len(rejected_data['logits'])}")
         
-        return all_data, baseline_data, rejected_data, baseline_stats
+        return all_data, baseline_data, ml_region_data, rejected_data, baseline_stats, ml_region_stats
+    
+    def _calculate_data_driven_bins(self, data, variable, num_bins=21):
+        """Calculate data-driven bins for a kinematic variable.
+        
+        Uses truth data ranges to determine bin boundaries, but the bins
+        will be applied to prediction data for plotting.
+        """
+        # Extract the truth values from track_info for range determination
+        if len(data['track_info']) == 0:
+            # Fallback to fixed bins if no data
+            if variable == 'pt':
+                return np.linspace(0, 200, num_bins)
+            elif variable == 'eta':
+                return np.linspace(-3, 3, num_bins)
+            elif variable == 'phi':
+                return np.linspace(-np.pi, np.pi, num_bins)
+        
+        # Get truth values from track_info for range calculation
+        # Only use real tracks (where true_particle_exists is True) for truth range
+        truth_values = np.array([track[variable] for track in data['track_info'] 
+                                if track['true_particle_exists']])
+        
+        if len(truth_values) == 0:
+            # Fallback to fixed bins if no real tracks
+            if variable == 'pt':
+                return np.linspace(0, 200, num_bins)
+            elif variable == 'eta':
+                return np.linspace(-3, 3, num_bins)
+            elif variable == 'phi':
+                return np.linspace(-np.pi, np.pi, num_bins)
+        
+        if variable == 'pt':
+            # PT: min of truth data to 200
+            min_val = np.min(truth_values)
+            print(f"PT min from REAL truth data: {min_val}", "+"*80)
+            max_val = 200.0
+            return np.linspace(min_val, max_val, num_bins)
+        elif variable == 'eta':
+            # Eta: min to max of truth data
+            min_val = np.min(truth_values)
+            max_val = np.max(truth_values)
+            print(f"ETA range from REAL truth data: {min_val:.3f} to {max_val:.3f}", "+"*80)
+            return np.linspace(min_val, max_val, num_bins)
+        elif variable == 'phi':
+            # Phi: keep standard range
+            return np.linspace(-np.pi, np.pi, num_bins)
+        
+        return np.linspace(0, 1, num_bins)  # Fallback
     
     def calculate_efficiency_fakerate_by_variable(self, data, variable='pt', bins=None):
-        """Calculate efficiency and fake rate binned by a kinematic variable."""
+        """Calculate efficiency and fake rate binned by a kinematic variable.
+        
+        Bins are calculated from truth data ranges but applied to prediction data.
+        """
         
         if bins is None:
-            if variable == 'pt':
-                bins = np.linspace(0, 200, 21)  # 20 bins
-            elif variable == 'eta':
-                bins = np.linspace(-3, 3, 21)  # 20 bins
-            elif variable == 'phi':
-                bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins
+            bins = self._calculate_data_driven_bins(data, variable)
         
-        # Extract the variable values
+        # Extract the prediction variable values for binning
         if variable == 'pt':
-            var_values = data['track_pts']
+            var_values = data['track_pts']  # prediction data
         elif variable == 'eta':
-            var_values = data['track_etas']
+            var_values = data['track_etas']  # prediction data
         elif variable == 'phi':
-            var_values = data['track_phis']
+            var_values = data['track_phis']  # prediction data
         
         predictions = data['predictions']
         true_validity = data['true_validity']
@@ -412,13 +513,8 @@ class Task2TrackValidityEvaluator:
     def plot_efficiency_fakerate_vs_variable(self, data, variable='pt', output_dir=None, category_name=""):
         """Plot efficiency and fake rate vs a kinematic variable."""
         
-        # Define bins
-        if variable == 'pt':
-            bins = np.linspace(0, 200, 21)
-        elif variable == 'eta':
-            bins = np.linspace(-3, 3, 21)
-        elif variable == 'phi':
-            bins = np.linspace(-np.pi, np.pi, 21)
+        # Use data-driven bins
+        bins = self._calculate_data_driven_bins(data, variable)
         
         bin_centers, efficiencies, fake_rates, eff_errors, fake_errors = self.calculate_efficiency_fakerate_by_variable(data, variable, bins)
         
@@ -641,7 +737,7 @@ class Task2TrackValidityEvaluator:
         
         print(f"Summary for {category_name} written to {summary_path}")
     
-    def write_comparative_summary(self, all_results, baseline_stats):
+    def write_comparative_summary(self, all_results, baseline_stats, ml_region_stats):
         """Write comprehensive summary comparing all categories."""
         summary_path = self.output_dir / 'task2_comparative_summary.txt'
         
@@ -661,14 +757,34 @@ class Task2TrackValidityEvaluator:
             f.write(f"Failed minimum hits (>=9): {baseline_stats.get('tracks_failed_min_hits', 0):,}\n")
             f.write(f"Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats.get('tracks_failed_eta_cuts', 0):,}\n")
             f.write(f"Failed pt cuts (pt >= 3.0 GeV): {baseline_stats.get('tracks_failed_pt_cuts', 0):,}\n")
-            f.write(f"Failed station cuts: {baseline_stats.get('tracks_failed_station_cuts', 0):,}\n")
-            f.write(f"Tracks passing all cuts: {baseline_stats.get('tracks_passed_all_cuts', 0):,}\n\n")
+            f.write(f"Failed insufficient stations (<3 stations): {baseline_stats.get('tracks_failed_insufficient_stations', 0):,}\n")
+            f.write(f"Failed hits per station (<3 stations with >=3 hits): {baseline_stats.get('tracks_failed_hits_per_station', 0):,}\n")
+            f.write(f"Tracks passing all cuts: {baseline_stats.get('tracks_passed_all_cuts', 0):,}\n")
+            
+            f.write("\nML REGION FILTERING STATISTICS\n")
+            f.write("-" * 35 + "\n")
+            f.write(f"Total tracks checked: {ml_region_stats.get('total_tracks_checked', 0):,}\n")
+            f.write(f"Failed minimum hits (>=3): {ml_region_stats.get('tracks_failed_min_hits', 0):,}\n")
+            f.write(f"Failed eta cuts (|eta| <= 2.7): {ml_region_stats.get('tracks_failed_eta_cuts', 0):,}\n")
+            f.write(f"Failed pt cuts (pt >= 5.0 GeV): {ml_region_stats.get('tracks_failed_pt_cuts', 0):,}\n")
+            f.write(f"Tracks passing all cuts: {ml_region_stats.get('tracks_passed_all_cuts', 0):,}\n")
+            
+            # Write track counts per category
+            f.write("\nTRACKS ANALYZED PER CATEGORY\n")
+            f.write("-" * 30 + "\n")
+            categories = ['All Tracks', 'Baseline Tracks', 'ML Region Tracks', 'Rejected Tracks']
+            for category in categories:
+                if category in all_results:
+                    num_tracks = all_results[category].get('num_tracks', 0)
+                    f.write(f"{category}: {num_tracks:,} tracks\n")
+                else:
+                    f.write(f"{category}: 0 tracks\n")
+            f.write("\n")
             
             # Write comparative metrics
             f.write("COMPARATIVE METRICS\n")
             f.write("-" * 20 + "\n")
             
-            categories = ['All Tracks', 'Baseline Tracks', 'Rejected Tracks']
             f.write(f"{'Category':<20}{'Num Tracks':<15}{'Efficiency':<12}{'Fake Rate':<12}{'ROC AUC':<10}\n")
             f.write("-" * 70 + "\n")
             
@@ -676,7 +792,7 @@ class Task2TrackValidityEvaluator:
                 if category in all_results:
                     result = all_results[category]
                     f.write(f"{category:<20}{result['num_tracks']:<15}{result['efficiency']:<12.4f}{result['fake_rate']:<12.4f}")
-                    if result['roc_auc'] is not None:
+                    if result.get('roc_auc') is not None:
                         f.write(f"{result['roc_auc']:<10.4f}\n")
                     else:
                         f.write(f"{'N/A':<10}\n")
@@ -687,114 +803,165 @@ class Task2TrackValidityEvaluator:
         
         print(f"Comparative summary written to {summary_path}")
     
+    def evaluate_category(self, data, category_name):
+        """Evaluate a single category of tracks."""
+        # Create output directory for this category
+        category_dir = self.output_dir / category_name.lower().replace(' ', '_')
+        category_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Extract data
+        true_validity = np.array(data['true_validity'], dtype=bool)
+        predictions = np.array(data['predictions'], dtype=bool)
+        logits = np.array(data['logits'])
+        
+        # Calculate basic metrics
+        n_total = len(predictions)
+        n_true_tracks = true_validity.sum()
+        n_fake_tracks = n_total - n_true_tracks
+        
+        if n_total == 0:
+            return {
+                'num_tracks': 0,
+                'efficiency': 0.0,
+                'fake_rate': 0.0,
+                'roc_auc': None
+            }
+        
+        true_positives = (predictions & true_validity).sum()
+        false_positives = (predictions & ~true_validity).sum()
+        false_negatives = (~predictions & true_validity).sum()
+        true_negatives = (~predictions & ~true_validity).sum()
+        
+        # Calculate efficiency and fake rate
+        efficiency = true_positives / n_true_tracks if n_true_tracks > 0 else 0.0
+        fake_rate = false_positives / n_total if n_total > 0 else 0.0
+        
+        # Calculate ROC AUC if we have both classes
+        roc_auc = None
+        if n_true_tracks > 0 and n_fake_tracks > 0:
+            try:
+                roc_auc = roc_auc_score(true_validity, logits)  # Use logits, not binary predictions
+            except Exception as e:
+                print(f"Could not calculate ROC AUC for {category_name}: {e}")
+        
+        # Generate plots
+        print("Generating plots...")
+        
+        # ROC curve
+        try:
+            roc_auc_plot = self.plot_roc_curve(data, category_dir, category_name)
+        except Exception as e:
+            print(f"Error creating ROC curve: {e}")
+            roc_auc_plot = None
+            
+        # Logit distributions
+        try:
+            self.plot_logit_distributions(data, category_dir, category_name)
+        except Exception as e:
+            print(f"Error creating logit distributions: {e}")
+        
+        # Efficiency/fake rate vs kinematic variables
+        for variable in ['pt', 'eta', 'phi']:
+            try:
+                self.plot_efficiency_fakerate_vs_variable(data, variable, category_dir, category_name)
+            except Exception as e:
+                print(f"Error creating efficiency/fake rate vs {variable} plot: {e}")
+        
+        # Write individual summary
+        try:
+            self.write_category_summary(data, category_dir, category_name, roc_auc)
+        except Exception as e:
+            print(f"Error writing category summary: {e}")
+        
+        return {
+            'num_tracks': n_total,
+            'efficiency': efficiency,
+            'fake_rate': fake_rate,
+            'roc_auc': roc_auc
+        }
+    
     def run_evaluation_with_categories(self):
-        """Run evaluation for all categories."""
-        print("=" * 80)
-        print("TASK 2: TRACK VALIDITY CLASSIFICATION WITH CATEGORIES")
+        """Run evaluation for all track categories."""
+        print("\n" + "=" * 80)
+        print("STARTING TASK 2 TRACK VALIDITY EVALUATION")
         print("=" * 80)
         
-        # Setup and collect data
+        # Setup data module first
         self.setup_data_module()
-        all_data, baseline_data, rejected_data, baseline_stats = self.collect_and_process_data()
         
-        # Store results for comparative summary
+        # Collect and process data for all categories
+        print("\nCollecting and processing track data...")
+        all_data, baseline_data, ml_region_data, rejected_data, baseline_stats, ml_region_stats = self.collect_and_process_data()
+        
+        # Reorganize data into the expected structure
+        organized_data = {
+            'All Tracks': all_data,
+            'Baseline Tracks': baseline_data,
+            'ML Region Tracks': ml_region_data,
+            'Rejected Tracks': rejected_data
+        }
+        
+        # Initialize results dictionary
         all_results = {}
         
-        # Process each category
-        categories = [
-            ("All Tracks", all_data, self.all_tracks_dir),
-            ("Baseline Tracks", baseline_data, self.baseline_dir),
-            ("Rejected Tracks", rejected_data, self.rejected_dir)
-        ]
+        # Evaluate each category
+        categories = ['All Tracks', 'Baseline Tracks', 'ML Region Tracks', 'Rejected Tracks']
         
-        for category_name, data, output_dir in categories:
-            print(f"\n" + "="*50)
-            print(f"EVALUATING {category_name.upper()}")
-            print("="*50)
-            
-            if len(data['logits']) == 0:
-                print(f"Warning: No data for {category_name}")
-                continue
-            
-            # Generate plots
-            print("Generating plots...")
-            
-            # ROC curve
-            try:
-                roc_auc = self.plot_roc_curve(data, output_dir, category_name)
-            except Exception as e:
-                print(f"Error creating ROC curve: {e}")
-                roc_auc = None
-            
-            # Logit distributions
-            try:
-                self.plot_logit_distributions(data, output_dir, category_name)
-            except Exception as e:
-                print(f"Error creating logit distributions: {e}")
-            
-            # Efficiency/fake rate vs kinematic variables
-            for variable in ['pt', 'eta', 'phi']:
-                try:
-                    self.plot_efficiency_fakerate_vs_variable(data, variable, output_dir, category_name)
-                except Exception as e:
-                    print(f"Error creating efficiency/fake rate vs {variable} plot: {e}")
-            
-            # Calculate summary statistics
-            predictions = data['predictions']
-            true_validity = data['true_validity']
-            
-            if len(predictions) > 0:
-                n_total = len(predictions)
-                n_true_tracks = true_validity.sum()
-                n_fake_tracks = n_total - n_true_tracks
-                n_pred_valid = predictions.sum()
+        for category in categories:
+            if category in organized_data and organized_data[category]['logits'] is not None and len(organized_data[category]['logits']) > 0:
+                print(f"\n{'='*20} Evaluating {category} {'='*20}")
+                print(f"Total tracks: {len(organized_data[category]['predictions']):,}")
                 
-                true_positives = (predictions & true_validity).sum()
-                false_positives = (predictions & ~true_validity).sum()
-                true_negatives = (~predictions & ~true_validity).sum()
+                # Run evaluation for this category
+                result = self.evaluate_category(
+                    organized_data[category],
+                    category
+                )
                 
-                efficiency = true_positives / n_true_tracks if n_true_tracks > 0 else 0  # TP / (TP + FN)
-                fake_rate = false_positives / n_total if n_total > 0 else 0  # FP / Total predictions
+                all_results[category] = result
                 
-                all_results[category_name] = {
-                    'num_tracks': n_total,
-                    'efficiency': efficiency,
-                    'fake_rate': fake_rate,
-                    'roc_auc': roc_auc
+                # Print summary for this category
+                print(f"  Efficiency: {result['efficiency']:.4f}")
+                print(f"  Fake Rate: {result['fake_rate']:.4f}")
+                if result['roc_auc'] is not None:
+                    print(f"  ROC AUC: {result['roc_auc']:.4f}")
+            else:
+                print(f"\n{'='*20} Skipping {category} {'='*20}")
+                print("No tracks found for this category")
+                all_results[category] = {
+                    'num_tracks': 0,
+                    'efficiency': 0.0,
+                    'fake_rate': 0.0,
+                    'roc_auc': None
                 }
-                
-                print(f"\n{category_name.upper()} METRICS:")
-                print(f"  Total tracks: {n_total:,}")
-                print(f"  Efficiency: {efficiency:.4f}")
-                print(f"  Fake rate: {fake_rate:.4f}")
-                if roc_auc is not None:
-                    print(f"  ROC AUC: {roc_auc:.4f}")
-            
-            # Write individual summary
-            try:
-                self.write_category_summary(data, output_dir, category_name, roc_auc)
-            except Exception as e:
-                print(f"Error writing summary for {category_name}: {e}")
         
         # Write comparative summary
-        self.write_comparative_summary(all_results, baseline_stats)
+        self.write_comparative_summary(all_results, baseline_stats, ml_region_stats)
         
-        print(f"\nTask 2 evaluation with categories complete. Results saved to {self.output_dir}")
+        print("\n" + "=" * 80)
+        print("TASK 2 EVALUATION COMPLETED")
+        print("=" * 80)
+        
+        return all_results
 
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 2: Track Validity Classification')
     parser.add_argument('--eval_path', type=str, 
-                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                       default="/scratch/epoch=069-val_loss=2.87600_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
-                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                       default="/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600",
                        help='Path to processed test data directory')
     parser.add_argument('--output_dir', type=str, 
                        default='./tracking_evaluation_results/task2_track_validity',
                        help='Base output directory for plots and results')
     parser.add_argument('--max_events', "-m", type=int, default=1000,
                        help='Maximum number of events to process (for testing)')
+    parser.add_argument('--random_seed', type=int, default=42,
+                       help='Random seed for reproducible sampling')
     
     args = parser.parse_args()
     
@@ -804,13 +971,15 @@ def main():
     print(f"Data directory: {args.data_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Max events: {args.max_events}")
+    print(f"Random seed: {args.random_seed}")
     
     try:
         evaluator = Task2TrackValidityEvaluator(
             eval_path=args.eval_path,
             data_dir=args.data_dir,
             output_dir=args.output_dir,
-            max_events=args.max_events
+            max_events=args.max_events,
+            random_seed=args.random_seed
         )
         
         evaluator.run_evaluation_with_categories()

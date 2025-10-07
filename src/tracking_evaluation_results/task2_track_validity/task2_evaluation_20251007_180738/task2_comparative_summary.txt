@@ -1,0 +1,43 @@
+
+================================================================================
+TASK 2: TRACK VALIDITY CLASSIFICATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-10-07 18:10:19
+Evaluation file: /scratch/epoch=069-val_loss=2.87600_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+Max events processed: 84300
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 127,672
+Failed minimum hits (>=9): 1,352
+Failed eta cuts (0.1 <= |eta| <= 2.7): 4,159
+Failed pt cuts (pt >= 3.0 GeV): 0
+Failed insufficient stations (<3 stations): 68,711
+Failed hits per station (<3 stations with >=3 hits): 1,812
+Tracks passing all cuts: 57,149
+
+ML REGION FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 127,672
+Failed minimum hits (>=3): 0
+Failed eta cuts (|eta| <= 2.7): 0
+Failed pt cuts (pt >= 5.0 GeV): 0
+Tracks passing all cuts: 127,672
+
+TRACKS ANALYZED PER CATEGORY
+------------------------------
+All Tracks: 168,600 tracks
+Baseline Tracks: 98,077 tracks
+ML Region Tracks: 168,600 tracks
+Rejected Tracks: 0 tracks
+
+COMPARATIVE METRICS
+--------------------
+Category            Num Tracks     Efficiency  Fake Rate   ROC AUC   
+----------------------------------------------------------------------
+All Tracks          168600         0.9807      0.0513      0.9782    
+Baseline Tracks     98077          0.9809      0.0882      0.9763    
+ML Region Tracks    168600         0.9807      0.0513      0.9782    
+Rejected Tracks     0              0.0000      0.0000      N/A       
+

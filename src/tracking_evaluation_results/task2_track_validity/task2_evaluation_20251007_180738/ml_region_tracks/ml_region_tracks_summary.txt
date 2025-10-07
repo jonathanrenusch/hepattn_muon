@@ -1,0 +1,28 @@
+TASK 2: TRACK VALIDITY CLASSIFICATION - ML REGION TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-10-07 18:10:19
+Category: ML Region Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 168,600
+True valid tracks: 127,672
+True invalid tracks: 40,928
+Predicted valid tracks: 133,852
+Predicted invalid tracks: 34,748
+
+CONFUSION MATRIX
+----------------
+True Positives: 125,203
+False Positives: 8,649
+True Negatives: 32,279
+False Negatives: 2,469
+
+PERFORMANCE METRICS
+--------------------
+Overall Efficiency: 0.9807
+Fake Rate: 0.0513
+ROC AUC: 0.9782
+
+Generated at: 2025-10-07 18:10:19.494575

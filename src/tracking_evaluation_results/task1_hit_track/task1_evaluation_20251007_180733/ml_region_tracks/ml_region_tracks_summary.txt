@@ -1,0 +1,34 @@
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - ML_REGION_TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-10-07 18:10:27
+Category: Ml Region Tracks
+
+DATASET INFORMATION
+--------------------
+Number of tracks analyzed: 127,672
+
+OVERALL PERFORMANCE METRICS
+------------------------------
+ROC AUC: 0.9669
+Overall Hit Assignment Efficiency: 0.9331
+Overall Hit Assignment Purity: 0.8734
+Overall Double Matching Efficiency: 0.9453
+
+AVERAGE METRICS BY KINEMATIC VARIABLE
+----------------------------------------
+PT:
+  Average Efficiency: 0.9331
+  Average Purity: 0.8734
+  Average Double Matching: 0.9453
+
+ETA:
+  Average Efficiency: 0.9331
+  Average Purity: 0.8734
+  Average Double Matching: 0.9453
+
+PHI:
+  Average Efficiency: 0.9331
+  Average Purity: 0.8734
+  Average Double Matching: 0.9453
+

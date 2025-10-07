@@ -479,12 +479,7 @@ class Task1HitTrackEvaluator:
         """Calculate efficiency and purity binned by a kinematic variable."""
         
         if bins is None:
-            if variable == 'pt':
-                bins = np.linspace(0, 200, 21)  # 20 bins: 0 to 200 GeV linear
-            elif variable == 'eta':
-                bins = np.linspace(-3, 3, 21)  # 20 bins: -3 to 3
-            elif variable == 'phi':
-                bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins: -pi to pi
+            bins = self._calculate_data_driven_bins(variable)
         
         # Extract the variable values
         var_values = np.array([track[variable] for track in self.track_info])
@@ -548,12 +543,7 @@ class Task1HitTrackEvaluator:
         """
         
         if bins is None:
-            if variable == 'pt':
-                bins = np.linspace(0, 200, 21)  # 20 bins: 0 to 200 GeV linear
-            elif variable == 'eta':
-                bins = np.linspace(-3, 3, 21)  # 20 bins: -3 to 3
-            elif variable == 'phi':
-                bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins: -pi to pi
+            bins = self._calculate_data_driven_bins(variable)
         
         # Extract the variable values
         var_values = np.array([track[variable] for track in self.track_info])
@@ -611,13 +601,8 @@ class Task1HitTrackEvaluator:
     def plot_efficiency_purity_vs_variable(self, variable='pt', output_subdir=None):
         """Plot efficiency and purity vs a kinematic variable."""
         
-        # Define bins
-        if variable == 'pt':
-            bins = np.linspace(0, 200, 21)  # 20 bins: 0 to 200 GeV linear
-        elif variable == 'eta':
-            bins = np.linspace(-3, 3, 21)  # 20 bins: -3 to 3
-        elif variable == 'phi':
-            bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins: -pi to pi
+        # Use data-driven bins
+        bins = self._calculate_data_driven_bins(variable)
         
         bin_centers, efficiencies, purities, eff_errors, pur_errors = self.calculate_efficiency_purity_by_variable(variable, bins)
         
@@ -696,13 +681,8 @@ class Task1HitTrackEvaluator:
     def plot_double_matching_efficiency_vs_variable(self, variable='pt', output_subdir=None):
         """Plot double matching efficiency vs a kinematic variable."""
         
-        # Define bins
-        if variable == 'pt':
-            bins = np.linspace(0, 200, 21)  # 20 bins: 0 to 200 GeV linear
-        elif variable == 'eta':
-            bins = np.linspace(-3, 3, 21)  # 20 bins: -3 to 3
-        elif variable == 'phi':
-            bins = np.linspace(-np.pi, np.pi, 21)  # 20 bins: -pi to pi
+        # Use data-driven bins
+        bins = self._calculate_data_driven_bins(variable)
         
         bin_centers, double_matching_effs, dm_errors = self.calculate_double_matching_efficiency_by_variable(variable, bins)
         
@@ -882,6 +862,36 @@ class Task1HitTrackEvaluator:
         
         print(f"Individual summary for {category_name} written to {summary_path}")
 
+    def _calculate_data_driven_bins(self, variable, num_bins=21):
+        """Calculate data-driven bins for a kinematic variable."""
+        if len(self.track_info) == 0:
+            # Fallback to fixed bins if no data
+            if variable == 'pt':
+                return np.linspace(0, 200, num_bins)
+            elif variable == 'eta':
+                return np.linspace(-3, 3, num_bins)
+            elif variable == 'phi':
+                return np.linspace(-np.pi, np.pi, num_bins)
+        
+        # Extract variable values from track info
+        var_values = np.array([track[variable] for track in self.track_info])
+        
+        if variable == 'pt':
+            # PT: min of data to 200
+            min_val = np.min(var_values)
+            max_val = 200.0
+            return np.linspace(min_val, max_val, num_bins)
+        elif variable == 'eta':
+            # Eta: min to max of data
+            min_val = np.min(var_values)
+            max_val = np.max(var_values)
+            return np.linspace(min_val, max_val, num_bins)
+        elif variable == 'phi':
+            # Phi: keep standard range
+            return np.linspace(-np.pi, np.pi, num_bins)
+        
+        return np.linspace(0, 1, num_bins)  # Fallback
+
     def _write_comparative_summary(self, results, baseline_stats, ml_region_stats):
         """Write comprehensive summary comparing all categories."""
         summary_path = self.output_dir / 'task1_comparative_summary.txt'
@@ -987,7 +997,9 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 1: Hit-Track Assignment with Categories')
     parser.add_argument('--eval_path', type=str, 
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
-                       default="/scratch/epoch=048-val_loss=3.04778_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
+                       default="/scratch/epoch=069-val_loss=2.87600_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
+                    #    default="/scratch/epoch=069-val_loss=2.92863_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
+                    #    default="/scratch/epoch=048-val_loss=3.04778_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
