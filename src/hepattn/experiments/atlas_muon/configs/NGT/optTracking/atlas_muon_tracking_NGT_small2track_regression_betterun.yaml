@@ -1,5 +1,5 @@
 seed_everything: 42
-name: TRK-ATLAS-Muon-smallModel-better-run-nopos
+name: TRK-ATLAS-Muon-smallModel-better
 # ckpt_path: /home/iwsatlas1/jrenusch/master_thesis/tracking/hepattn_muon/logs/TRK-v0-full_20250630-T152409/ckpts/epoch=029-val_loss=0.61685.ckpt
 
 data:
@@ -65,7 +65,7 @@ data:
 
 trainer:
   # Training stuff here
-  max_epochs: 70
+  max_epochs: 140
   # max_epochs: 25
   num_sanity_val_steps: 1
   accelerator: gpu
@@ -194,16 +194,16 @@ model:
                   init_args:
                     input_size: 22
                     output_size: *dim
-               # posenc:
-                 # class_path: hepattn.models.posenc.PositionEncoder
-                 # init_args:
-                   # input_name: hit
-                   # dim: *dim
-                   # fields:
-                    #  - r
-                     # - theta
-                    #  - phi
-                   # dim: *dim
+                posenc:
+                  class_path: hepattn.models.posenc.PositionEncoder
+                  init_args:
+                    input_name: hit
+                    dim: *dim
+                    fields:
+                      - r
+                      - theta
+                      - phi
+                    dim: *dim
                   #  # scale: 0.1
 
 
