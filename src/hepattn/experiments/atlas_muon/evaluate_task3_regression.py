@@ -385,14 +385,8 @@ class Task3RegressionEvaluator:
                     residuals = predictions - truth
                     
                     # Compute truth-normalized residuals using absolute truth to avoid sign flips
-                    truth_abs = np.abs(truth)
-                    # Avoid division by zero by replacing very small values with NaN
-                    eps = 1e-12
-                    # denom = np.where(truth_abs > eps, truth_abs, np.nan)
-                    residuals = residuals / truth_abs
-                    # Filter out non-finite values
-                    # residuals = residuals[np.isfinite(residuals)]
-
+                    residuals = np.abs(truth)
+                    
                     if residuals.size > 0:
                         mean_residual = np.mean(residuals)
                         std_residual = np.std(residuals)
