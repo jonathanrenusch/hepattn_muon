@@ -14,7 +14,7 @@ data:
   # hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
-  num_workers: 90
+  num_workers: 12
   num_train: -1
   num_test: -1
   num_val: -1
@@ -136,7 +136,7 @@ model:
   #   skip_scheduler: false
   lrs_config:
     initial: 1e-5
-    max: 10e-5
+    max: 20e-5
     end: 1e-5
     pct_start: 0.05
     skip_scheduler: false
@@ -204,6 +204,9 @@ model:
                       - theta
                       - phi
                     dim: *dim
+                    sym_fields:
+                      - phi
+
                   #  # scale: 0.1
 
 
