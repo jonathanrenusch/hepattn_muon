@@ -1,7 +1,7 @@
 seed_everything: 42
 name: ATLAS-Muon-small-noNSW-noRPC
 
-# ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T115813/ckpts/epoch=022-val_loss=0.01176.ckpt
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-noNSW-noRPC_20251008-T231142/ckpts/epoch=023-val_loss=0.00482.ckpt
 data: 
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
@@ -14,11 +14,11 @@ data:
   val_dir: /scratch/ml_validation_data_144000_hdf_no-NSW_no-RPC
   test_dir: /scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC
 
-  num_workers: 100
+  num_workers: 12
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 60  # Start with batch_size=1 to avoid smart batching issues
+  batch_size: 1  # Start with batch_size=1 to avoid smart batching issues
   # use_smart_batching: false  # Disable smart batching as requested
 
   # ATLAS muon data parameters
@@ -68,7 +68,7 @@ trainer:
   num_sanity_val_steps: 1
   accelerator: gpu
   # devices: [1]
-  devices: -1
+  devices: [1]
   # devices: [1,2,3,4,5,6,7]
   # devices: -1
   precision: bf16-mixed
@@ -95,7 +95,7 @@ trainer:
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
-        write_outputs: false
+        write_outputs: True
         write_preds: True
         write_targets: false
         write_losses: false

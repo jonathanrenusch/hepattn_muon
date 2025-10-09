@@ -2,8 +2,8 @@ seed_everything: 42
 name: TRK-ATLAS-Muon-smallModel-better-run
 # ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run_20251005-T234835/ckpts/epoch=048-val_loss=3.04778.ckpt
 # ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run-nopos_20251006-T201846/ckpts/epoch=069-val_loss=2.92863.ckpt
-ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run_20251006-T192904/ckpts/epoch=069-val_loss=2.87600.ckpt
-
+#ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better-run_20251006-T192904/ckpts/epoch=069-val_loss=2.87600.ckpt
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/TRK-ATLAS-Muon-smallModel-better_20251007-T183116/ckpts/epoch=139-val_loss=2.74982.ckpt
 data:
 
   train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
@@ -16,7 +16,7 @@ data:
   # hit_eval_val: /scratch/epoch=021-val_auc=0.99969_ml_validation_data_144000_hdf5_eval.h5
   # hit_eval_test: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/HC-v3_20250622-T103156/ckpts/epoch=046-val_acc=0.96694_test_data_eval.h5
   
-  num_workers: 90
+  num_workers: 12
   num_train: -1
   num_test: -1
   num_val: -1

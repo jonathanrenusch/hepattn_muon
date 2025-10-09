@@ -70,7 +70,7 @@ trainer:
   num_sanity_val_steps: 1
   accelerator: gpu
   # devices: [0,1,2]
-  devices: [1]
+  devices: [0]
   # devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50 
@@ -136,7 +136,7 @@ model:
   #   skip_scheduler: false
   lrs_config:
     initial: 1e-5
-    max: 20e-5
+    max: 10e-5
     end: 1e-5
     pct_start: 0.05
     skip_scheduler: false
