@@ -129,6 +129,7 @@ class AtlasMuonDataset(Dataset):
 
         # Build the particle regression targets
         particle_ids = torch.from_numpy(particles["particle_id"])
+        # print("Particle IDs:", particle_ids)
 
         # Fill in empty slots with -999s and get the IDs of the particle on each hit
         particle_ids = torch.cat([particle_ids, -999 * torch.ones(self.event_max_num_particles - len(particle_ids))]).type(torch.int32)
@@ -276,29 +277,29 @@ class AtlasMuonDataset(Dataset):
             tracks_dict[feature_name] = tracks_array[:, i]
         
         
-        if self.hit_eval_path is not None:
-            with h5py.File(self.hit_eval_path, "r") as hit_eval_file:
-                assert str(idx) in hit_eval_file, f"Key {idx} not found in file {self.hit_eval_path}"
+        # if self.hit_eval_path is not None:
+        #     with h5py.File(self.hit_eval_path, "r") as hit_eval_file:
+        #         assert str(idx) in hit_eval_file, f"Key {idx} not found in file {self.hit_eval_path}"
 
-                hit_filter_pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
-                # TODO: print out the average match between hit filter and the ground truth you are loading here, 
-                # for a quick debugging gut check
-                # print("-"*20)
-                # print("true positives:", np.sum(hit_filter_pred & hits["on_valid_particle"]))
-                # print("false positives:", (np.sum(hit_filter_pred) - np.sum(hits["on_valid_particle"])))
-                # print("number of predicted hits:", np.sum(hit_filter_pred))
-                # print("number of true hits:", np.sum(hits["on_valid_particle"]))
-                # print("-"*20)
-                # print("true positives:", np.sum(hit_filter_pred & hits["on_valid_particle"]) / np.sum(hits["on_valid_particle"]))
-                # how many did we lose:
-                # print("precision:", np.sum(hit_filter_pred & hits["on_valid_particle"]) / np.sum(hit_filter_pred))
-                # # how many did we miss:
-                # print("false positives:", (np.sum(hit_filter_pred) - np.sum(hits["on_valid_particle"]))/ np.sum(hit_filter_pred))
-                # false positives:
-                # print("false positives:", np.sum(hit_filter_pred & ~hits["on_valid_particle"]) / np.sum(~hits["on_valid_particle"]))
-                for k in hits:
-                    hits[k] = hits[k][hit_filter_pred]
-            num_hits = np.sum(hit_filter_pred) 
+        #         hit_filter_pred = hit_eval_file[f"{idx}/preds/final/hit_filter/hit_on_valid_particle"][0]
+        #         # TODO: print out the average match between hit filter and the ground truth you are loading here, 
+        #         # for a quick debugging gut check
+        #         # print("-"*20)
+        #         # print("true positives:", np.sum(hit_filter_pred & hits["on_valid_particle"]))
+        #         # print("false positives:", (np.sum(hit_filter_pred) - np.sum(hits["on_valid_particle"])))
+        #         # print("number of predicted hits:", np.sum(hit_filter_pred))
+        #         # print("number of true hits:", np.sum(hits["on_valid_particle"]))
+        #         # print("-"*20)
+        #         # print("true positives:", np.sum(hit_filter_pred & hits["on_valid_particle"]) / np.sum(hits["on_valid_particle"]))
+        #         # how many did we lose:
+        #         # print("precision:", np.sum(hit_filter_pred & hits["on_valid_particle"]) / np.sum(hit_filter_pred))
+        #         # # how many did we miss:
+        #         # print("false positives:", (np.sum(hit_filter_pred) - np.sum(hits["on_valid_particle"]))/ np.sum(hit_filter_pred))
+        #         # false positives:
+        #         # print("false positives:", np.sum(hit_filter_pred & ~hits["on_valid_particle"]) / np.sum(~hits["on_valid_particle"]))
+        #         for k in hits:
+        #             hits[k] = hits[k][hit_filter_pred]
+        #     num_hits = np.sum(hit_filter_pred) 
 
 
         # This example starts of how this is being used in the Trackml don't run this
@@ -321,6 +322,7 @@ class AtlasMuonDataset(Dataset):
 
         particles = {
             'particle_id': np.unique(hits["spacePoint_truthLink"][hits["on_valid_particle"]]),  # Sequential IDs
+            # 'particle_id': np.unique(hits["spacePoint_truthLink"][hits["spacePoint_truthLink"] >=0 ]),  # Sequential IDs
             'truthMuon_pt': tracks_dict['truthMuon_pt'],
             'truthMuon_eta': tracks_dict['truthMuon_eta'],
             'truthMuon_phi': tracks_dict['truthMuon_phi'],
@@ -479,6 +481,6 @@ class AtlasMuonDataModule(LightningDataModule):
     def val_dataloader(self):
         return self.get_dataloader(dataset=self.val_dataset, stage="test", shuffle=False)
 
-    def test_dataloader(self):
-        return self.get_dataloader(dataset=self.test_dataset, stage="test", shuffle=False)
+    def test_dataloader(self, shuffle=False):
+        return self.get_dataloader(dataset=self.test_dataset, stage="test", shuffle=shuffle)
 
