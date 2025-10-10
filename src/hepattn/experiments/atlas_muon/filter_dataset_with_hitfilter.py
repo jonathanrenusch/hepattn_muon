@@ -175,7 +175,7 @@ class HitFilterDatasetReducer:
         )
         
         data_module.setup(stage='test')
-        test_dataloader = data_module.test_dataloader()
+        test_dataloader = data_module.test_dataloader(shuffle=True)
         
         all_logits = []
         all_true_labels = []

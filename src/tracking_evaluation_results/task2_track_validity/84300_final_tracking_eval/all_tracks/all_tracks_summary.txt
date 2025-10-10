@@ -1,0 +1,28 @@
+TASK 2: TRACK VALIDITY CLASSIFICATION - ALL TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-10-10 14:57:50
+Category: All Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 168,600
+True valid tracks: 127,672
+True invalid tracks: 40,928
+Predicted valid tracks: 133,257
+Predicted invalid tracks: 35,343
+
+CONFUSION MATRIX
+----------------
+True Positives: 125,444
+False Positives: 7,813
+True Negatives: 33,115
+False Negatives: 2,228
+
+PERFORMANCE METRICS
+--------------------
+Overall Efficiency: 0.9825
+Fake Rate: 0.0463
+ROC AUC: 0.9816
+
+Generated at: 2025-10-10 14:57:50.346827

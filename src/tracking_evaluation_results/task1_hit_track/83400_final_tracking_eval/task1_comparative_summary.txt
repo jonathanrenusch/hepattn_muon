@@ -1,0 +1,91 @@
+
+================================================================================
+TASK 1: HIT-TRACK ASSIGNMENT EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-10-10 14:56:11
+Evaluation file: /scratch/epoch=139-val_loss=2.74982_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+Max events processed: 84300
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 127,672
+Failed minimum hits (>=9): 1,352
+Failed eta cuts (0.1 <= |eta| <= 2.7): 4,159
+Failed pt cuts (pt >= 3 GeV): 0
+Failed insufficient stations (<3 stations): 68,711
+Failed hits per station (<3 stations with >=3 hits): 1,812
+Tracks passing all cuts: 57,149
+
+ML REGION FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 127,672
+Failed minimum hits (>=3): 0
+Failed eta cuts (|eta| <= 2.7): 0
+Failed pt cuts (pt >= 5.0 GeV): 0
+Tracks passing all cuts: 127,672
+
+TRACKS ANALYZED PER CATEGORY
+------------------------------
+All Tracks: 127,672 tracks
+Baseline Tracks: 57,149 tracks
+Ml Region Tracks: 127,672 tracks
+Rejected Tracks: 0 tracks
+
+COMPARATIVE METRICS
+--------------------
+Category            Roc Auc                  Overall Efficiency       Overall Purity           Overall Double Matching  Num Tracks     
+------------------------------------------------------------------------------------------------------------------------
+All Tracks          0.9693                   0.9294                   0.8817                   0.9462                   127672         
+Baseline Tracks     0.9693                   0.9193                   0.8821                   0.9351                   57149          
+Ml Region Tracks    0.9693                   0.9294                   0.8817                   0.9462                   127672         
+Rejected Tracks     N/A                      N/A                      N/A                      N/A                      0              
+
+ALL TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.9294
+  Average Purity: 0.8817
+  Average Double Matching: 0.9462
+ETA:
+  Average Efficiency: 0.9294
+  Average Purity: 0.8817
+  Average Double Matching: 0.9462
+PHI:
+  Average Efficiency: 0.9294
+  Average Purity: 0.8817
+  Average Double Matching: 0.9462
+
+BASELINE TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.9193
+  Average Purity: 0.8821
+  Average Double Matching: 0.9351
+ETA:
+  Average Efficiency: 0.9193
+  Average Purity: 0.8821
+  Average Double Matching: 0.9351
+PHI:
+  Average Efficiency: 0.9193
+  Average Purity: 0.8821
+  Average Double Matching: 0.9351
+
+ML REGION TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+PT:
+  Average Efficiency: 0.9294
+  Average Purity: 0.8817
+  Average Double Matching: 0.9462
+ETA:
+  Average Efficiency: 0.9294
+  Average Purity: 0.8817
+  Average Double Matching: 0.9462
+PHI:
+  Average Efficiency: 0.9294
+  Average Purity: 0.8817
+  Average Double Matching: 0.9462
+
+REJECTED TRACKS - DETAILED METRICS BY VARIABLE
+--------------------------------------------------
+

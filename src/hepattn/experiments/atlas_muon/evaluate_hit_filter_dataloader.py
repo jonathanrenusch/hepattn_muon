@@ -99,9 +99,9 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
     }
     
     qualified_tracks = set()
-    print("This is events ids unique: ", np.unique(all_particle_ids) )
-    print("This is the number of unique event ids: ", len(np.unique(all_event_ids)) )
-    print("sum true hits: ", np.sum(true_hit_mask))
+    # print("This is events ids unique: ", np.unique(all_particle_ids) )
+    # print("This is the number of unique event ids: ", len(np.unique(all_event_ids)) )
+    # print("sum true hits: ", np.sum(true_hit_mask))
     for event_id, particle_id in track_chunk:
         chunk_stats['total_tracks_checked'] += 1
         
@@ -143,7 +143,7 @@ def _process_track_chunk(track_chunk, all_event_ids, all_particle_ids, all_parti
         # Get station indices for this track
         track_stations = all_station_indices[track_mask]
         unique_stations, station_counts = np.unique(track_stations, return_counts=True)
-        print("this is unique stations: ", unique_stations)
+        # print("this is unique stations: ", unique_stations)
         
         # Check station requirements:
         # 1. At least 3 different stations
@@ -249,6 +249,90 @@ def _process_track_chunk_ml_region(track_chunk, all_event_ids, all_particle_ids,
     }
 
 
+def _process_track_chunk_time_region(track_chunk, all_event_ids, all_particle_ids, all_particle_pts, 
+                                     all_particle_etas, true_hit_mask):
+    """
+    Worker function to process a chunk of tracks for time region filtering.
+    Uses same criteria as ML region (no time-based track filtering):
+    - pt >= 5.0 GeV
+    - |eta| <= 2.7
+    - >= 3 hits per track
+    
+    Note: Time filtering is applied at the hit level, not track level.
+    
+    Args:
+        track_chunk: List of (event_id, particle_id) tuples to process
+        all_event_ids: Array of event IDs for all hits
+        all_particle_ids: Array of particle IDs for all hits
+        all_particle_pts: Array of particle pT values for all hits
+        all_particle_etas: Array of particle eta values for all hits
+        true_hit_mask: Boolean mask for true hits
+    
+    Returns:
+        Dictionary with qualified tracks and statistics for this chunk
+    """
+    chunk_stats = {
+        'total_tracks_checked': 0,
+        'tracks_failed_min_hits': 0,
+        'tracks_failed_eta_cuts': 0,
+        'tracks_failed_pt_cuts': 0,
+        'tracks_passed_all_cuts': 0
+    }
+    
+    qualified_tracks = set()
+    
+    # Time region criteria (same as ML region - no time constraint at track level)
+    TIME_PT_THRESHOLD = 5.0  # GeV
+    TIME_ETA_THRESHOLD = 2.7  # |eta| <= 2.7
+    TIME_MIN_HITS = 3  # minimum hits per track
+    
+    for event_id, particle_id in track_chunk:
+        chunk_stats['total_tracks_checked'] += 1
+        
+        # Get hits for this specific track
+        track_mask = (
+            (all_event_ids == event_id) & 
+            (all_particle_ids == particle_id) & 
+            true_hit_mask
+        )
+        track_hits = np.sum(track_mask)
+        
+        # Time Pre-filter 1: tracks must have at least 3 hits total
+        if track_hits < TIME_MIN_HITS:
+            chunk_stats['tracks_failed_min_hits'] += 1
+            continue
+        
+        # Get particle kinematic properties for this track
+        track_indices = np.where(track_mask)[0]
+        if len(track_indices) == 0:
+            chunk_stats['tracks_failed_min_hits'] += 1
+            continue
+            
+        # Use the first hit to get particle properties (all hits from same particle should have same pt/eta)
+        first_hit_idx = track_indices[0]
+        track_pt = all_particle_pts[first_hit_idx]
+        track_eta = all_particle_etas[first_hit_idx]
+        
+        # Time Pre-filter 2: eta acceptance cuts |eta| <= 2.7
+        if np.abs(track_eta) > TIME_ETA_THRESHOLD:
+            chunk_stats['tracks_failed_eta_cuts'] += 1
+            continue
+            
+        # Time Pre-filter 3: pt threshold >= 5.0 GeV
+        if track_pt < TIME_PT_THRESHOLD:
+            chunk_stats['tracks_failed_pt_cuts'] += 1
+            continue
+            
+        # Track passed all time region criteria (same as ML region)
+        qualified_tracks.add((event_id, particle_id))
+        chunk_stats['tracks_passed_all_cuts'] += 1
+    
+    return {
+        'qualified_tracks': qualified_tracks,
+        'stats': chunk_stats
+    }
+
+
 class AtlasMuonEvaluatorDataLoader:
     """Evaluation class for ATLAS muon hit filtering using DataLoader."""
     
@@ -264,14 +348,16 @@ class AtlasMuonEvaluatorDataLoader:
         self.output_dir = Path(output_dir) / f"run_{timestamp}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create subdirectories for all tracks, baseline filtered tracks, ml region tracks, and rejected tracks
+        # Create subdirectories for all tracks, baseline filtered tracks, ml region tracks, time region tracks, and rejected tracks
         self.all_tracks_dir = self.output_dir / "all_tracks"
         self.baseline_filtered_dir = self.output_dir / "baseline_filtered_tracks"
         self.ml_region_dir = self.output_dir / "ml_region"
+        self.time_region_dir = self.output_dir / "time_region"
         self.rejected_tracks_dir = self.output_dir / "rejected_tracks"
         self.all_tracks_dir.mkdir(parents=True, exist_ok=True)
         self.baseline_filtered_dir.mkdir(parents=True, exist_ok=True)
         self.ml_region_dir.mkdir(parents=True, exist_ok=True)
+        self.time_region_dir.mkdir(parents=True, exist_ok=True)
         self.rejected_tracks_dir.mkdir(parents=True, exist_ok=True)
         
         self.max_events = max_events
@@ -290,6 +376,7 @@ class AtlasMuonEvaluatorDataLoader:
         self.all_particle_ids = None
         self.all_event_ids = None
         self.all_station_indices = None
+        self.all_hit_times = None
     
     def setup_data_module(self):
         """Initialize the AtlasMuonDataModule with proper configuration."""
@@ -363,6 +450,7 @@ class AtlasMuonEvaluatorDataLoader:
             all_particle_technology = np.zeros(estimated_hits, dtype=np.int8)
             all_event_ids = np.zeros(estimated_hits, dtype=np.int32)
             all_station_indices = np.zeros(estimated_hits, dtype=np.int32)
+            all_hit_times = np.zeros(estimated_hits, dtype=np.float32)
             
             current_idx = 0
             events_processed = 0
@@ -380,6 +468,7 @@ class AtlasMuonEvaluatorDataLoader:
             all_particle_technology = []
             all_event_ids = []
             all_station_indices = []
+            all_hit_times = []
             current_idx = None
         
         try:
@@ -430,11 +519,12 @@ class AtlasMuonEvaluatorDataLoader:
                         hit_particle_ids = inputs_batch["plotting_spacePoint_truthLink"][0].numpy().astype(np.int32)
                         hit_technologies = inputs_batch["hit_spacePoint_technology"][0].numpy().astype(np.int8)
                         hit_station_indices = inputs_batch["hit_spacePoint_stationIndex"][0].numpy().astype(np.int32)
-                        print ("This is hit_station_indices: ", hit_station_indices / 0.1)
+                        hit_times = inputs_batch["hit_spacePoint_time"][0].numpy().astype(np.float32)
+                        # print ("This is hit_station_indices: ", hit_station_indices / 0.1)
                         
                         # Verify shapes match
                         n_hits = len(hit_logits)
-                        if n_hits != len(true_labels) or n_hits != len(hit_particle_ids) or n_hits != len(hit_station_indices):
+                        if n_hits != len(true_labels) or n_hits != len(hit_particle_ids) or n_hits != len(hit_station_indices) or n_hits != len(hit_times):
                             print(f"Warning: Shape mismatch in event {event_idx}")
                             continue
                         
@@ -476,6 +566,7 @@ class AtlasMuonEvaluatorDataLoader:
                                 all_particle_technology = np.resize(all_particle_technology, new_size)
                                 all_event_ids = np.resize(all_event_ids, new_size)
                                 all_station_indices = np.resize(all_station_indices, new_size)
+                                all_hit_times = np.resize(all_hit_times, new_size)
                             
                             # Copy data to pre-allocated arrays
                             all_logits[current_idx:current_idx+n_hits] = hit_logits
@@ -487,6 +578,7 @@ class AtlasMuonEvaluatorDataLoader:
                             all_particle_technology[current_idx:current_idx+n_hits] = hit_technologies
                             all_event_ids[current_idx:current_idx+n_hits] = event_idx
                             all_station_indices[current_idx:current_idx+n_hits] = hit_station_indices
+                            all_hit_times[current_idx:current_idx+n_hits] = hit_times
                             current_idx += n_hits
                         else:
                             # Fall back to list append
@@ -499,6 +591,7 @@ class AtlasMuonEvaluatorDataLoader:
                             all_particle_technology.append(hit_technologies)
                             all_event_ids.append(np.full(n_hits, event_idx, dtype=np.int32))
                             all_station_indices.append(hit_station_indices)
+                            all_hit_times.append(hit_times)
                         
                         events_processed += 1
                         
@@ -528,6 +621,7 @@ class AtlasMuonEvaluatorDataLoader:
             self.all_particle_technology = all_particle_technology[:current_idx]
             self.all_event_ids = all_event_ids[:current_idx]
             self.all_station_indices = all_station_indices[:current_idx]
+            self.all_hit_times = all_hit_times[:current_idx]
         else:
             # Concatenate lists
             self.all_logits = np.concatenate(all_logits) if all_logits else np.array([])
@@ -539,6 +633,7 @@ class AtlasMuonEvaluatorDataLoader:
             self.all_particle_technology = np.concatenate(all_particle_technology) if all_particle_technology else np.array([])
             self.all_event_ids = np.concatenate(all_event_ids) if all_event_ids else np.array([])
             self.all_station_indices = np.concatenate(all_station_indices) if all_station_indices else np.array([])
+            self.all_hit_times = np.concatenate(all_hit_times) if all_hit_times else np.array([])
         
         final_memory = process.memory_info().rss / 1024 / 1024
         print(f"\nData collection complete! Final memory: {final_memory:.1f} MB (+{final_memory-initial_memory:.1f} MB)")
@@ -547,6 +642,19 @@ class AtlasMuonEvaluatorDataLoader:
         print(f"True hits: {np.sum(self.all_true_labels):,}")
         print(f"Noise hits: {np.sum(~self.all_true_labels):,}")
         print(f"Valid particle hits (pt > 0): {np.sum(self.all_particle_pts > 0):,}")
+
+        # Print time statistics for hits
+        valid_time_mask = self.all_hit_times > -999  # Assuming -999 or similar indicates invalid times
+        if np.any(valid_time_mask):
+            valid_times = self.all_hit_times[valid_time_mask]
+            print("\nTime statistics for valid hits:")
+            print(f"  Min: {np.min(valid_times):.6f}")
+            print(f"  Max: {np.max(valid_times):.6f}")
+            print(f"  Mean: {np.mean(valid_times):.6f}")
+            print(f"  Median: {np.median(valid_times):.6f}")
+            time_threshold = 2000 * 0.00001  # 0.02
+            hits_below_time_threshold = np.sum(valid_times < time_threshold)
+            print(f"  Hits below time threshold ({time_threshold:.6f}): {hits_below_time_threshold:,} ({hits_below_time_threshold/len(valid_times)*100:.1f}%)")
 
         # Apply pT filter if specified
         if self.min_pt > 0 or self.max_pt < float('inf'):
@@ -972,6 +1080,228 @@ class AtlasMuonEvaluatorDataLoader:
         
         return ml_region_hit_mask, rejected_hit_mask, stats
     
+    def create_time_region_track_filter(self):
+        """
+        Create filter masks for time region evaluation that includes:
+        - ALL noise hits with time < 0.02 (removes high-time noise)
+        - True hits from tracks meeting ML region requirements (same as ML region)
+        
+        Time region requirements (same as ML region + hit-level time filtering):
+          * pt >= 5.0 GeV  
+          * |eta| <= 2.7 (detector acceptance region)
+          * >= 3 hits per track (minimum viable track)
+          * Hit-level filtering: only keep hits with time < 2000*0.00001 (0.02)
+        
+        This approach removes high-time noise hits while keeping all qualifying tracks,
+        improving signal-to-noise ratio based on the discriminating time feature.
+        
+        Returns:
+            time_region_mask: Boolean array for hits in time region evaluation
+            rejected_mask: Boolean array for hits in rejected tracks evaluation (same as ML region)
+            stats: Dictionary with detailed filtering statistics
+        """
+        print("Creating time region hit filter (ML region tracks + time < 0.02 hit filtering)...")
+        print("Strategy: Keep tracks meeting ML criteria + remove noise hits with time >= 0.02")
+        
+        # Apply hit-level time filtering first
+        TIME_THRESHOLD = 2000 * 0.00001  # 0.02 - discriminating time threshold
+        time_filtered_hit_mask = self.all_hit_times < TIME_THRESHOLD
+        
+        print(f"Hit-level time filtering (time < {TIME_THRESHOLD:.6f}):")
+        print(f"  Total hits before time filter: {len(self.all_hit_times):,}")
+        print(f"  Hits passing time filter: {np.sum(time_filtered_hit_mask):,} ({np.sum(time_filtered_hit_mask)/len(self.all_hit_times)*100:.1f}%)")
+        print(f"  Hits removed by time filter: {np.sum(~time_filtered_hit_mask):,} ({np.sum(~time_filtered_hit_mask)/len(self.all_hit_times)*100:.1f}%)")
+        
+        # Separate impact on true hits vs noise hits
+        true_hit_mask = self.all_true_labels
+        noise_hit_mask = ~true_hit_mask
+        
+        time_filtered_true_hits = np.sum(time_filtered_hit_mask & true_hit_mask)
+        time_filtered_noise_hits = np.sum(time_filtered_hit_mask & noise_hit_mask)
+        removed_true_hits = np.sum(~time_filtered_hit_mask & true_hit_mask)
+        removed_noise_hits = np.sum(~time_filtered_hit_mask & noise_hit_mask)
+        
+        print(f"  True hits passing time filter: {time_filtered_true_hits:,} / {np.sum(true_hit_mask):,} ({time_filtered_true_hits/np.sum(true_hit_mask)*100:.1f}%)")
+        print(f"  Noise hits passing time filter: {time_filtered_noise_hits:,} / {np.sum(noise_hit_mask):,} ({time_filtered_noise_hits/np.sum(noise_hit_mask)*100:.1f}%)")
+        print(f"  True hits removed by time filter: {removed_true_hits:,}")
+        print(f"  Noise hits removed by time filter: {removed_noise_hits:,}")
+        
+        # Only consider true hits for track evaluation (but after time filtering)
+        true_hit_mask_after_time_filter = true_hit_mask & time_filtered_hit_mask
+        print(f"True hits available for track evaluation after time filter: {np.sum(true_hit_mask_after_time_filter):,}")
+        
+        # Get unique combinations of (event_id, particle_id) for valid tracks (after time filtering)
+        valid_event_particle_combinations = np.unique(
+            np.column_stack([
+                self.all_event_ids[true_hit_mask_after_time_filter],
+                self.all_particle_ids[true_hit_mask_after_time_filter]
+            ]), axis=0
+        )
+        print(f"Found {len(valid_event_particle_combinations)} unique tracks with truth hits after time filtering")
+        
+        # Track statistics for detailed reporting (using same logic as ML region)
+        stats = {
+            'total_tracks_checked': 0,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
+            'tracks_passed_all_cuts': 0,
+            'hits_removed_by_time_filter': np.sum(~time_filtered_hit_mask),
+            'true_hits_removed_by_time_filter': removed_true_hits,
+            'noise_hits_removed_by_time_filter': removed_noise_hits
+        }
+        
+        # Parallel processing of tracks (same as ML region)
+        print(f"Processing {len(valid_event_particle_combinations)} tracks using parallel workers...")
+        
+        # Determine optimal number of workers
+        n_workers = min(mp.cpu_count(), max(1, len(valid_event_particle_combinations) // 100))
+        n_workers = min(n_workers, 100)  # Cap at 100 to avoid excessive overhead
+        print(f"Using {n_workers} parallel workers")
+        
+        # Split tracks into chunks for parallel processing
+        chunk_size = max(1, len(valid_event_particle_combinations) // n_workers)
+        track_chunks = [
+            valid_event_particle_combinations[i:i + chunk_size] 
+            for i in range(0, len(valid_event_particle_combinations), chunk_size)
+        ]
+        
+        print(f"Split tracks into {len(track_chunks)} chunks (avg size: {chunk_size})")
+        
+        # Create worker function with pre-bound arguments (no time filtering at track level)
+        worker_fn = partial(
+            _process_track_chunk_time_region,
+            all_event_ids=self.all_event_ids,
+            all_particle_ids=self.all_particle_ids,
+            all_particle_pts=self.all_particle_pts,
+            all_particle_etas=self.all_particle_etas,
+            true_hit_mask=true_hit_mask_after_time_filter  # Use time-filtered true hits
+        )
+        
+        # Process tracks in parallel
+        time_region_qualified_tracks = set()
+        with mp.Pool(processes=n_workers) as pool:
+            # Use tqdm to show progress
+            results = list(tqdm(
+                pool.imap(worker_fn, track_chunks),
+                total=len(track_chunks),
+                desc="Processing time region track chunks"
+            ))
+        
+        # Aggregate results from all workers
+        for result in results:
+            time_region_qualified_tracks.update(result['qualified_tracks'])
+            for key in stats:
+                if key in result['stats']:
+                    stats[key] += result['stats'][key]
+        
+        # Print detailed statistics
+        print(f"Time region track filtering results (same as ML region):")
+        print(f"  Total tracks checked: {stats['total_tracks_checked']}")
+        print(f"  Failed minimum hits (>= 3): {stats['tracks_failed_min_hits']} ({stats['tracks_failed_min_hits']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (|eta| <= 2.7): {stats['tracks_failed_eta_cuts']} ({stats['tracks_failed_eta_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 5.0 GeV): {stats['tracks_failed_pt_cuts']} ({stats['tracks_failed_pt_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {stats['tracks_passed_all_cuts']} ({stats['tracks_passed_all_cuts']/stats['total_tracks_checked']*100:.1f}%)")
+        
+        # Create masks for hits to include in time region evaluation
+        print("Creating hit masks for time region evaluation...")
+        time_region_hit_mask = np.zeros(len(self.all_logits), dtype=bool)
+        rejected_hit_mask = np.zeros(len(self.all_logits), dtype=bool)
+        
+        # Include noise hits that pass time filter
+        noise_hits_passing_time = noise_hit_mask & time_filtered_hit_mask
+        time_region_hit_mask |= noise_hits_passing_time
+        
+        # For rejected tracks, use same logic as ML region but with time-filtered noise
+        # This ensures consistent comparison methodology
+        rejected_hit_mask |= noise_hits_passing_time
+        
+        # Create sets for time region qualified tracks (same as ML region tracks)
+        time_region_qualified_track_set = set(time_region_qualified_tracks)
+        all_track_set = set(tuple(track) for track in valid_event_particle_combinations)
+        rejected_track_set = all_track_set - time_region_qualified_track_set
+        
+        print(f"Creating masks for {len(time_region_qualified_tracks)} time region tracks and {len(rejected_track_set)} rejected tracks...")
+        
+        # OPTIMIZED: Memory-efficient chunked mask creation for large datasets
+        # Create arrays for efficient vectorized comparison (use time-filtered true hits)
+        hit_event_ids = self.all_event_ids[true_hit_mask_after_time_filter]
+        hit_particle_ids = self.all_particle_ids[true_hit_mask_after_time_filter]
+        true_hit_indices = np.where(true_hit_mask_after_time_filter)[0]
+        
+        # Process tracks in chunks to avoid excessive memory usage
+        chunk_size = min(1000, max(100, len(time_region_qualified_tracks) // 10))
+        
+        # Convert track sets to arrays for vectorized operations
+        if time_region_qualified_tracks:
+            time_region_tracks_array = np.array(list(time_region_qualified_tracks))
+            print(f"Processing {len(time_region_tracks_array)} time region tracks in chunks of {chunk_size}...")
+            
+            for i in range(0, len(time_region_tracks_array), chunk_size):
+                chunk_tracks = time_region_tracks_array[i:i + chunk_size]
+                chunk_event_ids = chunk_tracks[:, 0]
+                chunk_particle_ids = chunk_tracks[:, 1]
+                
+                # Vectorized comparison for this chunk
+                time_region_matches = (
+                    hit_event_ids[:, np.newaxis] == chunk_event_ids[np.newaxis, :]
+                ) & (
+                    hit_particle_ids[:, np.newaxis] == chunk_particle_ids[np.newaxis, :]
+                )
+                time_region_hit_indices = true_hit_indices[np.any(time_region_matches, axis=1)]
+                time_region_hit_mask[time_region_hit_indices] = True
+        
+        if rejected_track_set:
+            rejected_tracks_array = np.array(list(rejected_track_set))
+            print(f"Processing {len(rejected_tracks_array)} rejected tracks in chunks of {chunk_size}...")
+            
+            for i in range(0, len(rejected_tracks_array), chunk_size):
+                chunk_tracks = rejected_tracks_array[i:i + chunk_size]
+                chunk_event_ids = chunk_tracks[:, 0]
+                chunk_particle_ids = chunk_tracks[:, 1]
+                
+                # Vectorized comparison for this chunk
+                rejected_matches = (
+                    hit_event_ids[:, np.newaxis] == chunk_event_ids[np.newaxis, :]
+                ) & (
+                    hit_particle_ids[:, np.newaxis] == chunk_particle_ids[np.newaxis, :]
+                )
+                rejected_hit_indices = true_hit_indices[np.any(rejected_matches, axis=1)]
+                rejected_hit_mask[rejected_hit_indices] = True
+            
+        # Calculate statistics for both categories
+        time_region_hit_count = np.sum(time_region_hit_mask)
+        time_region_true_hits = np.sum(time_region_hit_mask & true_hit_mask)
+        time_region_noise_hits = np.sum(time_region_hit_mask & noise_hit_mask)
+        
+        rejected_hit_count = np.sum(rejected_hit_mask)
+        rejected_true_hits = np.sum(rejected_hit_mask & true_hit_mask)
+        rejected_noise_hits = np.sum(rejected_hit_mask & noise_hit_mask)
+        
+        total_hits = len(self.all_logits)
+        
+        print(f"  Time region hits: {time_region_hit_count:,} / {total_hits:,} ({time_region_hit_count/total_hits*100:.1f}%)")
+        print(f"  Time region true hits: {time_region_true_hits:,}")
+        print(f"  Time region noise hits: {time_region_noise_hits:,}")
+        print(f"  Time region signal/noise ratio: {time_region_true_hits/time_region_noise_hits:.4f}" if time_region_noise_hits > 0 else "  Time region signal/noise ratio: inf")
+        
+        print(f"  Rejected hits: {rejected_hit_count:,} / {total_hits:,} ({rejected_hit_count/total_hits*100:.1f}%)")
+        print(f"  Rejected true hits: {rejected_true_hits:,}")
+        print(f"  Rejected noise hits: {rejected_noise_hits:,}")
+        print(f"  Rejected signal/noise ratio: {rejected_true_hits/rejected_noise_hits:.4f}" if rejected_noise_hits > 0 else "  Rejected signal/noise ratio: inf")
+        
+        # Additional statistics for the summary
+        stats['time_region_hit_count'] = time_region_hit_count
+        stats['time_region_true_hits'] = time_region_true_hits
+        stats['time_region_noise_hits'] = time_region_noise_hits
+        stats['rejected_hit_count'] = rejected_hit_count
+        stats['rejected_true_hits'] = rejected_true_hits
+        stats['rejected_noise_hits'] = rejected_noise_hits
+        stats['total_hits'] = total_hits
+        stats['rejected_tracks'] = len(rejected_track_set)
+        
+        return time_region_hit_mask, rejected_hit_mask, stats
+    
     def _backup_original_data(self):
         """Backup the original data before applying any filters."""
         self._original_logits = self.all_logits.copy()
@@ -982,6 +1312,7 @@ class AtlasMuonEvaluatorDataLoader:
         self._original_particle_ids = self.all_particle_ids.copy()
         self._original_event_ids = self.all_event_ids.copy()
         self._original_station_indices = self.all_station_indices.copy()
+        self._original_hit_times = self.all_hit_times.copy()
         if hasattr(self, 'all_particle_technology'):
             self._original_particle_technology = self.all_particle_technology.copy()
     
@@ -995,6 +1326,7 @@ class AtlasMuonEvaluatorDataLoader:
         self.all_particle_ids = self._original_particle_ids.copy()
         self.all_event_ids = self._original_event_ids.copy()
         self.all_station_indices = self._original_station_indices.copy()
+        self.all_hit_times = self._original_hit_times.copy()
         if hasattr(self, '_original_particle_technology'):
             self.all_particle_technology = self._original_particle_technology.copy()
     
@@ -1008,6 +1340,7 @@ class AtlasMuonEvaluatorDataLoader:
         self.all_particle_ids = self.all_particle_ids[hit_mask]
         self.all_event_ids = self.all_event_ids[hit_mask]
         self.all_station_indices = self.all_station_indices[hit_mask]
+        self.all_hit_times = self.all_hit_times[hit_mask]
         if hasattr(self, 'all_particle_technology'):
             self.all_particle_technology = self.all_particle_technology[hit_mask]
     
@@ -2561,7 +2894,7 @@ class AtlasMuonEvaluatorDataLoader:
     
     def run_full_evaluation(self, skip_individual_plots=True, skip_technology_plots=True, skip_eta_phi_plots=True):
         """
-        Run complete evaluation pipeline with all tracks, baseline filtered tracks, ML region tracks, and rejected tracks.
+        Run complete evaluation pipeline with all tracks, baseline filtered tracks, ML region tracks, time region tracks, and rejected tracks.
         
         Note: The rejected tracks region is now defined as tracks that fall outside the ML region
         (not outside the baseline region).
@@ -2575,7 +2908,7 @@ class AtlasMuonEvaluatorDataLoader:
         skip_eta_phi_plots : bool, default True
             Skip eta and phi binned plots to save time/space
         """
-        print("Starting full evaluation of ATLAS muon hit filter with baseline, ML region, and rejected tracks comparison...")
+        print("Starting full evaluation of ATLAS muon hit filter with baseline, ML region, time region, and rejected tracks comparison...")
         
         # Monitor memory throughout
         process = psutil.Process()
@@ -2599,10 +2932,14 @@ class AtlasMuonEvaluatorDataLoader:
         # Create ML region track filter (defines the new rejected region)
         ml_region_mask, rejected_mask, ml_region_filter_stats = self.create_ml_region_track_filter()
         
+        # Create time region track filter
+        time_region_mask, time_rejected_mask, time_region_filter_stats = self.create_time_region_track_filter()
+        
         # Store statistics for all evaluations
         all_tracks_stats = {}
         baseline_stats = baseline_filter_stats.copy()  # Include baseline filtering stats
         ml_region_stats = ml_region_filter_stats.copy()  # Include ML region filtering stats
+        time_region_stats = time_region_filter_stats.copy()  # Include time region filtering stats
         rejected_stats = ml_region_filter_stats.copy()  # Include ML region filtering stats (since rejected is based on ML region)
         
         # ===================================================================
@@ -2798,6 +3135,73 @@ class AtlasMuonEvaluatorDataLoader:
             gc.collect()
         else:
             print("Skipping technology-specific plots (use --include-tech to enable)")
+
+        # ===================================================================
+        # PHASE 5: Evaluate TIME REGION TRACKS (hit-level time filtering)
+        # ===================================================================
+        print("\n" + "="*80)
+        print("PHASE 5: EVALUATING TIME REGION (ML tracks + time < 0.02 hit filter)")
+        print("="*80)
+        
+        # Restore original data and apply time region filter
+        self._restore_original_data()
+        self._apply_hit_filter(time_region_mask)
+        
+        # Clear any cached ROC curves for time region evaluation
+        if hasattr(self, '_cached_roc'):
+            delattr(self, '_cached_roc')
+        
+        print(f"Time region data: {len(self.all_logits):,} hits ({len(self.all_logits)/len(self._original_logits)*100:.1f}% of original)")
+        
+        # Generate core plots for time region tracks
+        print("\n=== Generating core evaluation plots (TIME REGION) ===")
+        
+        # ROC curve
+        time_region_roc_auc = self.plot_roc_curve(output_subdir=self.time_region_dir)
+        time_region_stats['roc_auc'] = time_region_roc_auc
+        gc.collect()
+        
+        # Efficiency vs pT (main plots only)
+        self.plot_efficiency_vs_pt(skip_individual_plots=skip_individual_plots, output_subdir=self.time_region_dir)
+        gc.collect()
+        
+        # Working point performance
+        self.plot_working_point_performance(output_subdir=self.time_region_dir)
+        gc.collect()
+        
+        # Track lengths (lightweight, always include)
+        self.plot_track_lengths(output_subdir=self.time_region_dir)
+        gc.collect()
+        
+        current_memory = process.memory_info().rss / 1024 / 1024
+        print(f"Memory after time region plots: {current_memory:.1f} MB")
+        
+        # Store time region data statistics
+        time_region_stats.update({
+            'total_hits': len(self.all_logits),
+            'true_hits': np.sum(self.all_true_labels),
+            'noise_hits': np.sum(~self.all_true_labels),
+            'unique_tracks': len(np.unique(np.column_stack([
+                self.all_event_ids[self.all_true_labels], 
+                self.all_particle_ids[self.all_true_labels]
+            ]), axis=0))
+        })
+        
+        # Optional plots (can be skipped for speed/space)
+        if not skip_eta_phi_plots:
+            print("\n=== Generating eta/phi plots (TIME REGION) ===")
+            self.plot_efficiency_vs_eta(skip_individual_plots=skip_individual_plots, output_subdir=self.time_region_dir)
+            self.plot_efficiency_vs_phi(skip_individual_plots=skip_individual_plots, output_subdir=self.time_region_dir)
+            gc.collect()
+        else:
+            print("Skipping eta/phi plots (use --include-eta-phi to enable)")
+        
+        if not skip_technology_plots:
+            print("\n=== Generating technology-specific plots (TIME REGION) ===")
+            self._plot_efficiency_vs_pt_by_technology(DEFAULT_WORKING_POINTS, output_subdir=self.time_region_dir)
+            gc.collect()
+        else:
+            print("Skipping technology-specific plots (use --include-tech to enable)")
         
         # ===================================================================
         # PHASE 4: Evaluate REJECTED TRACKS (tracks outside ML region)
@@ -2866,6 +3270,8 @@ class AtlasMuonEvaluatorDataLoader:
         else:
             print("Skipping technology-specific plots (use --include-tech to enable)")
         
+        
+        
         # Restore original data for final cleanup
         self._restore_original_data()
         
@@ -2876,11 +3282,12 @@ class AtlasMuonEvaluatorDataLoader:
         print(f"  All tracks: {self.all_tracks_dir}")
         print(f"  Baseline filtered: {self.baseline_filtered_dir}")
         print(f"  ML region: {self.ml_region_dir}")
+        print(f"  Time region: {self.time_region_dir}")
         print(f"  Rejected tracks: {self.rejected_tracks_dir}")
         
         # Write comprehensive summary file
         self._write_comparative_evaluation_summary(
-            all_tracks_stats, baseline_stats, ml_region_stats, rejected_stats,
+            all_tracks_stats, baseline_stats, ml_region_stats, time_region_stats, rejected_stats,
             skip_individual_plots, skip_technology_plots, skip_eta_phi_plots
         )
         
@@ -2888,12 +3295,13 @@ class AtlasMuonEvaluatorDataLoader:
         print(f"All tracks AUC: {all_tracks_stats['roc_auc']:.4f}")
         print(f"Baseline filtered AUC: {baseline_stats['roc_auc']:.4f}")
         print(f"ML region AUC: {ml_region_stats['roc_auc']:.4f}")
+        print(f"Time region AUC: {time_region_stats['roc_auc']:.4f}")
         print(f"Rejected tracks AUC: {rejected_stats['roc_auc']:.4f}")
         
-        return all_tracks_stats, baseline_stats, ml_region_stats, rejected_stats
+        return all_tracks_stats, baseline_stats, ml_region_stats, time_region_stats, rejected_stats
     
-    def _write_comparative_evaluation_summary(self, all_tracks_stats, baseline_stats, ml_region_stats, rejected_stats, skip_individual_plots, skip_technology_plots, skip_eta_phi_plots):
-        """Write a comprehensive summary comparing all tracks vs baseline filtered vs ML region vs rejected tracks."""
+    def _write_comparative_evaluation_summary(self, all_tracks_stats, baseline_stats, ml_region_stats, time_region_stats, rejected_stats, skip_individual_plots, skip_technology_plots, skip_eta_phi_plots):
+        """Write a comprehensive summary comparing all tracks vs baseline filtered vs ML region vs time region vs rejected tracks."""
         summary_path = self.output_dir / "evaluation_summary_comparison.txt"
         
         with open(summary_path, 'w') as f:
@@ -2907,7 +3315,8 @@ class AtlasMuonEvaluatorDataLoader:
             f.write("1. ALL TRACKS: All tracks in the dataset (baseline for comparison)\n")
             f.write("2. BASELINE FILTERED: High-quality tracks meeting strict criteria\n")
             f.write("3. ML REGION: Tracks meeting ML training criteria (preprocessing filters)\n")
-            f.write("4. REJECTED TRACKS: Tracks outside the ML region\n\n")
+            f.write("4. TIME REGION: Tracks meeting ML criteria + time constraint (time < 0.02)\n")
+            f.write("5. REJECTED TRACKS: Tracks outside the ML region\n\n")
             
             f.write("BASELINE FILTERING CRITERIA:\n")
             f.write("- Tracks must have hits in at least 3 different stations\n") 
@@ -2921,7 +3330,13 @@ class AtlasMuonEvaluatorDataLoader:
             f.write("- Detector acceptance: |eta| <= 2.7\n")
             f.write("- Minimum pT threshold: >= 5.0 GeV\n\n")
             
-            f.write("NOTE: The rejected tracks region is now defined as tracks that fall\n")
+            f.write("TIME REGION FILTERING CRITERIA (ML + hit-level time filter):\n")
+            f.write("- All ML region criteria (above) PLUS:\n")
+            f.write("- Hit-level filtering: only keep hits with time < 2000*0.00001 (0.02)\n")
+            f.write("- This removes high-time noise hits while keeping all qualifying tracks\n")
+            f.write("- Improves signal-to-noise ratio based on discriminating time feature\n\n")
+            
+            f.write("NOTE: The rejected tracks region is defined as tracks that fall\n")
             f.write("outside the ML region (not outside the baseline region).\n\n")
             
             f.write("FILTERING STRATEGY:\n")
@@ -2960,6 +3375,26 @@ class AtlasMuonEvaluatorDataLoader:
                 f.write(f"Track retention rate: {ml_region_stats['tracks_passed_all_cuts']/ml_region_stats['total_tracks_checked']*100:.2f}%\n")
                 f.write(f"Hit retention rate: {ml_region_stats['ml_region_hit_count']/ml_region_stats['total_hits']*100:.2f}%\n\n")
             
+            # Add detailed time region filtering statistics
+            if 'total_tracks_checked' in time_region_stats:
+                f.write("=" * 50 + "\n")
+                f.write("TIME REGION FILTERING BREAKDOWN\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"Hit-level time filtering (time < 0.02):\n")
+                f.write(f"Hits removed by time filter: {time_region_stats.get('hits_removed_by_time_filter', 0):,}\n")
+                f.write(f"True hits removed: {time_region_stats.get('true_hits_removed_by_time_filter', 0):,}\n")
+                f.write(f"Noise hits removed: {time_region_stats.get('noise_hits_removed_by_time_filter', 0):,}\n\n")
+                f.write(f"Track filtering (same as ML region):\n")
+                f.write(f"Total tracks evaluated: {time_region_stats['total_tracks_checked']:,}\n")
+                f.write(f"Tracks failing minimum hits (>=3): {time_region_stats['tracks_failed_min_hits']:,} ({time_region_stats['tracks_failed_min_hits']/time_region_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks failing eta cuts (|eta| <= 2.7): {time_region_stats['tracks_failed_eta_cuts']:,} ({time_region_stats['tracks_failed_eta_cuts']/time_region_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks failing pT cuts (pT >= 5.0 GeV): {time_region_stats['tracks_failed_pt_cuts']:,} ({time_region_stats['tracks_failed_pt_cuts']/time_region_stats['total_tracks_checked']*100:.2f}%)\n")
+                f.write(f"Tracks passing ALL criteria: {time_region_stats['tracks_passed_all_cuts']:,} ({time_region_stats['tracks_passed_all_cuts']/time_region_stats['total_tracks_checked']*100:.2f}%)\n\n")
+                
+                f.write("TIME REGION FILTERING EFFICIENCY:\n")
+                f.write(f"Track retention rate: {time_region_stats['tracks_passed_all_cuts']/time_region_stats['total_tracks_checked']*100:.2f}%\n")
+                f.write(f"Hit retention rate: {time_region_stats['time_region_hit_count']/time_region_stats['total_hits']*100:.2f}%\n\n")
+            
             f.write("=" * 50 + "\n")
             f.write("ALL TRACKS ANALYSIS\n")
             f.write("=" * 50 + "\n")
@@ -2991,6 +3426,16 @@ class AtlasMuonEvaluatorDataLoader:
             f.write(f"AUC Score: {ml_region_stats['roc_auc']:.4f}\n\n")
             
             f.write("=" * 50 + "\n")
+            f.write("TIME REGION TRACKS ANALYSIS (time < 0.02 hit filter)\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Total hits analyzed: {time_region_stats['total_hits']:,}\n")
+            f.write(f"True hits: {time_region_stats['true_hits']:,}\n")
+            f.write(f"Noise hits: {time_region_stats['noise_hits']:,}\n")
+            f.write(f"Unique tracks: {time_region_stats['unique_tracks']:,}\n")
+            f.write(f"Truth hit ratio: {time_region_stats['true_hits']/time_region_stats['total_hits']*100:.2f}%\n")
+            f.write(f"AUC Score: {time_region_stats['roc_auc']:.4f}\n\n")
+            
+            f.write("=" * 50 + "\n")
             f.write("REJECTED TRACKS ANALYSIS (outside ML region)\n")
             f.write("=" * 50 + "\n")
             f.write(f"Total hits analyzed: {rejected_stats['total_hits']:,}\n")
@@ -3017,6 +3462,20 @@ class AtlasMuonEvaluatorDataLoader:
             f.write(f"Track retention rate: {ml_region_stats['unique_tracks']/all_tracks_stats['unique_tracks']*100:.2f}%\n")
             f.write(f"AUC improvement: {ml_region_stats['roc_auc'] - all_tracks_stats['roc_auc']:.4f}\n\n")
             
+            f.write("TIME REGION vs ALL TRACKS:\n")
+            f.write(f"Hit retention rate: {time_region_stats['total_hits']/all_tracks_stats['total_hits']*100:.2f}%\n")
+            f.write(f"True hit retention: {time_region_stats['true_hits']/all_tracks_stats['true_hits']*100:.2f}%\n")
+            f.write(f"Noise hit retention: {time_region_stats['noise_hits']/all_tracks_stats['noise_hits']*100:.2f}%\n")
+            f.write(f"Track retention rate: {time_region_stats['unique_tracks']/all_tracks_stats['unique_tracks']*100:.2f}%\n")
+            f.write(f"AUC improvement: {time_region_stats['roc_auc'] - all_tracks_stats['roc_auc']:.4f}\n\n")
+            
+            f.write("TIME REGION vs ML REGION:\n")
+            f.write(f"Hit retention rate: {time_region_stats['total_hits']/ml_region_stats['total_hits']*100:.2f}%\n")
+            f.write(f"True hit retention: {time_region_stats['true_hits']/ml_region_stats['true_hits']*100:.2f}%\n")
+            f.write(f"Noise hit retention: {time_region_stats['noise_hits']/ml_region_stats['noise_hits']*100:.2f}%\n")
+            f.write(f"Track retention rate: {time_region_stats['unique_tracks']/ml_region_stats['unique_tracks']*100:.2f}%\n")
+            f.write(f"AUC improvement: {time_region_stats['roc_auc'] - ml_region_stats['roc_auc']:.4f}\n\n")
+            
             f.write("REJECTED vs ALL TRACKS:\n")
             f.write(f"Hit retention rate: {rejected_stats['total_hits']/all_tracks_stats['total_hits']*100:.2f}%\n")
             f.write(f"True hit retention: {rejected_stats['true_hits']/all_tracks_stats['true_hits']*100:.2f}%\n")
@@ -3033,34 +3492,37 @@ class AtlasMuonEvaluatorDataLoader:
             
             baseline_purity = baseline_stats['true_hits']/baseline_stats['total_hits']
             ml_region_purity = ml_region_stats['true_hits']/ml_region_stats['total_hits']
+            time_region_purity = time_region_stats['true_hits']/time_region_stats['total_hits']
             rejected_purity = rejected_stats['true_hits']/rejected_stats['total_hits']
             all_tracks_purity = all_tracks_stats['true_hits']/all_tracks_stats['total_hits']
             f.write(f"Dataset purity (all tracks): {all_tracks_purity:.4f}\n")
             f.write(f"Dataset purity (baseline): {baseline_purity:.4f}\n")
             f.write(f"Dataset purity (ML region): {ml_region_purity:.4f}\n")
+            f.write(f"Dataset purity (time region): {time_region_purity:.4f}\n")
             f.write(f"Dataset purity (rejected): {rejected_purity:.4f}\n")
             f.write(f"Baseline purity improvement: {baseline_purity - all_tracks_purity:.4f}\n")
             f.write(f"ML region purity improvement: {ml_region_purity - all_tracks_purity:.4f}\n")
+            f.write(f"Time region purity improvement: {time_region_purity - all_tracks_purity:.4f}\n")
             f.write(f"Rejected purity change: {rejected_purity - all_tracks_purity:.4f}\n\n")
             
             f.write("PLOTS GENERATED:\n")
-            f.write("- ROC curve (all four datasets)\n")
-            f.write("- Efficiency vs pT (all four datasets)\n")
-            f.write("- Working point performance (all four datasets)\n")
-            f.write("- Track lengths (all four datasets)\n")
+            f.write("- ROC curve (all five datasets)\n")
+            f.write("- Efficiency vs pT (all five datasets)\n")
+            f.write("- Working point performance (all five datasets)\n")
+            f.write("- Track lengths (all five datasets)\n")
             
             if not skip_eta_phi_plots:
-                f.write("- Efficiency vs eta/phi (all four datasets)\n")
+                f.write("- Efficiency vs eta/phi (all five datasets)\n")
             else:
                 f.write("- Efficiency vs eta/phi (SKIPPED)\n")
                 
             if not skip_technology_plots:
-                f.write("- Technology-specific plots (all four datasets)\n")
+                f.write("- Technology-specific plots (all five datasets)\n")
             else:
                 f.write("- Technology-specific plots (SKIPPED)\n")
                 
             if not skip_individual_plots:
-                f.write("- Individual working point plots (all four datasets)\n")
+                f.write("- Individual working point plots (all five datasets)\n")
             else:
                 f.write("- Individual working point plots (SKIPPED)\n")
             
@@ -3068,6 +3530,7 @@ class AtlasMuonEvaluatorDataLoader:
             f.write(f"  All tracks: {self.all_tracks_dir}\n")
             f.write(f"  Baseline filtered: {self.baseline_filtered_dir}\n")
             f.write(f"  ML region: {self.ml_region_dir}\n")
+            f.write(f"  Time region: {self.time_region_dir}\n")
             f.write(f"  Rejected tracks: {self.rejected_tracks_dir}\n")
         
         print(f"Comparative evaluation summary saved to: {summary_path}")
@@ -3118,7 +3581,8 @@ def main():
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
-    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=023-val_loss=0.00482_ml_test_data_156000_hdf5_no-NSW_no-RPC_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_validation_data_144000_hdf5_eval.h5",
@@ -3132,7 +3596,8 @@ def main():
 
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_training_data_2694000_hdf5",
-    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
                        help='Path to processed test data directory')

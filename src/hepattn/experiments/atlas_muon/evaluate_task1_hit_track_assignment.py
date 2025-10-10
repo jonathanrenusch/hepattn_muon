@@ -997,7 +997,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 1: Hit-Track Assignment with Categories')
     parser.add_argument('--eval_path', type=str, 
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
-                       default="/scratch/epoch=069-val_loss=2.87600_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
+                    #    default="/scratch/epoch=069-val_loss=2.87600_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
+                       default="/scratch/epoch=139-val_loss=2.74982_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                     #    default="/scratch/epoch=069-val_loss=2.92863_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                     #    default="/scratch/epoch=048-val_loss=3.04778_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",

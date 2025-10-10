@@ -1,0 +1,28 @@
+TASK 2: TRACK VALIDITY CLASSIFICATION - BASELINE TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-10-10 14:57:52
+Category: Baseline Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 98,077
+True valid tracks: 57,149
+True invalid tracks: 40,928
+Predicted valid tracks: 64,039
+Predicted invalid tracks: 34,038
+
+CONFUSION MATRIX
+----------------
+True Positives: 56,226
+False Positives: 7,813
+True Negatives: 33,115
+False Negatives: 923
+
+PERFORMANCE METRICS
+--------------------
+Overall Efficiency: 0.9838
+Fake Rate: 0.0797
+ROC AUC: 0.9805
+
+Generated at: 2025-10-10 14:57:52.132425
