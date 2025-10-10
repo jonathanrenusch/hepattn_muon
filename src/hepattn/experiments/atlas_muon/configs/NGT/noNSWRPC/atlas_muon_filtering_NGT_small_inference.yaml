@@ -1,7 +1,8 @@
 seed_everything: 42
 name: ATLAS-Muon-small-noNSW-noRPC
 
-ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-noNSW-noRPC_20251008-T231142/ckpts/epoch=023-val_loss=0.00482.ckpt
+ckpt_path: /scratch/epoch=023-val_loss=0.00482.ckpt
+# ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-noNSW-noRPC_20251008-T231142/ckpts/epoch=023-val_loss=0.00482.ckpt
 data: 
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
@@ -11,8 +12,10 @@ data:
   # train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
   # val_dir: /shared/tracking/data/ml_validation_data_150K_processed
   train_dir: /scratch/ml_training_data_2694000_hdf5_no-NSW_no-RPC
+  # test_dir: /scratch/ml_training_data_2694000_hdf5_no-NSW_no-RPC
   val_dir: /scratch/ml_validation_data_144000_hdf_no-NSW_no-RPC
-  test_dir: /scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC
+  test_dir: /scratch/ml_validation_data_144000_hdf_no-NSW_no-RPC
+  # test_dir: /scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC
 
   num_workers: 12
   num_train: -1
