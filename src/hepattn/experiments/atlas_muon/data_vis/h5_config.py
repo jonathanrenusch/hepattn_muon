@@ -15,8 +15,9 @@ from networkx import hits
 # H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5"
 # H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600"
 # H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC"
-# H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf_no-NSW_no-RPC"
-H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5_no-NSW_no-RPC"
+H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf_no-NSW_no-RPC"
+
+# H5_FILEPATH = "/scratch/ml_training_data_2694000_hdf5_no-NSW_no-RPC"
 # H5_FILEPATH = "/scratch/ml_validation_data_144000_hdf5"
 # H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600"
 # H5_FILEPATH = "/scratch/ml_test_data_156000_hdf5"

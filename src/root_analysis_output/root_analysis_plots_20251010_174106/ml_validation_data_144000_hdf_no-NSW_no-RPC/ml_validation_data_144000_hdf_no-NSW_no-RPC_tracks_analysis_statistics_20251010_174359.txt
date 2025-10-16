@@ -1,0 +1,100 @@
+============================================================
+TRACK ANALYSIS STATISTICS
+============================================================
+Analysis timestamp: 2025-10-10 17:43:59
+Max events analyzed: 10000
+
+EVENT STATISTICS:
+------------------------------
+Total events analyzed: 10000
+
+TRACKS PER EVENT DISTRIBUTION:
+----------------------------------------
+1 tracks: 4897 events (48.97%)
+2 tracks: 4831 events (48.31%)
+3 tracks: 254 events (2.54%)
+4 tracks: 16 events (0.16%)
+5 tracks: 2 events (0.02%)
+
+Mean tracks per event: 1.54
+Standard deviation: 0.56
+Min tracks per event: 1
+Max tracks per event: 5
+
+TRACK LENGTH STATISTICS:
+-----------------------------------
+Total number of tracks: 15395
+Tracks with length < 3 hits: 0
+Percentage of tracks with < 3 hits: 0.00%
+Tracks with length > 3 hits: 15395
+Percentage of tracks with > 3 hits: 100.00%
+
+Mean track length: 22.02 hits
+Standard deviation: 6.84 hits
+Min track length: 3 hits
+Max track length: 64 hits
+
+TRACK LENGTH DISTRIBUTION:
+-----------------------------------
+3 hits: 9 tracks (0.06%)
+4 hits: 12 tracks (0.08%)
+5 hits: 38 tracks (0.25%)
+6 hits: 71 tracks (0.46%)
+7 hits: 27 tracks (0.18%)
+8 hits: 34 tracks (0.22%)
+9 hits: 34 tracks (0.22%)
+10 hits: 90 tracks (0.58%)
+11 hits: 140 tracks (0.91%)
+12 hits: 199 tracks (1.29%)
+13 hits: 225 tracks (1.46%)
+14 hits: 355 tracks (2.31%)
+15 hits: 405 tracks (2.63%)
+16 hits: 544 tracks (3.53%)
+17 hits: 912 tracks (5.92%)
+18 hits: 1543 tracks (10.02%)
+19 hits: 1948 tracks (12.65%)
+20 hits: 1437 tracks (9.33%)
+21 hits: 888 tracks (5.77%)
+22 hits: 778 tracks (5.05%)
+23 hits: 702 tracks (4.56%)
+24 hits: 624 tracks (4.05%)
+25 hits: 574 tracks (3.73%)
+26 hits: 566 tracks (3.68%)
+27 hits: 401 tracks (2.60%)
+28 hits: 411 tracks (2.67%)
+29 hits: 372 tracks (2.42%)
+30 hits: 338 tracks (2.20%)
+31 hits: 289 tracks (1.88%)
+32 hits: 215 tracks (1.40%)
+33 hits: 183 tracks (1.19%)
+34 hits: 174 tracks (1.13%)
+35 hits: 148 tracks (0.96%)
+36 hits: 131 tracks (0.85%)
+37 hits: 106 tracks (0.69%)
+38 hits: 64 tracks (0.42%)
+39 hits: 69 tracks (0.45%)
+40 hits: 54 tracks (0.35%)
+41 hits: 53 tracks (0.34%)
+42 hits: 36 tracks (0.23%)
+43 hits: 34 tracks (0.22%)
+44 hits: 28 tracks (0.18%)
+45 hits: 27 tracks (0.18%)
+46 hits: 7 tracks (0.05%)
+47 hits: 22 tracks (0.14%)
+48 hits: 18 tracks (0.12%)
+49 hits: 20 tracks (0.13%)
+50 hits: 4 tracks (0.03%)
+51 hits: 7 tracks (0.05%)
+52 hits: 3 tracks (0.02%)
+53 hits: 7 tracks (0.05%)
+54 hits: 5 tracks (0.03%)
+55 hits: 3 tracks (0.02%)
+56 hits: 4 tracks (0.03%)
+57 hits: 4 tracks (0.03%)
+58 hits: 1 tracks (0.01%)
+63 hits: 1 tracks (0.01%)
+64 hits: 1 tracks (0.01%)
+
+============================================================
+DETECTOR TECHNOLOGY STATISTICS: Failed to calculate
+============================================================

@@ -32,7 +32,7 @@ dependencies = [
     "numba>=0.61.2",
     "onnx>=1.18.0",
     "onnxruntime>=1.22.0",
-    "optuna>=4.0.0",
+    "optuna>=4.0.0", "atlasify>=0.8.0,<0.9",
 ]
 
 [build-system]

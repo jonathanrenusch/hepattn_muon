@@ -1,0 +1,16 @@
+================================================================================
+EVENT 700 DISPLAY INFORMATION
+================================================================================
+
+Total hits in event: 7230
+Hits passing filter (logits > -1.5): 115 (1.59%)
+Hits rejected: 7115 (98.41%)
+
+Filter threshold: -1.5 (on logits)
+
+Tracks in filtered event:
+  Track 0: 30 hits
+  Track 1: 27 hits
+  Background: 58 hits
+
+================================================================================

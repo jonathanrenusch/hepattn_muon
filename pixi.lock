@@ -154,6 +154,7 @@ environments:
       - pypi: https://download.pytorch.org/whl/test/aiohttp-3.10.8-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://download.pytorch.org/whl/test/aiosignal-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/39/4a/4c61d4c84cfd9befb6fa08a702535b27b21fff08c946bc2f6139decbf7f7/alembic-1.16.5-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/20/93/9230c0806f7ea449ceafb89129a3ceae2cec058b0f88a85f659a514e485e/atlasify-0.8.0.tar.gz
       - pypi: https://download.pytorch.org/whl/test/attrs-24.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/aa/c465e2d4d6430e8505264d9de999e19569416a85258733cb575ed39b94c8/awkward-2.8.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d3/55/32212854831ab59772fa612b0507d94dc9b56ea40123f8a63da040fd3564/awkward_cpp-45-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -341,6 +342,13 @@ packages:
   - tomli ; python_full_version < '3.11'
   - tzdata ; extra == 'tz'
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/20/93/9230c0806f7ea449ceafb89129a3ceae2cec058b0f88a85f659a514e485e/atlasify-0.8.0.tar.gz
+  name: atlasify
+  version: 0.8.0
+  sha256: 4623c23c2795fc2e457550783712b390e3626f8ee64309fbe4d53d8c02d93105
+  requires_dist:
+  - matplotlib
+  - packaging
 - pypi: https://download.pytorch.org/whl/test/attrs-24.2.0-py3-none-any.whl
   name: attrs
   version: 24.2.0
@@ -1532,7 +1540,7 @@ packages:
 - pypi: .
   name: hepattn
   version: 0.1.0
-  sha256: e3344a8f7004285e2d2ba59f36ca267fb915913d67e4bd9d8c2fbb76e67693ac
+  sha256: 090b3591a0af98c96102af03490f39230b2d15cb438a6e6f3fb39f02a4996b90
   requires_dist:
   - packaging>=20.0,<25.0
   - wheel
@@ -1560,6 +1568,7 @@ packages:
   - onnx>=1.18.0
   - onnxruntime>=1.22.0
   - optuna>=4.0.0
+  - atlasify>=0.8.0,<0.9
   requires_python: ==3.12
   editable: true
 - pypi: https://files.pythonhosted.org/packages/aa/44/afb4051adec67d014ad8bfe45a068ec21f95b1dd357411772c9a5baa0b97/hepunits-2.3.5-py3-none-any.whl

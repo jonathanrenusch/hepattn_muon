@@ -1,0 +1,76 @@
+================================================================================
+ATLAS MUON TRACKING MODEL EVALUATION - TRACKING STAGE
+================================================================================
+
+ABSTRACT
+--------------------------------------------------------------------------------
+This analysis evaluates the tracking stage of a two-stage graph neural
+network model for muon track reconstruction in the ATLAS detector at
+High-Luminosity LHC conditions. The model processes simulated proton-proton
+collisions at √s = 14 TeV with an average pileup of <μ> = 200, using events
+containing muons from t𝑡̄, J/ψ, and Z→μμ processes with pT > 5 GeV.
+
+The two-stage architecture consists of: (1) a hit filtering stage that
+reduces combinatorial background by classifying detector hits as signal or
+noise, and (2) a tracking stage that performs hit-to-track assignment and
+simultaneously reconstructs track parameters (η, φ, pT) and classifies the
+muon charge sign. The following plots assess the tracking stage performance.
+
+Uncertainty quantification uses standard error of the mean for continuous
+metrics (hit assignment efficiency and purity) and Clopper-Pearson 95%%
+confidence intervals for binomial proportions (charge classification
+accuracy). The Clopper-Pearson method provides exact coverage guarantees
+for finite sample sizes, ensuring statistically rigorous uncertainty
+estimates.
+
+
+================================================================================
+FIGURE CAPTIONS
+================================================================================
+
+Figure 1: Hit Assignment Efficiency and Purity vs Pseudorapidity
+----------------------------------------------------------------------
+Mean hit assignment efficiency (blue circles) and purity (green squares)
+as a function of truth muon pseudorapidity η. Efficiency quantifies the
+fraction of true hits correctly assigned to each track, while purity
+measures the fraction of assigned hits that are correct. Error bars
+represent the standard error of the mean.
+
+
+Figure 2: Double Matching Efficiency vs Pseudorapidity
+----------------------------------------------------------------------
+Fraction of tracks satisfying both efficiency ≥ 50%% and purity ≥ 50%%
+criteria as a function of truth pseudorapidity η. This metric requires
+bidirectional consistency between hit-to-track and track-to-hits
+assignments. Error bars show 95%% Clopper-Pearson confidence intervals.
+
+
+Figure 3: Charge Classification Accuracy vs Pseudorapidity
+----------------------------------------------------------------------
+Accuracy of muon charge sign classification (±1) as a function of truth
+pseudorapidity η. Error bars represent 95%% Clopper-Pearson confidence
+intervals for the binomial proportion of correctly classified tracks.
+
+
+Figure 4: Transverse Momentum Distribution Comparison
+----------------------------------------------------------------------
+Comparison of predicted (red) and truth (blue) transverse momentum
+distributions for reconstructed muon tracks. Agreement between the two
+distributions indicates unbiased pT estimation across the kinematic range.
+
+
+================================================================================
+DATASET AND METHODOLOGY NOTES
+================================================================================
+- Simulation: pp collisions at √s = 14 TeV, HL-LHC conditions
+- Average pileup: <μ> = 200 interactions per bunch crossing
+- Physics processes: t𝑡̄, J/ψ→μμ, Z→μμ
+- Muon selection: pT > 5 GeV
+- Model architecture: Two-stage graph neural network
+  * Stage 1: Hit filtering (signal/noise classification)
+  * Stage 2: Tracking (hit assignment + parameter reconstruction)
+- Reconstructed parameters: η, φ, pT, charge sign
+- Uncertainty quantification:
+  * Standard error: Efficiency and purity (continuous metrics)
+  * Clopper-Pearson 95%% CI: Classification accuracy (binomial proportion)
+

@@ -3581,8 +3581,8 @@ def main():
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=021-val_auc=0.99969_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/eos/project/e/end-to-end-muon-tracking/tracking/data/noCuts/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
-    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
-    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=023-val_loss=0.00482_ml_test_data_156000_hdf5_no-NSW_no-RPC_eval.h5",
+    parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
+    # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=023-val_loss=0.00482_ml_test_data_156000_hdf5_no-NSW_no-RPC_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_training_data_2694000_hdf5_eval.h5",
     # parser.add_argument('--eval_path', "-e",type=str, default="/scratch/epoch=041-val_loss=0.00402_ml_validation_data_144000_hdf5_eval.h5",
@@ -3596,8 +3596,8 @@ def main():
 
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_training_data_2694000_hdf5",
-    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
-    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC",
+    parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5",
+    # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
     # parser.add_argument('--data_dir', "-d",type=str, default="/scratch/ml_test_data_156000_hdf5_noCuts",
                        help='Path to processed test data directory')
