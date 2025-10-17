@@ -301,7 +301,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -423,7 +423,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -561,7 +561,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -701,7 +701,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -894,7 +894,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV" + f"\nWorking Point {wp_target:.2f}",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV" + f"\nWorking Point {wp_target:.2f}",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -974,7 +974,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -1038,7 +1038,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -1101,7 +1101,7 @@ class ATLASStylePlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -1462,7 +1462,7 @@ class ATLASStylePlotter:
         atlasify.atlasify(
             axes=ax,
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + 
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + 
                     r"$\langle\mu\rangle$ = 200" + "\n" +
                     f"Event {event_number}" + "\n" +
                     title_suffix + "\n" + info_text,
@@ -1604,7 +1604,7 @@ class ATLASStylePlotter:
         atlasify.atlasify(
             axes=ax_before,
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + 
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + 
                     r"$\langle\mu\rangle$ = 200" + "\n" +
                     f"Event {event_number}" + "\n" +
                     f"Before Hit Filtering: {n_total} hits",
@@ -1616,7 +1616,7 @@ class ATLASStylePlotter:
         atlasify.atlasify(
             axes=ax_after,
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + 
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + 
                     r"$\langle\mu\rangle$ = 200" + "\n" +
                     f"Event {event_number}" + "\n" +
                     f"After Hit Filtering ({n_passed}/{n_total} hits, {100*n_passed/n_total:.1f}%)",
@@ -1752,9 +1752,9 @@ class ATLASStylePlotter:
             f.write("=" * 80 + "\n")
             f.write("DATASET AND METHODOLOGY NOTES\n")
             f.write("=" * 80 + "\n")
-            f.write("- Simulation: pp collisions at √s = 14 TeV, HL-LHC conditions\n")
+            f.write("- Simulation: pp collisions at √s = 14 TeV\n")
             f.write("- Average pileup: <μ> = 200 interactions per bunch crossing\n")
-            f.write("- Physics processes: t𝑡̄, J/ψ→μμ, Z→μμ\n")
+            # f.write("- Physics processes: t𝑡̄, J/ψ→μμ, Z→μμ\n")
             f.write("- Muon selection: pT > 5 GeV\n")
             f.write("- Model architecture: Two-stage graph neural network\n")
             f.write("  * Stage 1: Hit filtering (signal/noise classification)\n")
@@ -1911,7 +1911,7 @@ def main():
                        help='Base output directory (CTD_plots subdirectory will be created)')
     parser.add_argument('--max_events', '-m', type=int, default=-1,
                        help='Maximum number of events to process (-1 = all events)')
-    parser.add_argument('--event_display', type=int, default=700,
+    parser.add_argument('--event_display', type=int, default=50100,
                        help='Event index for which to generate event display plots (before/after filtering)')
     
     args = parser.parse_args()

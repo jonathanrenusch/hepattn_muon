@@ -327,7 +327,609 @@ class StationOccupationAnalyzer:
         # Plot 3: Hits per station (3 panes: true, background, total) vs eta, phi, pt
         self._plot_hits_per_station(results, output_dir)
         
+        # Plot 4: Distribution histograms with mean and std lines
+        self._plot_distribution_histograms(output_dir)
+        
+        # Plot 5: Distribution histograms for MDT hits only
+        self._plot_distribution_histograms_mdt(output_dir)
+        
         print("All plots generated successfully!")
+    
+    def _plot_distribution_histograms(self, output_dir: Path):
+        """Plot distributions of true hits with mean and std deviation lines."""
+        # Collect statistics per event and per station
+        avg_true_hits_per_station_per_event = []
+        total_hits_per_station = []
+        background_hits_per_station_with_true = []
+        tracks_per_station = []
+        
+        # Get dataloader to recalculate statistics
+        test_dataloader = self.datamodule.test_dataloader(shuffle=False)
+        
+        print("  Computing station statistics for distributions...")
+        for event_idx, batch in enumerate(tqdm(test_dataloader, 
+                                                desc="Processing for distributions",
+                                                total=self.num_events)):
+            if event_idx >= self.num_events:
+                break
+                
+            inputs, targets = batch
+            
+            # Extract data (remove batch dimension)
+            hit_valid = targets["hit_valid"][0]
+            particle_valid = targets["particle_valid"][0]
+            particle_hit_valid = targets["particle_hit_valid"][0]
+            
+            # Get station indices
+            station_indices = inputs["hit_spacePoint_stationIndex"][0][hit_valid]
+            
+            # Get all unique stations in this event
+            unique_stations = torch.unique(station_indices)
+            
+            # For each station, calculate statistics
+            event_true_hits_per_station = []
+            for station_idx in unique_stations:
+                station_mask = station_indices == station_idx
+                
+                # Total hits in this station
+                total_in_station = station_mask.sum().item()
+                total_hits_per_station.append(total_in_station)
+                
+                # True hits in this station (from any valid particle)
+                true_in_station = 0
+                num_tracks_in_station = 0
+                num_valid_particles = particle_valid.sum().item()
+                for particle_idx in range(num_valid_particles):
+                    hits_mask = particle_hit_valid[particle_idx]
+                    true_hits_from_track = (hits_mask & station_mask).sum().item()
+                    if true_hits_from_track > 0:
+                        num_tracks_in_station += 1
+                    true_in_station += true_hits_from_track
+                
+                # Record number of tracks per station
+                tracks_per_station.append(num_tracks_in_station)
+                
+                # Only consider stations that contain true hits
+                if true_in_station > 0:
+                    event_true_hits_per_station.append(true_in_station)
+                    
+                    # Background hits in this station
+                    background_in_station = total_in_station - true_in_station
+                    background_hits_per_station_with_true.append(background_in_station)
+            
+            # Average true hits per station for this event (only stations with true hits)
+            if len(event_true_hits_per_station) > 0:
+                avg_true_hits_per_station_per_event.append(np.mean(event_true_hits_per_station))
+        
+        # Create figure with 2 rows and 4 columns
+        fig, axes = plt.subplots(2, 4, figsize=(24, 10))
+        
+        # Row 1, Plot 1: Distribution of true hits per station per track (not averaged)
+        ax = axes[0, 0]
+        # We need to collect all true hits per station values (not averaged per track)
+        all_true_hits_per_station = []
+        
+        # Recalculate to get all individual station hit counts
+        test_dataloader = self.datamodule.test_dataloader(shuffle=False)
+        for event_idx, batch in enumerate(test_dataloader):
+            if event_idx >= self.num_events:
+                break
+                
+            inputs, targets = batch
+            hit_valid = targets["hit_valid"][0]
+            particle_valid = targets["particle_valid"][0]
+            particle_hit_valid = targets["particle_hit_valid"][0]
+            station_indices = inputs["hit_spacePoint_stationIndex"][0][hit_valid]
+            num_valid_particles = particle_valid.sum().item()
+            
+            for particle_idx in range(num_valid_particles):
+                hits_mask = particle_hit_valid[particle_idx]
+                if hits_mask.sum() == 0:
+                    continue
+                
+                track_station_indices = station_indices[hits_mask]
+                unique_stations = torch.unique(track_station_indices)
+                
+                for station_idx in unique_stations:
+                    station_mask = station_indices == station_idx
+                    true_in_station = (hits_mask & station_mask).sum().item()
+                    all_true_hits_per_station.append(true_in_station)
+        
+        if len(all_true_hits_per_station) > 0:
+            data = np.array(all_true_hits_per_station)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5  # Center bins on integers
+            
+            ax.hist(data, bins=bins, color='steelblue', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of True Hits per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of True Hits per Station per Track', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 1, Plot 2: Distribution of average true hits per station per event
+        ax = axes[0, 1]
+        if len(avg_true_hits_per_station_per_event) > 0:
+            data = np.array(avg_true_hits_per_station_per_event)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create bins that align with integer values
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.linspace(min_val, max_val, min(50, max_val - min_val + 1))
+            
+            ax.hist(data, bins=bins, color='mediumseagreen', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Average Number of True Hits per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Avg True Hits per Station per Event\n(Stations with True Hits Only)', fontsize=11)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 1, Plot 3: Distribution of total true hits per track
+        ax = axes[0, 2]
+        if len(self.unbinned_stats['num_true_hits']) > 0:
+            data = np.array(self.unbinned_stats['num_true_hits'])
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5  # Center bins on integers
+            
+            ax.hist(data, bins=bins, color='coral', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of True Hits per Track', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Total True Hits per Track', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 1, Plot 4: Distribution of number of unique stations per track
+        ax = axes[0, 3]
+        if len(self.unbinned_stats['num_unique_stations']) > 0:
+            data = np.array(self.unbinned_stats['num_unique_stations'])
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5  # Center bins on integers
+            
+            ax.hist(data, bins=bins, color='mediumpurple', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Unique Stations per Track', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Unique Stations per Track', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 1: Distribution of total hits per station
+        ax = axes[1, 0]
+        if len(total_hits_per_station) > 0:
+            data = np.array(total_hits_per_station)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5  # Center bins on integers
+            
+            ax.hist(data, bins=bins, color='dodgerblue', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Total Hits per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Total Hits per Station', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 2: Distribution of background hits in stations with true hits
+        ax = axes[1, 1]
+        if len(background_hits_per_station_with_true) > 0:
+            data = np.array(background_hits_per_station_with_true)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5  # Center bins on integers
+            
+            ax.hist(data, bins=bins, color='salmon', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Background Hits', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Background Hits per Station\n(Stations with True Hits Only)', fontsize=11)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 3: Distribution of tracks per station
+        ax = axes[1, 2]
+        if len(tracks_per_station) > 0:
+            data = np.array(tracks_per_station)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5  # Center bins on integers
+            
+            ax.hist(data, bins=bins, color='gold', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Tracks per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Tracks per Station', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 4: Empty for now (can be used for future plots)
+        axes[1, 3].axis('off')
+        
+        plt.tight_layout()
+        output_path = output_dir / 'true_hits_distributions.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved: {output_path}")
+    
+    def _plot_distribution_histograms_mdt(self, output_dir: Path):
+        """Plot distributions for MDT (Monitored Drift Tubes) hits only (technology index 0)."""
+        # Collect statistics per event and per station for MDT hits only
+        avg_true_hits_per_station_per_event_mdt = []
+        total_hits_per_station_mdt = []
+        background_hits_per_station_with_true_mdt = []
+        tracks_per_station_mdt = []
+        num_true_hits_per_track_mdt = []
+        num_unique_stations_per_track_mdt = []
+        
+        # Get dataloader to recalculate statistics
+        test_dataloader = self.datamodule.test_dataloader(shuffle=False)
+        
+        print("  Computing MDT station statistics for distributions...")
+        for event_idx, batch in enumerate(tqdm(test_dataloader, 
+                                                desc="Processing MDT for distributions",
+                                                total=self.num_events)):
+            if event_idx >= self.num_events:
+                break
+                
+            inputs, targets = batch
+            
+            # Extract data (remove batch dimension)
+            hit_valid = targets["hit_valid"][0]
+            particle_valid = targets["particle_valid"][0]
+            particle_hit_valid = targets["particle_hit_valid"][0]
+            
+            # Get technology indices and filter for MDT (index 0)
+            hit_technology = inputs["hit_spacePoint_technology"][0][hit_valid]
+            mdt_mask = hit_technology == 0
+            
+            # Get station indices for MDT hits only
+            station_indices = inputs["hit_spacePoint_stationIndex"][0][hit_valid]
+            station_indices_mdt = station_indices[mdt_mask]
+            
+            if len(station_indices_mdt) == 0:
+                continue
+            
+            # Get all unique MDT stations in this event
+            unique_stations_mdt = torch.unique(station_indices_mdt)
+            
+            # For each MDT station, calculate statistics
+            event_true_hits_per_station_mdt = []
+            for station_idx in unique_stations_mdt:
+                station_mask = station_indices == station_idx
+                station_mask_mdt = mdt_mask & station_mask
+                
+                # Total MDT hits in this station
+                total_in_station = station_mask_mdt.sum().item()
+                total_hits_per_station_mdt.append(total_in_station)
+                
+                # True MDT hits in this station (from any valid particle)
+                true_in_station = 0
+                num_tracks_in_station = 0
+                num_valid_particles = particle_valid.sum().item()
+                for particle_idx in range(num_valid_particles):
+                    hits_mask = particle_hit_valid[particle_idx]
+                    true_hits_from_track = (hits_mask & station_mask_mdt).sum().item()
+                    if true_hits_from_track > 0:
+                        num_tracks_in_station += 1
+                    true_in_station += true_hits_from_track
+                
+                # Record number of tracks per MDT station
+                tracks_per_station_mdt.append(num_tracks_in_station)
+                
+                # Only consider stations that contain true hits
+                if true_in_station > 0:
+                    event_true_hits_per_station_mdt.append(true_in_station)
+                    
+                    # Background hits in this station
+                    background_in_station = total_in_station - true_in_station
+                    background_hits_per_station_with_true_mdt.append(background_in_station)
+            
+            # Average true MDT hits per station for this event (only stations with true hits)
+            if len(event_true_hits_per_station_mdt) > 0:
+                avg_true_hits_per_station_per_event_mdt.append(np.mean(event_true_hits_per_station_mdt))
+            
+            # Process each valid particle/track for MDT hits
+            num_valid_particles = particle_valid.sum().item()
+            for particle_idx in range(num_valid_particles):
+                # Get hits for this particle
+                hits_mask = particle_hit_valid[particle_idx]
+                
+                # Filter for MDT hits only
+                hits_mask_mdt = hits_mask & mdt_mask
+                
+                if hits_mask_mdt.sum() == 0:
+                    continue
+                
+                # Get MDT station indices for this track
+                track_station_indices_mdt = station_indices[hits_mask_mdt]
+                unique_stations = torch.unique(track_station_indices_mdt)
+                num_unique_stations = len(unique_stations)
+                num_true_hits = hits_mask_mdt.sum().item()
+                
+                num_true_hits_per_track_mdt.append(num_true_hits)
+                num_unique_stations_per_track_mdt.append(num_unique_stations)
+        
+        # Create figure with 2 rows and 4 columns
+        fig, axes = plt.subplots(2, 4, figsize=(24, 10))
+        
+        # Row 1, Plot 1: Distribution of true MDT hits per station per track (not averaged)
+        ax = axes[0, 0]
+        all_true_hits_per_station_mdt = []
+        
+        # Recalculate to get all individual MDT station hit counts
+        test_dataloader = self.datamodule.test_dataloader(shuffle=False)
+        for event_idx, batch in enumerate(test_dataloader):
+            if event_idx >= self.num_events:
+                break
+                
+            inputs, targets = batch
+            hit_valid = targets["hit_valid"][0]
+            particle_valid = targets["particle_valid"][0]
+            particle_hit_valid = targets["particle_hit_valid"][0]
+            
+            hit_technology = inputs["hit_spacePoint_technology"][0][hit_valid]
+            mdt_mask = hit_technology == 0
+            
+            station_indices = inputs["hit_spacePoint_stationIndex"][0][hit_valid]
+            num_valid_particles = particle_valid.sum().item()
+            
+            for particle_idx in range(num_valid_particles):
+                hits_mask = particle_hit_valid[particle_idx]
+                hits_mask_mdt = hits_mask & mdt_mask
+                
+                if hits_mask_mdt.sum() == 0:
+                    continue
+                
+                track_station_indices_mdt = station_indices[hits_mask_mdt]
+                unique_stations = torch.unique(track_station_indices_mdt)
+                
+                for station_idx in unique_stations:
+                    station_mask = station_indices == station_idx
+                    station_mask_mdt = mdt_mask & station_mask
+                    true_in_station = (hits_mask & station_mask_mdt).sum().item()
+                    all_true_hits_per_station_mdt.append(true_in_station)
+        
+        if len(all_true_hits_per_station_mdt) > 0:
+            data = np.array(all_true_hits_per_station_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            # Create integer bins
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5
+            
+            ax.hist(data, bins=bins, color='steelblue', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of True MDT Hits per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of True MDT Hits per Station per Track', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 1, Plot 2: Distribution of average true MDT hits per station per event
+        ax = axes[0, 1]
+        if len(avg_true_hits_per_station_per_event_mdt) > 0:
+            data = np.array(avg_true_hits_per_station_per_event_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.linspace(min_val, max_val, min(50, max_val - min_val + 1))
+            
+            ax.hist(data, bins=bins, color='mediumseagreen', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Average Number of True MDT Hits per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Avg True MDT Hits per Station per Event\n(Stations with True Hits Only)', fontsize=11)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 1, Plot 3: Distribution of total true MDT hits per track
+        ax = axes[0, 2]
+        if len(num_true_hits_per_track_mdt) > 0:
+            data = np.array(num_true_hits_per_track_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5
+            
+            ax.hist(data, bins=bins, color='coral', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of True MDT Hits per Track', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Total True MDT Hits per Track', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 1, Plot 4: Distribution of number of unique MDT stations per track
+        ax = axes[0, 3]
+        if len(num_unique_stations_per_track_mdt) > 0:
+            data = np.array(num_unique_stations_per_track_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5
+            
+            ax.hist(data, bins=bins, color='mediumpurple', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Unique MDT Stations per Track', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Unique MDT Stations per Track', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 1: Distribution of total MDT hits per station
+        ax = axes[1, 0]
+        if len(total_hits_per_station_mdt) > 0:
+            data = np.array(total_hits_per_station_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5
+            
+            ax.hist(data, bins=bins, color='dodgerblue', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Total MDT Hits per Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Total MDT Hits per Station', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 2: Distribution of background MDT hits in stations with true hits
+        ax = axes[1, 1]
+        if len(background_hits_per_station_with_true_mdt) > 0:
+            data = np.array(background_hits_per_station_with_true_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5
+            
+            ax.hist(data, bins=bins, color='salmon', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Background MDT Hits', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Background MDT Hits per Station\n(Stations with True Hits Only)', fontsize=11)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 3: Distribution of tracks per MDT station
+        ax = axes[1, 2]
+        if len(tracks_per_station_mdt) > 0:
+            data = np.array(tracks_per_station_mdt)
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            
+            min_val = int(np.floor(data.min()))
+            max_val = int(np.ceil(data.max()))
+            bins = np.arange(min_val, max_val + 2) - 0.5
+            
+            ax.hist(data, bins=bins, color='gold', edgecolor='black', alpha=0.7)
+            ax.axvline(mean_val, color='red', linestyle='-', linewidth=2, label=f'Mean = {mean_val:.2f}')
+            ax.axvline(mean_val - std_val, color='orange', linestyle='--', linewidth=2, label=f'Mean ± Std')
+            ax.axvline(mean_val + std_val, color='orange', linestyle='--', linewidth=2)
+            ax.axvline(mean_val - 2*std_val, color='green', linestyle=':', linewidth=2, label=f'Mean ± 2×Std')
+            ax.axvline(mean_val + 2*std_val, color='green', linestyle=':', linewidth=2)
+            
+            ax.set_xlabel('Number of Tracks per MDT Station', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Distribution of Tracks per MDT Station', fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            ax.legend(loc='best', fontsize=9)
+        
+        # Row 2, Plot 4: Empty for now
+        axes[1, 3].axis('off')
+        
+        plt.tight_layout()
+        output_path = output_dir / 'true_hits_distributions_MDT.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved: {output_path}")
     
     def _plot_unique_stations(self, results: Dict, output_dir: Path):
         """Plot average number of unique stations per track."""

@@ -273,39 +273,31 @@ class ATLASStyleTrackingPlotter:
             bin_predictions = [self.hit_predictions[j] for j in range(len(self.hit_predictions)) if mask[j]]
             bin_truth = [self.hit_true_assignments[j] for j in range(len(self.hit_true_assignments)) if mask[j]]
             
-            # Pool all hits across tracks in this bin for proper binomial statistics
-            total_true_hits = 0
-            total_correct_hits = 0
+            # Calculate efficiency for each track in this bin
             all_efficiencies = []
             for pred, truth in zip(bin_predictions, bin_truth):
                 true_hits = np.sum(truth)
                 correct_hits = np.sum(pred & truth)
-                total_true_hits += true_hits
-                total_correct_hits += correct_hits
-                all_efficiencies.append(correct_hits / true_hits if true_hits > 0 else 0)
+                if true_hits > 0:
+                    all_efficiencies.append(correct_hits / true_hits)
             
-            if total_true_hits == 0:
+            if len(all_efficiencies) == 0:
                 continue
             
-            # Calculate efficiency as a binomial proportion
+            # Calculate mean efficiency and standard error
             efficiency = np.mean(all_efficiencies)
+            std_err = np.std(all_efficiencies, ddof=1) / np.sqrt(len(all_efficiencies)) if len(all_efficiencies) > 1 else 0
             
-            # Clopper-Pearson confidence interval (99.7% ~ 3 sigma)
-            alpha = 0.003  # 99.7% confidence interval
+            # Calculate mean efficiency and standard error
+            efficiency = np.mean(all_efficiencies)
+            std_err = np.std(all_efficiencies, ddof=1) / np.sqrt(len(all_efficiencies)) if len(all_efficiencies) > 1 else 0
             
-            if total_correct_hits == 0:
-                ci_low = 0.0
-            else:
-                ci_low = stats.beta.ppf(alpha/2, total_correct_hits, total_true_hits - total_correct_hits + 1)
-            
-            if total_correct_hits == total_true_hits:
-                ci_high = 1.0
-            else:
-                ci_high = stats.beta.ppf(1 - alpha/2, total_correct_hits + 1, total_true_hits - total_correct_hits)
+            # Use 3-sigma error bars (99.7% confidence)
+            err_margin = 3 * std_err
             
             bin_efficiencies.append(efficiency)
-            err_low.append(max(0, efficiency - ci_low))
-            err_high.append(max(0, ci_high - efficiency))
+            err_low.append(err_margin)
+            err_high.append(err_margin)
             bin_centers.append((bins[i] + bins[i+1]) / 2)
         
         return np.array(bin_centers), np.array(bin_efficiencies), np.array(err_low), np.array(err_high), bins, np.array(n_tracks_per_bin)
@@ -349,45 +341,38 @@ class ATLASStyleTrackingPlotter:
             bin_predictions = [self.hit_predictions[j] for j in range(len(self.hit_predictions)) if mask[j]]
             bin_truth = [self.hit_true_assignments[j] for j in range(len(self.hit_true_assignments)) if mask[j]]
             
-            # Pool all hits across tracks in this bin for proper binomial statistics
-            total_pred_hits = 0
-            total_correct_hits = 0
+            # Calculate purity for each track in this bin
             all_purities = []
             for pred, truth in zip(bin_predictions, bin_truth):
                 pred_hits = np.sum(pred)
                 correct_hits = np.sum(pred & truth)
-                total_pred_hits += pred_hits
-                total_correct_hits += correct_hits
-                all_purities.append(correct_hits / pred_hits if pred_hits > 0 else 0)
+                if pred_hits > 0:
+                    all_purities.append(correct_hits / pred_hits)
             
-            if total_pred_hits == 0:
+            if len(all_purities) == 0:
                 continue
             
-            # Calculate purity as a binomial proportion
+            # Calculate mean purity and standard error
             purity = np.mean(all_purities)
+            std_err = np.std(all_purities, ddof=1) / np.sqrt(len(all_purities)) if len(all_purities) > 1 else 0
             
-            # Clopper-Pearson confidence interval (99.7% ~ 3 sigma)
-            alpha = 0.003  # 99.7% confidence interval
-            
-            if total_correct_hits == 0:
-                ci_low = 0.0
-            else:
-                ci_low = stats.beta.ppf(alpha/2, total_correct_hits, total_pred_hits - total_correct_hits + 1)
-            
-            if total_correct_hits == total_pred_hits:
-                ci_high = 1.0
-            else:
-                ci_high = stats.beta.ppf(1 - alpha/2, total_correct_hits + 1, total_pred_hits - total_correct_hits)
+            # Use 3-sigma error bars (99.7% confidence)
+            err_margin = 3 * std_err
             
             bin_purities.append(purity)
-            err_low.append(max(0, purity - ci_low))
-            err_high.append(max(0, ci_high - purity))
+            err_low.append(err_margin)
+            err_high.append(err_margin)
             bin_centers.append((bins[i] + bins[i+1]) / 2)
         
         return np.array(bin_centers), np.array(bin_purities), np.array(err_low), np.array(err_high), bins, np.array(n_tracks_per_bin)
     
-    def calculate_double_matching_by_eta(self, bins=None):
-        """Calculate double matching efficiency binned by eta with Clopper-Pearson intervals."""
+    def calculate_double_matching_by_eta(self, bins=None, threshold=0.5):
+        """Calculate double matching efficiency binned by eta with Clopper-Pearson intervals.
+        
+        Args:
+            bins: Eta bins to use
+            threshold: Efficiency and purity threshold (default 0.5 for 50%)
+        """
         
         if bins is None:
             # Use data-driven bins for eta
@@ -420,7 +405,7 @@ class ATLASStyleTrackingPlotter:
             bin_predictions = [self.hit_predictions[j] for j in range(len(self.hit_predictions)) if mask[j]]
             bin_truth = [self.hit_true_assignments[j] for j in range(len(self.hit_true_assignments)) if mask[j]]
             
-            # Count tracks with both efficiency >= 50% AND purity >= 50%
+            # Count tracks with both efficiency >= threshold AND purity >= threshold
             n_double_match = 0
             for pred, truth in zip(bin_predictions, bin_truth):
                 true_hits = np.sum(truth)
@@ -430,7 +415,7 @@ class ATLASStyleTrackingPlotter:
                 track_efficiency = correct_hits / true_hits if true_hits > 0 else 0
                 track_purity = correct_hits / pred_hits if pred_hits > 0 else 0
                 
-                if track_efficiency >= 0.5 and track_purity >= 0.5:
+                if track_efficiency >= threshold and track_purity >= threshold:
                     n_double_match += 1
             
             # Clopper-Pearson confidence interval (99.7% ~ 3 sigma)
@@ -564,7 +549,7 @@ class ATLASStyleTrackingPlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -584,8 +569,12 @@ class ATLASStyleTrackingPlotter:
         
         return efficiencies, purities
     
-    def plot_double_matching_vs_eta(self):
-        """Plot standalone double matching efficiency vs eta (similar to Task 1 style)."""
+    def plot_double_matching_vs_eta(self, include_75wp=False):
+        """Plot standalone double matching efficiency vs eta.
+        
+        Args:
+            include_75wp: If True, also plot 75% working point alongside 50% (default: False)
+        """
         print("Generating standalone Double Matching Efficiency vs Eta plot...")
         
         # Calculate double matching with data-driven bins
@@ -594,25 +583,46 @@ class ATLASStyleTrackingPlotter:
         max_eta = np.max(eta_values)
         bins = np.linspace(min_eta, max_eta, 21)  # 20 bins
         
-        centers, dm_efficiencies, err_low, err_high, bins, n_tracks = self.calculate_double_matching_by_eta(bins)
+        # Always calculate 50% working point
+        centers_50, dm_eff_50, err_low_50, err_high_50, bins_50, n_tracks_50 = self.calculate_double_matching_by_eta(bins, threshold=0.5)
         
-        if len(centers) == 0:
+        # Optionally calculate 75% working point
+        if include_75wp:
+            centers_75, dm_eff_75, err_low_75, err_high_75, bins_75, n_tracks_75 = self.calculate_double_matching_by_eta(bins, threshold=0.75)
+        else:
+            centers_75, dm_eff_75 = [], []
+        
+        if len(centers_50) == 0:
             print("Warning: No data points for double matching plot")
             return None
         
         # Create ATLAS-style plot
         fig, ax = plt.subplots(figsize=(10, 6))
         
-        # Plot double matching efficiency with error bars
-        ax.errorbar(centers, dm_efficiencies, yerr=[err_low, err_high],
-                   fmt='o', color='green', markersize=6, capsize=4,
-                   label='Double Matching Efficiency\n(Both Efficiency ≥ 50% AND Purity ≥ 50%)', zorder=3)
+        # Plot 50% working point
+        if len(centers_50) > 0:
+            label_50 = 'Double Matching (50% WP)\n(Eff ≥ 50% AND Pur ≥ 50%)' if include_75wp else 'Double Matching Efficiency\n(Both Efficiency ≥ 50% AND Purity ≥ 50%)'
+            ax.errorbar(centers_50, dm_eff_50, yerr=[err_low_50, err_high_50],
+                       fmt='o', color='green', markersize=6, capsize=4,
+                       label=label_50, zorder=3)
+            
+            # Step function for clarity
+            for i in range(len(bins) - 1):
+                if i < len(dm_eff_50) and n_tracks_50[i] > 0:
+                    ax.hlines(dm_eff_50[i], bins[i], bins[i+1], 
+                             colors='green', linewidth=2, alpha=0.3, zorder=2)
         
-        # Step function for clarity
-        for i in range(len(bins) - 1):
-            if i < len(dm_efficiencies) and n_tracks[i] > 0:
-                ax.hlines(dm_efficiencies[i], bins[i], bins[i+1], 
-                         colors='green', linewidth=2, alpha=0.3, zorder=2)
+        # Plot 75% working point if requested
+        if include_75wp and len(centers_75) > 0:
+            ax.errorbar(centers_75, dm_eff_75, yerr=[err_low_75, err_high_75],
+                       fmt='s', color='darkorange', markersize=6, capsize=4,
+                       label='Double Matching (75% WP)\n(Eff ≥ 75% AND Pur ≥ 75%)', zorder=3)
+            
+            # Step function for clarity
+            for i in range(len(bins) - 1):
+                if i < len(dm_eff_75) and n_tracks_75[i] > 0:
+                    ax.hlines(dm_eff_75[i], bins[i], bins[i+1], 
+                             colors='darkorange', linewidth=2, alpha=0.3, zorder=2)
         
         ax.set_xlabel(r'Truth $\eta$', fontsize=14)
         ax.set_ylabel('Double Matching Efficiency', fontsize=14)
@@ -622,7 +632,7 @@ class ATLASStyleTrackingPlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -640,7 +650,10 @@ class ATLASStyleTrackingPlotter:
         
         print(f"Standalone Double Matching plot saved to {output_path_png} and {output_path_pdf}")
         
-        return dm_efficiencies
+        if include_75wp:
+            return dm_eff_50, dm_eff_75
+        else:
+            return dm_eff_50
     
     def plot_charge_accuracy_vs_eta(self):
         """Plot charge classification accuracy vs eta."""
@@ -674,7 +687,7 @@ class ATLASStyleTrackingPlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -725,7 +738,7 @@ class ATLASStyleTrackingPlotter:
         # Apply ATLAS style
         atlasify.atlasify(
             atlas="Simulation Internal",
-            subtext=r"$\sqrt{s}$ = 14 TeV, HL-LHC" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"$t\bar{t}$, $J/\psi$, $Z\rightarrow\mu\mu$" + "\n" + r"Muon $p_T \geq 5$ GeV",
+            subtext=r"$\sqrt{s}$ = 14 TeV" + "\n" + r"$\langle\mu\rangle$ = 200" + "\n" + r"Muon $p_T \geq 5$ GeV",
             font_size=14,
             sub_font_size=11,
             label_font_size=14
@@ -740,8 +753,12 @@ class ATLASStyleTrackingPlotter:
         
         print(f"pT Distribution Comparison plot saved to {output_path_png} and {output_path_pdf}")
     
-    def calculate_and_save_unbinned_metrics(self):
-        """Calculate and save unbinned average metrics to a text file."""
+    def calculate_and_save_unbinned_metrics(self, include_75wp=False):
+        """Calculate and save unbinned average metrics to a text file.
+        
+        Args:
+            include_75wp: If True, also calculate and save 75% working point metrics (default: False)
+        """
         print("Calculating unbinned average metrics...")
         
         # Hit assignment efficiency
@@ -766,8 +783,8 @@ class ATLASStyleTrackingPlotter:
         avg_hit_purity = np.mean(hit_purities) if len(hit_purities) > 0 else 0
         frac_hit_purity_50 = np.sum(np.array(hit_purities) >= 0.5) / len(hit_purities) if len(hit_purities) > 0 else 0
         
-        # Double matching efficiency
-        n_double_match = 0
+        # Double matching efficiency (50% working point)
+        n_double_match_50 = 0
         for pred, truth in zip(self.hit_predictions, self.hit_true_assignments):
             true_hits = np.sum(truth)
             pred_hits = np.sum(pred)
@@ -777,9 +794,27 @@ class ATLASStyleTrackingPlotter:
             track_purity = correct_hits / pred_hits if pred_hits > 0 else 0
             
             if track_efficiency >= 0.5 and track_purity >= 0.5:
-                n_double_match += 1
+                n_double_match_50 += 1
         
-        avg_double_matching = n_double_match / len(self.hit_predictions) if len(self.hit_predictions) > 0 else 0
+        avg_double_matching_50 = n_double_match_50 / len(self.hit_predictions) if len(self.hit_predictions) > 0 else 0
+        
+        # Double matching efficiency (75% working point) - optional
+        if include_75wp:
+            n_double_match_75 = 0
+            for pred, truth in zip(self.hit_predictions, self.hit_true_assignments):
+                true_hits = np.sum(truth)
+                pred_hits = np.sum(pred)
+                correct_hits = np.sum(pred & truth)
+                
+                track_efficiency = correct_hits / true_hits if true_hits > 0 else 0
+                track_purity = correct_hits / pred_hits if pred_hits > 0 else 0
+                
+                if track_efficiency >= 0.75 and track_purity >= 0.75:
+                    n_double_match_75 += 1
+            
+            avg_double_matching_75 = n_double_match_75 / len(self.hit_predictions) if len(self.hit_predictions) > 0 else 0
+        else:
+            avg_double_matching_75 = None
         
         # Charge classification accuracy
         pred_charge_discrete = np.where(self.charge_predictions >= 0, 1, -1)
@@ -818,8 +853,11 @@ class ATLASStyleTrackingPlotter:
             f.write("\n")
             f.write("DOUBLE MATCHING EFFICIENCY\n")
             f.write("-" * 40 + "\n")
-            f.write(f"Double Matching Efficiency:         {avg_double_matching:.6f} ({avg_double_matching*100:.2f}%)\n")
+            f.write(f"Double Matching Efficiency (50% WP): {avg_double_matching_50:.6f} ({avg_double_matching_50*100:.2f}%)\n")
             f.write(f"  (Fraction of tracks with both efficiency ≥50% AND purity ≥50%)\n")
+            if include_75wp and avg_double_matching_75 is not None:
+                f.write(f"Double Matching Efficiency (75% WP): {avg_double_matching_75:.6f} ({avg_double_matching_75*100:.2f}%)\n")
+                f.write(f"  (Fraction of tracks with both efficiency ≥75% AND purity ≥75%)\n")
             f.write("\n")
             f.write("CHARGE CLASSIFICATION ACCURACY\n")
             f.write("-" * 40 + "\n")
@@ -836,7 +874,9 @@ class ATLASStyleTrackingPlotter:
         print(f"Unbinned metrics summary saved to {output_path}")
         print(f"  Hit Assignment Efficiency (avg): {avg_hit_efficiency:.4f}")
         print(f"  Hit Assignment Purity (avg): {avg_hit_purity:.4f}")
-        print(f"  Double Matching Efficiency: {avg_double_matching:.4f}")
+        print(f"  Double Matching Efficiency (50% WP): {avg_double_matching_50:.4f}")
+        if include_75wp and avg_double_matching_75 is not None:
+            print(f"  Double Matching Efficiency (75% WP): {avg_double_matching_75:.4f}")
         print(f"  Charge Classification Accuracy: {avg_charge_accuracy:.4f}")
     
     def save_plot_captions(self):
@@ -909,9 +949,9 @@ class ATLASStyleTrackingPlotter:
             f.write("=" * 80 + "\n")
             f.write("DATASET AND METHODOLOGY NOTES\n")
             f.write("=" * 80 + "\n")
-            f.write("- Simulation: pp collisions at √s = 14 TeV, HL-LHC conditions\n")
+            f.write("- Simulation: pp collisions at √s = 14 TeV\n")
             f.write("- Average pileup: <μ> = 200 interactions per bunch crossing\n")
-            f.write("- Physics processes: t𝑡̄, J/ψ→μμ, Z→μμ\n")
+            # f.write("- Physics processes: t𝑡̄, J/ψ→μμ, Z→μμ\n")
             f.write("- Muon selection: pT > 5 GeV\n")
             f.write("- Model architecture: Two-stage graph neural network\n")
             f.write("  * Stage 1: Hit filtering (signal/noise classification)\n")
@@ -925,8 +965,12 @@ class ATLASStyleTrackingPlotter:
         
         print(f"Plot captions saved to {captions_path}")
     
-    def run_analysis(self):
-        """Run the complete analysis pipeline."""
+    def run_analysis(self, include_75wp=False):
+        """Run the complete analysis pipeline.
+        
+        Args:
+            include_75wp: If True, include 75% working point in double matching analysis (default: False)
+        """
         print("\n=== Starting ATLAS-style Tracking Plot Analysis ===\n")
         
         # Collect data
@@ -935,12 +979,12 @@ class ATLASStyleTrackingPlotter:
         
         # Generate all plots
         self.plot_hit_efficiency_and_purity_vs_eta()
-        self.plot_double_matching_vs_eta()
+        self.plot_double_matching_vs_eta(include_75wp=include_75wp)
         self.plot_charge_accuracy_vs_eta()
         self.plot_pt_distribution_comparison()
         
         # Save unbinned metrics
-        self.calculate_and_save_unbinned_metrics()
+        self.calculate_and_save_unbinned_metrics(include_75wp=include_75wp)
         
         # Save plot captions
         self.save_plot_captions()
@@ -964,6 +1008,8 @@ def main():
                        help='Base output directory (tracking_plots subdirectory will be created)')
     parser.add_argument('--max_events', '-m', type=int, default=-1,
                        help='Maximum number of events to process (-1 = all events)')
+    parser.add_argument('--include-75wp', action='store_true',
+                       help='Include 75%% working point in double matching analysis (default: False)')
     
     args = parser.parse_args()
     
@@ -980,7 +1026,7 @@ def main():
             max_events=args.max_events
         )
         
-        plotter.run_analysis()
+        plotter.run_analysis(include_75wp=args.include_75wp)
         
         print("\n✓ All ATLAS-style tracking plots generated successfully!")
         sys.exit(0)

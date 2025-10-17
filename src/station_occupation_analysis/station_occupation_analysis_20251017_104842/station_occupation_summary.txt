@@ -1,0 +1,35 @@
+================================================================================
+STATION OCCUPATION ANALYSIS - UNBINNED STATISTICS
+================================================================================
+
+Number of events analyzed: 100
+
+Num Unique Stations:
+  Mean: 4.2727
+  Std Dev: 1.5697
+  Median: 4.0000
+  Min: 1.0000
+  Max: 10.0000
+
+Num True Hits:
+  Mean: 23.2238
+  Std Dev: 7.4818
+  Median: 21.0000
+  Min: 6.0000
+  Max: 52.0000
+
+Num Background Hits:
+  Mean: 238.5434
+  Std Dev: 220.0635
+  Median: 169.0000
+  Min: 0.0000
+  Max: 881.0000
+
+Num Total Hits:
+  Mean: 243.9787
+  Std Dev: 221.5023
+  Median: 175.0000
+  Min: 2.0000
+  Max: 885.0000
+
+================================================================================

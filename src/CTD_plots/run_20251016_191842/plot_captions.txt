@@ -1,0 +1,107 @@
+================================================================================
+ATLAS MUON TRACKING MODEL EVALUATION - HIT FILTERING STAGE
+================================================================================
+
+ABSTRACT
+--------------------------------------------------------------------------------
+This analysis evaluates the hit filtering stage of a two-stage graph neural
+network model for muon track reconstruction in the ATLAS detector at
+High-Luminosity LHC conditions. The model processes simulated proton-proton
+collisions at √s = 14 TeV with an average pileup of <μ> = 200, using events
+containing muons from t𝑡̄, J/ψ, and Z→μμ processes with pT > 5 GeV.
+
+The two-stage architecture consists of: (1) a hit filtering stage that
+reduces combinatorial background by classifying detector hits as signal or
+noise, and (2) a tracking stage that performs hit-to-track assignment and
+simultaneously reconstructs track parameters (η, φ, pT) and classifies the
+muon charge sign. The following plots assess the hit filtering stage,
+which serves to reduce data volume by >99%% while retaining signal hits.
+
+Uncertainty quantification for binomial proportions (hit classification)
+uses Clopper-Pearson 95%% confidence intervals, which provide exact coverage
+guarantees for finite sample sizes, ensuring statistically rigorous
+uncertainty estimates.
+
+
+================================================================================
+FIGURE CAPTIONS
+================================================================================
+
+Figure 1: ROC Curve for Hit Classification
+----------------------------------------------------------------------
+Receiver operating characteristic curve showing true positive rate
+(signal efficiency) versus false positive rate for hit classification.
+The area under the curve (AUC) quantifies overall discrimination between
+signal and background hits.
+
+
+Figure 2: Background Rejection vs. Hit Purity
+----------------------------------------------------------------------
+Background rejection rate as a function of hit purity (precision) for
+varying signal efficiency thresholds (indicated by color scale). The red
+cross marks the 99%% efficiency working point used in the analysis.
+
+
+Figure 3: Hit Efficiency vs. Hit Purity
+----------------------------------------------------------------------
+Hit efficiency (recall) versus hit purity (precision) as classification
+threshold varies. The red cross indicates the 99%% efficiency operating
+point selected to balance signal retention and background suppression.
+
+
+Figure 4: Inverse Background Efficiency vs. Hit Efficiency
+----------------------------------------------------------------------
+Signal efficiency versus inverse background efficiency (1/ε_background),
+displayed on a logarithmic scale to emphasize background rejection
+capability. The red cross marks the 99%% efficiency working point.
+
+
+Figure 5: Truth Muon pT Distribution
+----------------------------------------------------------------------
+Distribution of truth muon transverse momentum (pT) in the evaluation
+dataset, shown on a logarithmic scale. This distribution reflects the
+combined contributions from t𝑡̄, J/ψ→μμ, and Z→μμ processes.
+
+
+Figure 6: Truth Muon η Distribution
+----------------------------------------------------------------------
+Distribution of truth muon pseudorapidity (η) in the evaluation dataset,
+shown on a logarithmic scale. The distribution spans the muon spectrometer
+acceptance range.
+
+
+Figure 7: Truth Muon φ Distribution
+----------------------------------------------------------------------
+Distribution of truth muon azimuthal angle (φ) in the evaluation dataset,
+shown on a logarithmic scale. A uniform distribution is expected in φ.
+
+
+Figure 8: Event 700 Display - Before Filtering
+----------------------------------------------------------------------
+Transverse (X-Y) projection of all reconstructed hits in event
+700 before hit filtering. Colored lines represent true
+muon track trajectories, while gray points show background hits from
+detector noise and pileup interactions.
+
+
+Figure 9: Event 700 Display - After Filtering
+----------------------------------------------------------------------
+Transverse (X-Y) projection of event 700 after applying
+the hit filter at 99%% signal efficiency. Background suppression is evident,
+while the muon track structure (colored lines) is preserved.
+
+
+================================================================================
+DATASET AND METHODOLOGY NOTES
+================================================================================
+- Simulation: pp collisions at √s = 14 TeV
+- Average pileup: <μ> = 200 interactions per bunch crossing
+- Muon selection: pT > 5 GeV
+- Model architecture: Two-stage graph neural network
+  * Stage 1: Hit filtering (signal/noise classification)
+  * Stage 2: Tracking (hit assignment + parameter reconstruction)
+- Operating point: 99%% signal efficiency chosen to optimize downstream
+  tracking performance
+- Uncertainty quantification: Clopper-Pearson 95%% confidence intervals
+  for binomial proportions
+
