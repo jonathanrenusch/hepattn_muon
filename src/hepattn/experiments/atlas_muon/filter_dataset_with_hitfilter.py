@@ -200,8 +200,8 @@ class HitFilterDatasetReducer:
                     all_true_labels.extend(true_labels)
                     
                     # Stop after collecting enough data for threshold calculation
-                    if len(all_logits) > 50000000:  # 100 Mio hits should be enough
-                        break
+                    # if len(all_logits) > 50000000:  # 100 Mio hits should be enough
+                    #     break
                         
                 except KeyError as e:
                     print(f"Warning: Could not load data for event {event_idx}: {e}")
@@ -790,10 +790,7 @@ def process_worker_events(args: Tuple) -> Dict:
                 if filtered_num_hits > max_hits_per_event:
                     worker_stats['events_failed_max_hits'] += 1
                     continue
-                # Apply min hits cut 
-                if filtered_num_hits < 9: 
-                    worker_stats['events_failed_min_hits'] += 1
-                    continue               
+
                 # Convert back to arrays (tracks have already been filtered above)
                 filtered_hits_array = np.column_stack([hits_dict[feature] for feature in hit_features])
                 filtered_tracks_array = np.column_stack([tracks_dict[feature] for feature in track_features])
@@ -862,7 +859,7 @@ def main():
                        help="Detection threshold (calculated from working_point if not provided)")
     parser.add_argument("--max_tracks_per_event", "-mt", type=int, default=2,
                        help="Maximum number of tracks per event (default: 3)")
-    parser.add_argument("--max_hits_per_event", "-mh", type=int, default=500,
+    parser.add_argument("--max_hits_per_event", "-mh", type=int, default=600,
                        help="Maximum number of hits per event after filtering (default: 500)")
     parser.add_argument("--max_events", "-me", type=int, default=-1,
                        help="Maximum number of events to process (default: -1 for all events)")
