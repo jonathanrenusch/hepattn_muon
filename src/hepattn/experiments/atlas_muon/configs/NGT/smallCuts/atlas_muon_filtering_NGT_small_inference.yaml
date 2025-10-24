@@ -1,7 +1,7 @@
 seed_everything: 42
-name: ATLAS-Muon-small-NSWimpact
-
-ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130.ckpt
+name: ATLAS-Muon-small
+# ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130.ckpt
+ckpt_path: /eos/project/e/end-to-end-muon-tracking/tracking/data/smallCuts/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=039-val_loss=0.00399.ckpt
 data: 
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
@@ -10,7 +10,10 @@ data:
   # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_multi_processed
   # train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
   # val_dir: /shared/tracking/data/ml_validation_data_150K_processed
-  test_dir: /scratch/ml_test_data_156000_hdf5_noCuts
+  test_dir: /scratch/ml_test_data_156000_hdf5
+  # test_dir: /scratch/ml_validation_data_144000_hdf5
+  # test_dir: /scratch/ml_training_data_2694000_hdf5
+  
   val_dir: /scratch/ml_validation_data_144000_hdf5
   train_dir: /scratch/ml_training_data_2694000_hdf5
 
@@ -172,7 +175,7 @@ model:
                     dim: *dim
                     fields:
                       - r
-                      # - eta
+                      - eta
                       - phi
                     dim: *dim
                     # scale: 0.1
