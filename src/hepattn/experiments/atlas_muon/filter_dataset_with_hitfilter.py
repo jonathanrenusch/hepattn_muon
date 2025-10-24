@@ -175,7 +175,7 @@ class HitFilterDatasetReducer:
         )
         
         data_module.setup(stage='test')
-        test_dataloader = data_module.test_dataloader(shuffle=True)
+        test_dataloader = data_module.test_dataloader(shuffle=False)
         
         all_logits = []
         all_true_labels = []
@@ -208,9 +208,9 @@ class HitFilterDatasetReducer:
                     all_logits.extend(hit_logits)
                     all_true_labels.extend(true_labels)
                     
-                    # Stop after collecting enough data for threshold calculation
-                    if len(all_logits) > 100000000:  # 100 Mio hits should be enough
-                        break
+                    # # Stop after collecting enough data for threshold calculation
+                    # if len(all_logits) > 100000000:  # 100 Mio hits should be enough
+                    #     break
                         
                 except KeyError as e:
                     print(f"Warning: Could not load data for event {event_idx}: {e}")
