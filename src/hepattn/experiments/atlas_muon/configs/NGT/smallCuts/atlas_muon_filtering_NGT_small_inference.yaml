@@ -2,6 +2,7 @@ seed_everything: 42
 name: ATLAS-Muon-small
 # ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-small-NSWimpact_20250923-T194045/ckpts/epoch=038-val_loss=0.01130.ckpt
 ckpt_path: /eos/project/e/end-to-end-muon-tracking/tracking/data/smallCuts/ATLAS-Muon-small_20250908-T144042/ckpts/epoch=039-val_loss=0.00399.ckpt
+
 data: 
   # class_path: hepattn.experiments.atlas_muon.data.AtlasMuonDataModule
 
@@ -10,9 +11,9 @@ data:
   # train_dir: /home/iwsatlas1/jrenusch/master_thesis/tracking/data/root/ml_training_data_multi_processed
   # train_dir: /shared/tracking/data/ml_training_data_1_2Mio_processed
   # val_dir: /shared/tracking/data/ml_validation_data_150K_processed
-  test_dir: /scratch/ml_test_data_156000_hdf5
+  # test_dir: /scratch/ml_test_data_156000_hdf5
   # test_dir: /scratch/ml_validation_data_144000_hdf5
-  # test_dir: /scratch/ml_training_data_2694000_hdf5
+  test_dir: /scratch/ml_training_data_2694000_hdf5
   
   val_dir: /scratch/ml_validation_data_144000_hdf5
   train_dir: /scratch/ml_training_data_2694000_hdf5
@@ -56,6 +57,7 @@ data:
       - s  # 3D distance
       - theta  # Polar angle
       - phi  # Azimuthal angle
+    
   targets:
     hit:
       - on_valid_particle
@@ -168,16 +170,26 @@ model:
                     input_size: 22  # Number of input features for ATLAS muon data
                     output_size: &dim 128
                     norm_input: true
+                # posenc: # had data loss for these checkpoitns
+                #   class_path: hepattn.models.posenc.PositionEncoder
+                #   init_args:
+                #     input_name: hit
+                #     dim: *dim
+                #     fields:
+                #       - r
+                #       - eta
+                #       - phi
+                #     dim: *dim
                 posenc:
-                  class_path: hepattn.models.posenc.PositionEncoder
+                  class_path: hepattn.models.FourierPositionEncoder
                   init_args:
                     input_name: hit
-                    dim: *dim
                     fields:
-                      - r
-                      - eta
                       - phi
+                      - r 
+                    # TODO: Check wether you might want to add more here
                     dim: *dim
+                    scale: 0.1
                     # scale: 0.1
       encoder:
         class_path: hepattn.models.Encoder
