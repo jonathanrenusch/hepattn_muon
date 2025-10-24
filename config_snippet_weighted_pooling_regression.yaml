@@ -1,0 +1,48 @@
+# Example configuration snippet for WeightedPoolingObjectHitRegressionTask
+# Replace the existing ObjectRegressionTask section (around line 271) with this:
+
+            - class_path: hepattn.models.task.WeightedPoolingObjectHitRegressionTask
+              init_args:
+                name: parameter_regression
+                input_hit: hit
+                input_object: query
+                output_object: track
+                target_object: particle
+                hit_fields:
+                  - spacePoint_globEdgeHighX
+                  - spacePoint_globEdgeHighY
+                  - spacePoint_globEdgeHighZ
+                  - spacePoint_globEdgeLowX
+                  - spacePoint_globEdgeLowY
+                  - spacePoint_globEdgeLowZ
+                  - spacePoint_time
+                  - spacePoint_driftR
+                  - spacePoint_covXX
+                  - spacePoint_covXY
+                  - spacePoint_covYX
+                  - spacePoint_covYY
+                  - spacePoint_channel
+                  - spacePoint_layer
+                  - spacePoint_stationPhi
+                  - spacePoint_stationEta
+                  - spacePoint_stationIndex
+                  - spacePoint_technology
+                  - r
+                  - s
+                  - theta
+                  - phi
+                  - eta  # NEW: Pseudorapidity derived from theta
+                fields:
+                  - truthMuon_eta
+                  - truthMuon_phi
+                  - truthMuon_pt
+                  - truthMuon_q
+                inverse_fields:
+                  - truthMuon_pt  # NEW: Regress pT as 1/pT (better for ML)
+                loss_weight: 1.0
+                dim: 32
+                assignment_threshold: 0.1
+                # NEW: Multi-layer regression head parameters
+                regression_hidden_dim: 144  # Optional: defaults to 9*dim // 2 = 144
+                regression_num_layers: 3    # Optional: 1=direct, 2=one hidden, 3=two hidden (default)
+                dropout: 0.1                # Optional: dropout for regularization (default: 0.1)

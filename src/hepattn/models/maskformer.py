@@ -62,6 +62,12 @@ class MaskFormer(nn.Module):
         self.input_sort_field = input_sort_field
         self.use_attn_masks = use_attn_masks
         self.use_query_masks = use_query_masks
+        
+        # Setup frozen encoder tasks if any
+        from hepattn.models.task import FrozenEncoderRegressionTask
+        for task in self.tasks:
+            if isinstance(task, FrozenEncoderRegressionTask):
+                task.setup_frozen_model(self)
 
     def forward(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         # Atomic input names
@@ -78,6 +84,9 @@ class MaskFormer(nn.Module):
         #     if torch.is_tensor(tensor) and tensor.dtype.is_floating_point:
         #         if torch.isnan(tensor).any():
         #             print(f"NaN found in input '{key}': shape={tensor.shape}, nan_count={torch.isnan(tensor).sum()}")
+    
+        # Copy raw inputs to x so tasks can access them (e.g., for regression)
+        x.update(inputs)
     
         # Embed the input objects
         for input_net in self.input_nets:
@@ -149,6 +158,10 @@ class MaskFormer(nn.Module):
                 task_outputs = task(x)
 
                 outputs[f"layer_{layer_index}"][task.name] = task_outputs
+                
+                # Update x with task outputs so subsequent tasks can use them
+                # (e.g., regression task needs logits from ObjectHitMaskTask)
+                x.update(task_outputs)
 
                 # Here we check if each task has an attention mask to contribute, then after
                 # we fill in any attention masks for any features that did not get an attention mask

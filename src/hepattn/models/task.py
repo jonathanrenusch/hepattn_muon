@@ -493,3 +493,526 @@ class ObjectHitRegressionTask(RegressionTask):
             # Shape of padding goes BM -> B1M -> B1M1 -> BNMD
             x_obj_hit = x_obj_hit * pads[self.input_hit + "_valid"].unsqueeze(-2).unsqueeze(-1).expand_as(x_obj_hit).float()
         return x_obj_hit
+
+
+class WeightedPoolingObjectHitRegressionTask(RegressionTask):
+    def __init__(
+        self,
+        name: str,
+        input_hit: str,
+        input_object: str,
+        output_object: str,
+        target_object: str,
+        hit_fields: list[str],
+        fields: list[str],
+        loss_weight: float,
+        dim: int,
+        assignment_threshold: float = 0.1,
+        inverse_fields: list[str] | None = None,
+        regression_hidden_dim: int | None = None,
+        regression_num_layers: int = 3,
+        dropout: float = 0.1,
+    ):
+        """Regression task that aggregates hit information using weighted pooling.
+        
+        This task uses the hit-track assignment logits from ObjectHitMaskTask to create
+        a weighted aggregation of both raw and encoded hit features for each track.
+        
+        Architecture:
+        1. Get assignment probabilities from ObjectHitMaskTask logits
+        2. Apply hard threshold (default 0.1) to filter hits
+        3. Process raw hits through task-specific network (full dim)
+        4. Process encoded hits through task-specific network (full dim)
+        5. Apply multiple pooling operations:
+           - Weighted average (uses assignment weights)
+           - Weighted sum (uses assignment weights)
+           - Max pooling (unweighted, over thresholded hits)
+           - Min pooling (unweighted, over thresholded hits)
+        6. Concatenate [query_embed, raw_pooled, encoded_pooled]
+        7. Multi-layer regression head with dropout and layer norm
+        
+        Parameters
+        ----------
+        name : str
+            Name of the task - will be used as the key to separate task outputs.
+        input_hit : str
+            Name of the input hit feature (e.g., "hit")
+        input_object : str
+            Name of the input object feature (e.g., "query")
+        output_object : str
+            Name of the output object feature (e.g., "track")
+        target_object : str
+            Name of the target object feature (e.g., "particle")
+        hit_fields : list[str]
+            List of raw hit field names to use as input features
+        fields : list[str]
+            List of regression target field names (e.g., ["truthMuon_eta", "truthMuon_phi", ...])
+        loss_weight : float
+            Weight applied to the regression loss
+        dim : int
+            Embedding dimension of the encoder output
+        assignment_threshold : float
+            Threshold for hard filtering of hit-track assignments (default: 0.1)
+        inverse_fields : list[str] | None
+            List of field names to regress as inverse (e.g., ["truthMuon_pt"] for 1/pT regression).
+            Network predicts inverse, but loss/metrics computed correctly, and predictions
+            returned in original space. Useful for pT where curvature ~ 1/pT.
+        regression_hidden_dim : int | None
+            Hidden dimension for regression head. If None, defaults to aggregated_dim // 2.
+        regression_num_layers : int
+            Number of layers in regression head (default: 3). 
+            1 = direct projection, 2 = one hidden layer, 3 = two hidden layers, etc.
+        dropout : float
+            Dropout probability for regularization in regression head (default: 0.1)
+        """
+        super().__init__(name, output_object, target_object, fields, loss_weight)
+
+        self.input_hit = input_hit
+        self.input_object = input_object
+        self.hit_fields = hit_fields
+        self.assignment_threshold = assignment_threshold
+        
+        # Handle inverse field regression (e.g., 1/pT instead of pT)
+        self.inverse_fields = inverse_fields or []
+        self.inverse_indices = [i for i, f in enumerate(fields) if f in self.inverse_fields]
+
+        self.inputs = [input_object + "_embed", input_hit + "_embed", input_hit]
+        self.outputs = [self.output_object + "_regr"]
+
+        self.dim = dim
+        self.num_raw_features = len(hit_fields)
+        
+        # Task-specific networks for processing hits - USE FULL DIM (not dim//2)
+        # This preserves more information from raw detector measurements and encoded features
+        self.raw_hit_net = Dense(self.num_raw_features, dim)
+        self.encoded_hit_net = Dense(dim, dim)
+        
+        # Build multi-layer regression head
+        # Input: query_embed (dim) + raw_pooled (4*dim) + encoded_pooled (4*dim) = 9*dim
+        aggregated_dim = 9 * dim
+        
+        if regression_hidden_dim is None:
+            regression_hidden_dim = aggregated_dim // 2
+        
+        self.regression_head = self._build_regression_head(
+            aggregated_dim,
+            self.ndofs,
+            regression_hidden_dim,
+            regression_num_layers,
+            dropout
+        )
+    
+    def _build_regression_head(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        dropout: float,
+    ) -> nn.Sequential:
+        """Build a multi-layer MLP for regression.
+        
+        Args:
+            input_dim: Input feature dimension
+            output_dim: Number of regression targets
+            hidden_dim: Hidden layer dimension
+            num_layers: Total number of layers (including input and output)
+            dropout: Dropout probability
+            
+        Returns:
+            Sequential module implementing the regression head
+        """
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+        
+        layers = []
+        
+        if num_layers == 1:
+            # Direct projection (no hidden layers)
+            layers.append(nn.Linear(input_dim, output_dim))
+        else:
+            # First layer: input → hidden
+            layers.extend([
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Dropout(dropout)
+            ])
+            
+            # Middle layers: hidden → hidden
+            for _ in range(num_layers - 2):
+                layers.extend([
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.LayerNorm(hidden_dim),
+                    nn.Dropout(dropout)
+                ])
+            
+            # Output layer: hidden → output
+            layers.append(nn.Linear(hidden_dim, output_dim))
+        
+        return nn.Sequential(*layers)
+
+    def latent(self, x: dict[str, Tensor], pads: dict[str, Tensor] | None = None) -> Tensor:
+        """Compute aggregated hit features for regression.
+        
+        Args:
+            x: Dictionary containing:
+                - input_object + "_embed": Query embeddings [B, N, D]
+                - input_hit + "_embed": Encoded hit embeddings [B, M, D]
+                - input_hit: Raw hit features [B, M, num_raw_features]
+                - output_object + "_" + input_hit + "_logit": Assignment logits [B, N, M]
+            pads: Optional padding information
+            
+        Returns:
+            Aggregated feature tensor [B, N, 9*D] ready for regression head
+        """
+        batch_size = x[self.input_object + "_embed"].size(0)
+        num_tracks = x[self.input_object + "_embed"].size(1)
+        
+        # Get query embeddings [B, N, D]
+        query_embed = x[self.input_object + "_embed"]
+        
+        # Get assignment logits from ObjectHitMaskTask [B, N, M]
+        assignment_logits = x[self.output_object + "_" + self.input_hit + "_logit"]
+        num_hits = assignment_logits.size(2)  # M from [B, N, M]
+        
+        # Compute assignment probabilities
+        assignment_probs = assignment_logits.sigmoid()  # [B, N, M]
+        
+        # Apply hard threshold to create mask
+        assignment_mask = assignment_probs >= self.assignment_threshold  # [B, N, M]
+        
+        # Account for hit validity if available
+        if self.input_hit + "_valid" in x:
+            hit_valid = x[self.input_hit + "_valid"].unsqueeze(1).expand_as(assignment_mask)  # [B, N, M]
+            assignment_mask = assignment_mask & hit_valid
+        
+        # Compute normalized weights for weighted pooling (only over thresholded hits)
+        masked_probs = assignment_probs * assignment_mask.float()  # [B, N, M]
+        weight_sum = masked_probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # [B, N, 1]
+        weights = masked_probs / weight_sum  # [B, N, M], normalized
+        
+        # === Process Raw Hits ===
+        # Stack raw hit features [B, M, num_raw_features]
+        raw_hits = torch.stack([x[self.input_hit + "_" + field] for field in self.hit_fields], dim=-1)
+        
+        # Project raw hits through task-specific network [B, M, D]
+        raw_hit_features = self.raw_hit_net(raw_hits)
+        
+        # Expand for broadcasting [B, 1, M, D] -> for track dimension
+        raw_hit_features_expanded = raw_hit_features.unsqueeze(1).expand(batch_size, num_tracks, num_hits, self.dim)
+        
+        # Weighted average pooling [B, N, D]
+        raw_weighted_avg = (weights.unsqueeze(-1) * raw_hit_features_expanded).sum(dim=2)
+        
+        # Weighted sum pooling [B, N, D]
+        raw_weighted_sum = (masked_probs.unsqueeze(-1) * raw_hit_features_expanded).sum(dim=2)
+        
+        # Max pooling (unweighted, over thresholded hits) [B, N, D]
+        raw_for_max = torch.where(
+            assignment_mask.unsqueeze(-1).expand_as(raw_hit_features_expanded),
+            raw_hit_features_expanded,
+            torch.tensor(float('-inf'), device=raw_hit_features.device, dtype=raw_hit_features.dtype)
+        )
+        raw_max = raw_for_max.max(dim=2)[0]  # [B, N, D]
+        
+        # Min pooling (unweighted, over thresholded hits) [B, N, D]
+        raw_for_min = torch.where(
+            assignment_mask.unsqueeze(-1).expand_as(raw_hit_features_expanded),
+            raw_hit_features_expanded,
+            torch.tensor(float('inf'), device=raw_hit_features.device, dtype=raw_hit_features.dtype)
+        )
+        raw_min = raw_for_min.min(dim=2)[0]  # [B, N, D]
+        
+        # === Process Encoded Hits ===
+        # Project encoded hits through task-specific network [B, M, D]
+        encoded_hit_features = self.encoded_hit_net(x[self.input_hit + "_embed"])
+        
+        # Expand for broadcasting [B, 1, M, D] -> for track dimension
+        encoded_hit_features_expanded = encoded_hit_features.unsqueeze(1).expand(batch_size, num_tracks, num_hits, self.dim)
+        
+        # Weighted average pooling [B, N, D]
+        encoded_weighted_avg = (weights.unsqueeze(-1) * encoded_hit_features_expanded).sum(dim=2)
+        
+        # Weighted sum pooling [B, N, D]
+        encoded_weighted_sum = (masked_probs.unsqueeze(-1) * encoded_hit_features_expanded).sum(dim=2)
+        
+        # Max pooling (unweighted, over thresholded hits) [B, N, D]
+        encoded_for_max = torch.where(
+            assignment_mask.unsqueeze(-1).expand_as(encoded_hit_features_expanded),
+            encoded_hit_features_expanded,
+            torch.tensor(float('-inf'), device=encoded_hit_features.device, dtype=encoded_hit_features.dtype)
+        )
+        encoded_max = encoded_for_max.max(dim=2)[0]  # [B, N, D]
+        
+        # Min pooling (unweighted, over thresholded hits) [B, N, D]
+        encoded_for_min = torch.where(
+            assignment_mask.unsqueeze(-1).expand_as(encoded_hit_features_expanded),
+            encoded_hit_features_expanded,
+            torch.tensor(float('inf'), device=encoded_hit_features.device, dtype=encoded_hit_features.dtype)
+        )
+        encoded_min = encoded_for_min.min(dim=2)[0]  # [B, N, D]
+        
+        # === Concatenate all features ===
+        # query_embed: [B, N, D]
+        # raw poolings: 4 x [B, N, D] = [B, N, 4*D]
+        # encoded poolings: 4 x [B, N, D] = [B, N, 4*D]
+        # Total: [B, N, 9*D]
+        aggregated = torch.cat([
+            query_embed,                # [B, N, D]
+            raw_weighted_avg,          # [B, N, D]
+            raw_weighted_sum,          # [B, N, D]
+            raw_max,                   # [B, N, D]
+            raw_min,                   # [B, N, D]
+            encoded_weighted_avg,      # [B, N, D]
+            encoded_weighted_sum,      # [B, N, D]
+            encoded_max,               # [B, N, D]
+            encoded_min,               # [B, N, D]
+        ], dim=-1)
+        
+        return aggregated
+    
+    def forward(self, x: dict[str, Tensor], pads: dict[str, Tensor] | None = None) -> dict[str, Tensor]:
+        """Forward pass that aggregates hits and produces regression outputs.
+        
+        Args:
+            x: Dictionary of input tensors
+            pads: Optional padding information
+            
+        Returns:
+            Dictionary with regression outputs
+        """
+        # Get aggregated features [B, N, 9*D]
+        aggregated = self.latent(x, pads=pads)
+        
+        # Pass through multi-layer regression head [B, N, ndofs]
+        regression_output = self.regression_head(aggregated)
+        
+        return {self.output_object + "_regr": regression_output}
+    
+    def predict(self, outputs):
+        """Return predictions from model outputs.
+        
+        For fields in inverse_fields (e.g., pT), the network predicts the inverse (1/pT),
+        so we invert back to get the original quantity.
+        
+        Args:
+            outputs: Dictionary containing model outputs
+            
+        Returns:
+            Dictionary with predictions in original space
+        """
+        raw_output = outputs[self.output_object + "_regr"]  # [B, N, num_fields]
+        
+        predictions = {}
+        for i, field in enumerate(self.fields):
+            pred_value = raw_output[..., i]
+            
+            # If this field was regressed as inverse, invert back to original space
+            if i in self.inverse_indices:
+                # Network predicts 1/pT, convert back to pT
+                # Clamp to avoid extreme values from very small predictions
+                pred_value = 1.0 / pred_value.clamp(min=1e-6, max=1e6)
+            
+            predictions[self.output_object + "_" + field] = pred_value
+        
+        return predictions
+    
+    def loss(self, outputs, targets):
+        """Compute loss between outputs and targets.
+        
+        For fields in inverse_fields (e.g., pT), both the prediction and target
+        are converted to inverse space (1/pT) before computing the loss.
+        
+        Args:
+            outputs: Dictionary containing model outputs
+            targets: Dictionary containing target values
+            
+        Returns:
+            Dictionary with loss values
+        """
+        output = outputs[self.output_object + "_regr"]  # [B, N, num_fields]
+        
+        # Stack target fields, converting to inverse space where needed
+        target_list = []
+        for i, field in enumerate(self.fields):
+            target_field = targets[self.target_object + "_" + field]
+            
+            # If this field should be regressed as inverse, invert the target
+            if i in self.inverse_indices:
+                # Convert pT to 1/pT for loss computation
+                target_field = 1.0 / target_field
+            
+            target_list.append(target_field)
+        
+        target = torch.stack(target_list, dim=-1)  # [B, N, num_fields]
+        
+        # Only compute loss for valid targets
+        mask = targets[self.target_object + "_valid"].clone()
+        target = target[mask]
+        output = output[mask]
+        
+        # Compute the loss (in inverse space for pT)
+        loss = torch.nn.functional.smooth_l1_loss(output, target, reduction="none")
+        
+        # Average over all the features
+        loss = torch.mean(loss, dim=-1)
+        
+        # Compute the regression loss only for valid objects
+        return {"smooth_l1": self.loss_weight * loss.mean()}
+
+
+class FrozenEncoderRegressionTask(WeightedPoolingObjectHitRegressionTask):
+    """Regression task with frozen encoder loaded from checkpoint.
+    
+    This task loads a pre-trained model checkpoint and freezes all encoder/decoder
+    weights, only training the regression head. This enables:
+    - Fast iteration on regression architecture
+    - Decoupled training from hit-to-track assignment
+    - Lower memory usage (no gradients through transformer)
+    - Easier hyperparameter tuning for regression
+    
+    The frozen model is used to generate hit-track assignments and encoded features,
+    which are then used for regression exactly as in WeightedPoolingObjectHitRegressionTask.
+    
+    Usage:
+        This task should be used as the ONLY task in a training run, with a checkpoint
+        path pointing to a model trained with ObjectValidTask and ObjectHitMaskTask.
+        
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to the checkpoint file (.ckpt) containing the pre-trained model.
+        The checkpoint should contain a model with encoder, decoder, and at minimum
+        the ObjectHitMaskTask to generate hit-track assignment logits.
+    freeze_all : bool
+        If True (default), freezes all parameters from the checkpoint including
+        input nets, encoder, decoder, and all tasks. If False, only freezes the
+        encoder and decoder (allowing input nets to adapt).
+    **kwargs : dict
+        All other arguments are passed to WeightedPoolingObjectHitRegressionTask.
+        
+    Example Config:
+        ```yaml
+        tasks:
+          - class_path: hepattn.models.task.FrozenEncoderRegressionTask
+            init_args:
+              name: regr
+              checkpoint_path: logs/ckpts/epoch=004-val_loss=9.00107.ckpt
+              freeze_all: true
+              input_hit: hit
+              input_object: query
+              output_object: track
+              target_object: truthMuon
+              hit_fields: [...all 23 fields including eta...]
+              fields:
+                - truthMuon_eta
+                - truthMuon_phi
+                - truthMuon_pt
+                - truthMuon_charge
+              loss_weight: 1.0
+              dim: 32
+              inverse_fields: [truthMuon_pt]
+              regression_hidden_dim: 144
+              regression_num_layers: 3
+              dropout: 0.1
+        ```
+    """
+    
+    def __init__(
+        self,
+        checkpoint_path: str,
+        freeze_all: bool = True,
+        **kwargs
+    ):
+        """Initialize frozen encoder regression task.
+        
+        Args:
+            checkpoint_path: Path to pre-trained model checkpoint
+            freeze_all: Whether to freeze all model parameters (vs just encoder/decoder)
+            **kwargs: Arguments passed to WeightedPoolingObjectHitRegressionTask
+        """
+        super().__init__(**kwargs)
+        
+        self.checkpoint_path = checkpoint_path
+        self.freeze_all = freeze_all
+        self.frozen_model = None  # Will be set during model initialization
+        
+    def setup_frozen_model(self, model):
+        """Load and freeze the pre-trained model.
+        
+        This is called by the parent MaskFormer after all modules are initialized.
+        We can't load the checkpoint in __init__ because we need access to the
+        full model structure.
+        
+        Args:
+            model: The parent MaskFormer model instance
+        """
+        import torch
+        
+        # Load the checkpoint
+        print(f"Loading checkpoint from {self.checkpoint_path}")
+        checkpoint = torch.load(self.checkpoint_path, map_location='cpu')
+        
+        # Extract the state dict (handle both wrapped and unwrapped checkpoints)
+        if 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+            # Remove 'model.' prefix if present (from LightningModule wrapper)
+            state_dict = {k.replace('model.', ''): v for k, v in state_dict.items()}
+        else:
+            state_dict = checkpoint
+        
+        # Load weights into the model
+        # We only load the encoder, decoder, input_nets, and ObjectHitMaskTask
+        # The regression head stays randomly initialized for training
+        
+        # Filter out the regression task weights (this task's weights)
+        filtered_state_dict = {}
+        regression_task_prefix = f"tasks.{self.name}."
+        
+        for key, value in state_dict.items():
+            # Skip this task's parameters (we want to train these)
+            if key.startswith(f"tasks."):
+                # Check if this is our regression task
+                task_key = key.split('.')[1] if len(key.split('.')) > 1 else None
+                if task_key == self.name:
+                    continue  # Skip regression task weights
+            filtered_state_dict[key] = value
+        
+        # Load filtered weights
+        missing, unexpected = model.load_state_dict(filtered_state_dict, strict=False)
+        
+        print(f"Loaded checkpoint with {len(filtered_state_dict)} parameters")
+        print(f"Missing keys (expected for regression task): {len(missing)}")
+        print(f"Unexpected keys: {len(unexpected)}")
+        
+        # Freeze parameters
+        if self.freeze_all:
+            print("Freezing all parameters except regression head")
+            for name, param in model.named_parameters():
+                # Only train this task's regression head
+                if not name.startswith(f"tasks.{self.name}."):
+                    param.requires_grad = False
+        else:
+            print("Freezing only encoder and decoder")
+            # Freeze encoder and decoder only
+            if model.encoder is not None:
+                for param in model.encoder.parameters():
+                    param.requires_grad = False
+            for decoder_layer in model.decoder_layers:
+                for param in decoder_layer.parameters():
+                    param.requires_grad = False
+            
+            # Also freeze other tasks (not this one)
+            for task in model.tasks:
+                if task.name != self.name:
+                    for param in task.parameters():
+                        param.requires_grad = False
+        
+        # Count trainable parameters
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
+        
+        self.frozen_model = model

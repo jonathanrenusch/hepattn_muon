@@ -1,0 +1,288 @@
+seed_everything: 42
+name: TRK-ATLAS-Muon-FrozenRegression-noNSW-noRPC
+
+# This config trains ONLY the regression head with a frozen encoder/decoder
+# loaded from a pre-trained checkpoint.
+# 
+# USAGE:
+# 1. First train an assignment model using atlas_muon_tracking_NGT_small.yaml
+# 2. Note the best checkpoint path (e.g., logs/ckpts/epoch=004-val_loss=9.00107.ckpt)
+# 3. Update checkpoint_path below
+# 4. Train this config - it will be 2-3x faster!
+
+data:
+
+  train_dir: /scratch/ml_training_data_2694000_hdf5_no-NSW_no-RPC_filtered_wp0990_maxtrk2_maxhit600
+  val_dir: /scratch/ml_validation_data_144000_hdf_no-NSW_no-RPC_filtered_wp0990_maxtrk2_maxhit600
+  test_dir: /scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC_filtered_wp0990_maxtrk2_maxhit600
+
+  num_workers: 12
+  num_train: -1
+  num_test: -1
+  num_val: -1
+  batch_size: 256  # Can use larger batch since frozen model uses less memory
+  
+  event_max_num_particles: &num_objects 2
+
+  inputs:
+    hit:
+      # Global hit coordinates
+      - spacePoint_globEdgeHighX
+      - spacePoint_globEdgeHighY
+      - spacePoint_globEdgeHighZ
+      - spacePoint_globEdgeLowX
+      - spacePoint_globEdgeLowY
+      - spacePoint_globEdgeLowZ
+      - spacePoint_time
+      - spacePoint_driftR
+      # Covariance information
+      - spacePoint_covXX
+      - spacePoint_covXY
+      - spacePoint_covYX
+      - spacePoint_covYY
+      # Detector information
+      - spacePoint_channel
+      - spacePoint_layer
+      - spacePoint_stationPhi
+      - spacePoint_stationEta
+      - spacePoint_stationIndex
+      - spacePoint_technology
+      # Derived hit fields
+      - r
+      - s
+      - theta
+      - phi
+      - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  # Faster convergence expected with frozen encoder
+  max_epochs: 30  # Reduced from 140 - frozen training converges faster
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [1]
+  precision: bf16-mixed
+  log_every_n_steps: 50 
+  default_root_dir: logs
+  gradient_clip_val: 0.1
+  enable_progress_bar: true
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: atlas_muon_tracking_frozen_regression
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+
+model:
+
+  optimizer:
+    class_path: torch.optim.AdamW
+    init_args:
+      lr: 0.001  # Can use higher LR since only training regression head
+      weight_decay: 0.01
+
+  lrs_config:
+    class_path: torch.optim.lr_scheduler.OneCycleLR
+    init_args:
+      max_lr: 0.001
+      total_steps: null
+      pct_start: 0.1
+      anneal_strategy: cos
+      cycle_momentum: false
+      div_factor: 10.0
+      final_div_factor: 1000.0
+
+  model:
+    class_path: hepattn.models.MaskFormer
+    init_args:
+      dim: &dim 32
+      num_queries: *num_objects
+
+      # These must match the checkpoint architecture exactly
+      input_nets:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: hepattn.models.InputNet
+              init_args:
+                input_name: hit
+                fields:
+                  - spacePoint_globEdgeHighX
+                  - spacePoint_globEdgeHighY
+                  - spacePoint_globEdgeHighZ
+                  - spacePoint_globEdgeLowX
+                  - spacePoint_globEdgeLowY
+                  - spacePoint_globEdgeLowZ
+                  - spacePoint_time
+                  - spacePoint_driftR
+                  - spacePoint_covXX
+                  - spacePoint_covXY
+                  - spacePoint_covYX
+                  - spacePoint_covYY
+                  - spacePoint_channel
+                  - spacePoint_layer
+                  - spacePoint_stationPhi
+                  - spacePoint_stationEta
+                  - spacePoint_stationIndex
+                  - spacePoint_technology
+                  - r
+                  - s
+                  - theta
+                  - phi
+                  - eta
+
+                net:
+                  class_path: hepattn.models.Dense
+                  init_args:
+                    input_size: 23  # 21 fields + 2 from position encoding
+                    output_size: *dim
+
+                posenc:
+                  class_path: hepattn.models.posenc.PositionEncoder
+                  init_args:
+                    input_name: hit
+                    fields:
+                      - r
+                      - theta
+                      - phi
+                    dim: *dim
+                    sym_fields:
+                      - phi
+
+      encoder:
+        class_path: hepattn.models.Encoder
+        init_args:
+          num_layers: 2
+          dim: *dim
+          attn_type: flash-varlen
+          hybrid_norm: true
+          value_residual: true
+          attn_kwargs:
+            num_heads: 8
+
+      matcher:
+        class_path: hepattn.models.matcher.Matcher
+        init_args:
+          default_solver: scipy
+          adaptive_solver: false
+          adaptive_check_interval: 1000
+          parallel_solver: true
+          n_jobs: 16
+
+      num_decoder_layers: 2
+      decoder_layer_config:
+        dim: *dim
+        norm: RMSNorm
+        mask_attention: true
+
+      # Keep ALL tasks from Stage 1, then add FrozenEncoderRegressionTask
+      # The frozen task will freeze everything except its own regression head
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            # These tasks must match Stage 1 config for checkpoint loading
+            # Set loss weights to 0 since they're frozen (predictions still generated)
+            - class_path: hepattn.models.task.ObjectValidTask
+              init_args:
+                name: track_valid
+                input_object: query
+                output_object: track
+                target_object: particle
+                losses:
+                  object_bce: 0.0  # Frozen - no training
+                costs:
+                  object_bce: 10.0
+                dim: *dim
+                null_weight: 1.0
+                mask_queries: false
+            
+            - class_path: hepattn.models.task.ObjectHitMaskTask
+              init_args:
+                name: track_hit_valid
+                input_hit: hit
+                input_object: query
+                output_object: track
+                target_object: particle
+                losses:
+                  mask_bce: 0.0  # Frozen - no training
+                costs:
+                  mask_bce: 1.0
+                dim: *dim
+                null_weight: 1.0
+                mask_attn: true
+            
+            # Add frozen regression task (will freeze all above tasks + encoder/decoder)
+            - class_path: hepattn.models.task.FrozenEncoderRegressionTask
+              init_args:
+                name: parameter_regression
+                
+                # ============================================
+                # CHECKPOINT PATH - UPDATE THIS!
+                # ============================================
+                checkpoint_path: /shared/tracking/hepattn_muon/logs/ckpts/epoch=004-val_loss=9.00107.ckpt
+                
+                # Freeze all encoder/decoder/task parameters
+                freeze_all: true
+                
+                # Standard regression parameters
+                input_hit: hit
+                input_object: query
+                output_object: track
+                target_object: particle
+                
+                hit_fields:
+                  - spacePoint_globEdgeHighX
+                  - spacePoint_globEdgeHighY
+                  - spacePoint_globEdgeHighZ
+                  - spacePoint_globEdgeLowX
+                  - spacePoint_globEdgeLowY
+                  - spacePoint_globEdgeLowZ
+                  - spacePoint_time
+                  - spacePoint_driftR
+                  - spacePoint_covXX
+                  - spacePoint_covXY
+                  - spacePoint_covYX
+                  - spacePoint_covYY
+                  - spacePoint_channel
+                  - spacePoint_layer
+                  - spacePoint_stationPhi
+                  - spacePoint_stationEta
+                  - spacePoint_stationIndex
+                  - spacePoint_technology
+                  - r
+                  - s
+                  - theta
+                  - phi
+                  - eta
+                
+                fields:
+                  - truthMuon_eta
+                  - truthMuon_phi
+                  - truthMuon_pt
+                  - truthMuon_q
+                
+                inverse_fields:
+                  - truthMuon_pt
+                
+                loss_weight: 1.0
+                dim: 32
+                assignment_threshold: 0.1
+                
+                # Experiment with these parameters!
+                regression_hidden_dim: 144   # Try: 96, 144, 192, 288
+                regression_num_layers: 3     # Try: 2, 3, 4
+                dropout: 0.1                 # Try: 0.05, 0.1, 0.2
