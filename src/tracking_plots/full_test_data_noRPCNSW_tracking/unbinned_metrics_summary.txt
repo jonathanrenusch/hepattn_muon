@@ -1,0 +1,38 @@
+================================================================================
+UNBINNED AVERAGE METRICS SUMMARY
+================================================================================
+Generated at: 2025-10-24 12:10:46
+Evaluation file: /scratch/epoch=127-val_loss=2.87917_ml_test_data_156000_hdf5_no-NSW_no-RPC_filtered_wp0990_maxtrk2_maxhit600_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_no-NSW_no-RPC_filtered_wp0990_maxtrk2_maxhit600
+Total tracks analyzed: 127,499
+
+HIT ASSIGNMENT EFFICIENCY
+----------------------------------------
+Average Hit Assignment Efficiency:  0.917183 (91.72%)
+  (Mean fraction of true hits correctly assigned)
+Fraction with Efficiency ≥ 50%:     0.936478 (93.65%)
+  (Tracks meeting 50% efficiency threshold)
+
+HIT ASSIGNMENT PURITY
+----------------------------------------
+Average Hit Assignment Purity:      0.886400 (88.64%)
+  (Mean fraction of assigned hits that are correct)
+Fraction with Purity ≥ 50%:         0.972308 (97.23%)
+  (Tracks meeting 50% purity threshold)
+
+DOUBLE MATCHING EFFICIENCY
+----------------------------------------
+Double Matching Efficiency (50% WP): 0.929301 (92.93%)
+  (Fraction of tracks with both efficiency ≥50% AND purity ≥50%)
+
+CHARGE CLASSIFICATION ACCURACY
+----------------------------------------
+Charge Classification Accuracy:     0.954549 (95.45%)
+  (Fraction with correct charge sign predictions)
+
+pT REGRESSION METRICS
+----------------------------------------
+Average pT Residual (Pred - Truth): -2.3056 GeV
+Standard Deviation of pT Residual:  16.5361 GeV
+
+================================================================================
