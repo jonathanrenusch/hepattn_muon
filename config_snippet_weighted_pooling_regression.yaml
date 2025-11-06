@@ -35,10 +35,8 @@
                 fields:
                   - truthMuon_eta
                   - truthMuon_phi
-                  - truthMuon_pt
+                  - truthMuon_pt_norm  # NEW: Use normalized pT (pT/200)
                   - truthMuon_q
-                inverse_fields:
-                  - truthMuon_pt  # NEW: Regress pT as 1/pT (better for ML)
                 loss_weight: 1.0
                 dim: 32
                 assignment_threshold: 0.1

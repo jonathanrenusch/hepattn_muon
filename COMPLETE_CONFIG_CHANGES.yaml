@@ -133,10 +133,8 @@ data:
                 fields:
                   - truthMuon_eta
                   - truthMuon_phi
-                  - truthMuon_pt
+                  - truthMuon_pt_norm  # Use normalized pT (pT/200)
                   - truthMuon_q
-                inverse_fields:
-                  - truthMuon_pt  # Regress as 1/pT
                 loss_weight: 1.0
                 dim: *dim
                 assignment_threshold: 0.1
@@ -152,7 +150,7 @@ data:
 ✅ 3. Add `eta` to InputNet `fields` list
 ✅ 4. (Optional) Add `eta` to position encoding fields
 ✅ 5. Add `eta` to regression task `hit_fields` (already done in snippet)
-✅ 6. Add `inverse_fields: [truthMuon_pt]` for 1/pT regression
+✅ 6. Use normalized pT (truthMuon_pt_norm) instead of inverse regression
 ✅ 7. Add multi-layer regression head parameters
 
 ## NOTE: 

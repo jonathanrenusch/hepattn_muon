@@ -329,6 +329,7 @@ class AtlasMuonDataset(Dataset):
             'particle_id': np.unique(hits["spacePoint_truthLink"][hits["on_valid_particle"]]),  # Sequential IDs
             # 'particle_id': np.unique(hits["spacePoint_truthLink"][hits["spacePoint_truthLink"] >=0 ]),  # Sequential IDs
             'truthMuon_pt': tracks_dict['truthMuon_pt'],
+            'truthMuon_pt_norm': tracks_dict['truthMuon_pt'] / 200,
             'truthMuon_eta': tracks_dict['truthMuon_eta'],
             'truthMuon_phi': tracks_dict['truthMuon_phi'],
             'truthMuon_q': tracks_dict['truthMuon_q'],

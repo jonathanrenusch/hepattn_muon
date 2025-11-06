@@ -508,7 +508,6 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
         loss_weight: float,
         dim: int,
         assignment_threshold: float = 0.1,
-        inverse_fields: list[str] | None = None,
         regression_hidden_dim: int | None = None,
         regression_num_layers: int = 3,
         dropout: float = 0.1,
@@ -553,10 +552,6 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
             Embedding dimension of the encoder output
         assignment_threshold : float
             Threshold for hard filtering of hit-track assignments (default: 0.1)
-        inverse_fields : list[str] | None
-            List of field names to regress as inverse (e.g., ["truthMuon_pt"] for 1/pT regression).
-            Network predicts inverse, but loss/metrics computed correctly, and predictions
-            returned in original space. Useful for pT where curvature ~ 1/pT.
         regression_hidden_dim : int | None
             Hidden dimension for regression head. If None, defaults to aggregated_dim // 2.
         regression_num_layers : int
@@ -571,10 +566,6 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
         self.input_object = input_object
         self.hit_fields = hit_fields
         self.assignment_threshold = assignment_threshold
-        
-        # Handle inverse field regression (e.g., 1/pT instead of pT)
-        self.inverse_fields = inverse_fields or []
-        self.inverse_indices = [i for i, f in enumerate(fields) if f in self.inverse_fields]
 
         self.inputs = [input_object + "_embed", input_hit + "_embed", input_hit]
         self.outputs = [self.output_object + "_regr"]
@@ -716,6 +707,8 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
             torch.tensor(float('-inf'), device=raw_hit_features.device, dtype=raw_hit_features.dtype)
         )
         raw_max = raw_for_max.max(dim=2)[0]  # [B, N, D]
+        # Replace -inf with 0 for tracks with no assigned hits
+        raw_max = torch.where(torch.isinf(raw_max), torch.zeros_like(raw_max), raw_max)
         
         # Min pooling (unweighted, over thresholded hits) [B, N, D]
         raw_for_min = torch.where(
@@ -724,6 +717,8 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
             torch.tensor(float('inf'), device=raw_hit_features.device, dtype=raw_hit_features.dtype)
         )
         raw_min = raw_for_min.min(dim=2)[0]  # [B, N, D]
+        # Replace +inf with 0 for tracks with no assigned hits
+        raw_min = torch.where(torch.isinf(raw_min), torch.zeros_like(raw_min), raw_min)
         
         # === Process Encoded Hits ===
         # Project encoded hits through task-specific network [B, M, D]
@@ -745,6 +740,8 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
             torch.tensor(float('-inf'), device=encoded_hit_features.device, dtype=encoded_hit_features.dtype)
         )
         encoded_max = encoded_for_max.max(dim=2)[0]  # [B, N, D]
+        # Replace -inf with 0 for tracks with no assigned hits
+        encoded_max = torch.where(torch.isinf(encoded_max), torch.zeros_like(encoded_max), encoded_max)
         
         # Min pooling (unweighted, over thresholded hits) [B, N, D]
         encoded_for_min = torch.where(
@@ -753,6 +750,8 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
             torch.tensor(float('inf'), device=encoded_hit_features.device, dtype=encoded_hit_features.dtype)
         )
         encoded_min = encoded_for_min.min(dim=2)[0]  # [B, N, D]
+        # Replace +inf with 0 for tracks with no assigned hits
+        encoded_min = torch.where(torch.isinf(encoded_min), torch.zeros_like(encoded_min), encoded_min)
         
         # === Concatenate all features ===
         # query_embed: [B, N, D]
@@ -794,36 +793,23 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
     def predict(self, outputs):
         """Return predictions from model outputs.
         
-        For fields in inverse_fields (e.g., pT), the network predicts the inverse (1/pT),
-        so we invert back to get the original quantity.
-        
         Args:
             outputs: Dictionary containing model outputs
             
         Returns:
-            Dictionary with predictions in original space
+            Dictionary with predictions
         """
         raw_output = outputs[self.output_object + "_regr"]  # [B, N, num_fields]
         
         predictions = {}
         for i, field in enumerate(self.fields):
             pred_value = raw_output[..., i]
-            
-            # If this field was regressed as inverse, invert back to original space
-            if i in self.inverse_indices:
-                # Network predicts 1/pT, convert back to pT
-                # Clamp to avoid extreme values from very small predictions
-                pred_value = 1.0 / pred_value.clamp(min=1e-6, max=1e6)
-            
             predictions[self.output_object + "_" + field] = pred_value
         
         return predictions
     
     def loss(self, outputs, targets):
         """Compute loss between outputs and targets.
-        
-        For fields in inverse_fields (e.g., pT), both the prediction and target
-        are converted to inverse space (1/pT) before computing the loss.
         
         Args:
             outputs: Dictionary containing model outputs
@@ -834,33 +820,28 @@ class WeightedPoolingObjectHitRegressionTask(RegressionTask):
         """
         output = outputs[self.output_object + "_regr"]  # [B, N, num_fields]
         
-        # Stack target fields, converting to inverse space where needed
-        target_list = []
-        for i, field in enumerate(self.fields):
-            target_field = targets[self.target_object + "_" + field]
-            
-            # If this field should be regressed as inverse, invert the target
-            if i in self.inverse_indices:
-                # Convert pT to 1/pT for loss computation
-                target_field = 1.0 / target_field
-            
-            target_list.append(target_field)
-        
-        target = torch.stack(target_list, dim=-1)  # [B, N, num_fields]
+        # Stack target fields
+        target = torch.stack([targets[self.target_object + "_" + field] for field in self.fields], dim=-1)
         
         # Only compute loss for valid targets
         mask = targets[self.target_object + "_valid"].clone()
         target = target[mask]
         output = output[mask]
         
-        # Compute the loss (in inverse space for pT)
+        # Compute the loss
         loss = torch.nn.functional.smooth_l1_loss(output, target, reduction="none")
         
         # Average over all the features
         loss = torch.mean(loss, dim=-1)
         
         # Compute the regression loss only for valid objects
-        return {"smooth_l1": self.loss_weight * loss.mean()}
+        # Handle edge case where no valid objects exist (avoid NaN)
+        num_valid = mask.sum()
+        if num_valid > 0:
+            return {"smooth_l1": self.loss_weight * loss.sum() / num_valid}
+        else:
+            # Return zero loss when no valid targets (gradient will be zero, no update)
+            return {"smooth_l1": torch.tensor(0.0, device=output.device, dtype=output.dtype, requires_grad=True)}
 
 
 class FrozenEncoderRegressionTask(WeightedPoolingObjectHitRegressionTask):
@@ -909,11 +890,10 @@ class FrozenEncoderRegressionTask(WeightedPoolingObjectHitRegressionTask):
               fields:
                 - truthMuon_eta
                 - truthMuon_phi
-                - truthMuon_pt
+                - truthMuon_pt_norm
                 - truthMuon_charge
               loss_weight: 1.0
               dim: 32
-              inverse_fields: [truthMuon_pt]
               regression_hidden_dim: 144
               regression_num_layers: 3
               dropout: 0.1
