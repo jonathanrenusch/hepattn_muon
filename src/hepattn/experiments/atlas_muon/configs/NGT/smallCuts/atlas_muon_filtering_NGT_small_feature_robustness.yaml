@@ -1,5 +1,6 @@
 seed_everything: 42
-name: ATLAS-Muon-small-noCov-noTime
+# name: ATLAS-Muon-small-noCov-noTime
+name: ATLAS-Muon-small-justxyz6features
 
 # ckpt_path: 
 data: 
@@ -27,19 +28,19 @@ data:
       - spacePoint_globEdgeLowY
       - spacePoint_globEdgeLowZ
       # - spacePoint_time
-      - spacePoint_driftR
+      # - spacePoint_driftR
       # Add covariance information
       # - spacePoint_covXX
       # - spacePoint_covXY
       # - spacePoint_covYX
       # - spacePoint_covYY
       # Add detector information
-      - spacePoint_channel
-      - spacePoint_layer
-      - spacePoint_stationPhi
-      - spacePoint_stationEta
-      - spacePoint_stationIndex
-      - spacePoint_technology
+      # - spacePoint_channel
+      # - spacePoint_layer
+      # - spacePoint_stationPhi
+      # - spacePoint_stationEta
+      # - spacePoint_stationIndex
+      # - spacePoint_technology
       # Add derived hit fields
       - r  # Radial distance
       - s  # 3D distance
@@ -134,41 +135,41 @@ model:
                   - spacePoint_globEdgeLowY
                   - spacePoint_globEdgeLowZ
                   # - spacePoint_time
-                  - spacePoint_driftR
+                  # - spacePoint_driftR
                   # Add covariance information
                   # - spacePoint_covXX
                   # - spacePoint_covXY
                   # - spacePoint_covYX
                   # - spacePoint_covYY
                   # Add detector information
-                  - spacePoint_channel
-                  - spacePoint_layer
-                  - spacePoint_stationPhi
-                  - spacePoint_stationEta
-                  - spacePoint_technology
-                  - spacePoint_stationIndex
+                  # - spacePoint_channel
+                  # - spacePoint_layer
+                  # - spacePoint_stationPhi
+                  # - spacePoint_stationEta
+                  # - spacePoint_technology
+                  # - spacePoint_stationIndex
                   # Add derived hit fields
-                  - r  # Radial distance
-                  - s  # 3D distance
-                  - theta  # Polar angle
-                  - phi  # Azimuthal angle
-                  - eta
+                  # - r  # Radial distance
+                  # - s  # 3D distance
+                  # - theta  # Polar angle
+                  # - phi  # Azimuthal angle
+                  # - eta
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 18  # Number of input features for ATLAS muon data
+                    input_size: 6  # Number of input features for ATLAS muon data
                     output_size: &dim 128
                     norm_input: true
-                posenc:
-                  class_path: hepattn.models.posenc.PositionEncoder
-                  init_args:
-                    input_name: hit
-                    dim: *dim
-                    fields:
-                      - r
-                      - eta
-                      - phi
-                    dim: *dim
+                # posenc:
+                #   class_path: hepattn.models.posenc.PositionEncoder
+                #   init_args:
+                #     input_name: hit
+                #     dim: *dim
+                #     fields:
+                #       - r
+                #       - eta
+                #       - phi
+                #     dim: *dim
                     # scale: 0.1
       encoder:
         class_path: hepattn.models.Encoder
