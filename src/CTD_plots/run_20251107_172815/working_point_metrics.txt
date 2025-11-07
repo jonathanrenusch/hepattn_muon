@@ -1,0 +1,48 @@
+================================================================================
+WORKING POINT METRICS SUMMARY
+================================================================================
+
+
+================================================================================
+Working Point: 0.990
+================================================================================
+
+Threshold: -2.296875
+Actual Hit Efficiency: 0.990809
+
+Hit-Level Metrics:
+  Purity (Precision):        0.700910 (70.09%)
+  Background Rejection Rate: 0.996534 (99.65%)
+  True Positives:            539
+  False Positives:           230
+  True Negatives:            66,120
+  False Negatives:           5
+
+Particle-Level Metrics:
+  Total Particles:                    20
+  Reconstructable Particles (≥3 hits): 20
+  Particle Reconstruction Efficiency: 1.000000 (100.00%)
+
+================================================================================
+Working Point: 0.995
+================================================================================
+
+Threshold: -2.609375
+Actual Hit Efficiency: 0.996324
+
+Hit-Level Metrics:
+  Purity (Precision):        0.677500 (67.75%)
+  Background Rejection Rate: 0.996112 (99.61%)
+  True Positives:            542
+  False Positives:           258
+  True Negatives:            66,092
+  False Negatives:           2
+
+Particle-Level Metrics:
+  Total Particles:                    20
+  Reconstructable Particles (≥3 hits): 20
+  Particle Reconstruction Efficiency: 1.000000 (100.00%)
+
+================================================================================
+END OF METRICS SUMMARY
+================================================================================

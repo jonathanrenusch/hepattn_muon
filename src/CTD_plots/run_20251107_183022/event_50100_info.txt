@@ -1,0 +1,16 @@
+================================================================================
+EVENT 50100 DISPLAY INFORMATION
+================================================================================
+
+Total hits in event: 6432
+Hits passing filter (logits > -1.5): 63 (0.98%)
+Hits rejected: 6369 (99.02%)
+
+Filter threshold: -1.5 (on logits)
+
+Tracks in filtered event:
+  Track 0: 18 hits
+  Track 1: 30 hits
+  Background: 15 hits
+
+================================================================================
