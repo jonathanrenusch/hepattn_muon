@@ -1,0 +1,50 @@
+
+================================================================================
+TASK 3: REGRESSION EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-11-10 02:35:49
+Evaluation file: /scratch/epoch=139-val_loss=0.70832_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+Max events processed: 1000
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 1,958
+Failed minimum hits (>=9): 28
+Failed eta cuts (0.1 <= |eta| <= 2.7): 55
+Failed pt cuts (pt >= 3.0 GeV): 1,875
+Failed station cuts: 0
+Tracks passing all cuts: 0
+
+PHI COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           0.298354       19.057542      
+Baseline Tracks     0              N/A            N/A            
+Rejected Tracks     1958           0.298354       19.057542      
+
+ETA COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           0.028780       2.417060       
+Baseline Tracks     0              N/A            N/A            
+Rejected Tracks     1958           0.028780       2.417060       
+
+PT COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           1.137321       1.010069       
+Baseline Tracks     0              N/A            N/A            
+Rejected Tracks     1958           1.137321       1.010069       
+
+Q COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           0.004112       0.451979       
+Baseline Tracks     0              N/A            N/A            
+Rejected Tracks     1958           0.004112       0.451979       
+

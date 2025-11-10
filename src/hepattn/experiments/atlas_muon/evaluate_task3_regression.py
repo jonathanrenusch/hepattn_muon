@@ -338,6 +338,8 @@ class Task3RegressionEvaluator:
         
         # Use precomputed normalized residuals from statistics
         clean_norm_residuals = statistics[param]['normalized_residuals']
+        if param == "pt": 
+            clean_norm_residuals = np.array(clean_norm_residuals) * 200
         if clean_norm_residuals.size == 0:
             print(f"Warning: No finite normalized residuals for {param} in {category_name}")
             return
@@ -588,10 +590,12 @@ class Task3RegressionEvaluator:
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 3: Regression Outputs with Categories')
     parser.add_argument('--eval_path', type=str, 
-                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                       default="/scratch/epoch=139-val_loss=0.70832_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
-                       default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                    #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                       default="/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600",
                        help='Path to processed test data directory')
     parser.add_argument('--output_dir', type=str, 
                        default='./tracking_evaluation_results/task3_regression',

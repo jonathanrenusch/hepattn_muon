@@ -1,0 +1,34 @@
+TASK 3: REGRESSION EVALUATION - ALL TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-11-10 02:40:29
+Category: All Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 1,958
+
+REGRESSION STATISTICS
+-------------------------
+PHI:
+  Mean normalized residual: 0.298354
+  STD normalized residual:  19.057542
+  Number of tracks: 1958
+
+ETA:
+  Mean normalized residual: 0.028780
+  STD normalized residual:  2.417060
+  Number of tracks: 1958
+
+PT:
+  Mean normalized residual: 1.137321
+  STD normalized residual:  1.010069
+  Number of tracks: 1958
+
+Q:
+  Mean absolute residual: 0.004112
+  STD absolute residual:  0.451979
+  Number of tracks: 1958
+
+
+Generated at: 2025-11-10 02:40:29.642669
