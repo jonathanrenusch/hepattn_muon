@@ -1,0 +1,34 @@
+TASK 3: REGRESSION EVALUATION - BASELINE TRACKS SUMMARY
+======================================================================
+
+Generated at: 2025-11-10 03:33:59
+Category: Baseline Tracks
+
+DATASET INFORMATION
+--------------------
+Total tracks analyzed: 860
+
+REGRESSION AND CLASSIFICATION STATISTICS
+----------------------------------------
+PHI:
+  Mean normalized residual: 1.601243
+  STD normalized residual:  0.867106
+  Number of tracks: 860
+
+ETA:
+  Mean normalized residual: 1.746518
+  STD normalized residual:  0.399414
+  Number of tracks: 860
+
+PT:
+  Mean normalized residual: 9.295913
+  STD normalized residual:  3.951796
+  Number of tracks: 860
+
+Q:
+  Classification accuracy: 0.9209
+  Correct predictions: 792/860
+  Number of tracks: 860
+
+
+Generated at: 2025-11-10 03:33:59.833589

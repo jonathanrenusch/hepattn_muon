@@ -1,0 +1,70 @@
+
+================================================================================
+TASK 3: REGRESSION EVALUATION - COMPARATIVE SUMMARY
+================================================================================
+Timestamp: 2025-11-10 03:34:02
+Evaluation file: /scratch/epoch=139-val_loss=0.70832_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5
+Data directory: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+Max events processed: 1000
+
+BASELINE FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 1,958
+Failed minimum hits (>=9): 28
+Failed eta cuts (0.1 <= |eta| <= 2.7): 67
+Failed pt cuts (pt >= 3.0 GeV): 0
+Failed insufficient stations (<3 stations): 1,071
+Failed hits per station (<3 stations with >=3 hits): 27
+Tracks passing all cuts: 860
+
+ML REGION FILTERING STATISTICS
+-----------------------------------
+Total tracks checked: 1,958
+Failed minimum hits (>=3): 0
+Failed eta cuts (|eta| <= 2.7): 0
+Failed pt cuts (pt >= 5.0 GeV): 0
+Tracks passing all cuts: 1,958
+
+TRACKS ANALYZED PER CATEGORY
+------------------------------
+All Tracks: 1,958 tracks
+Baseline Tracks: 860 tracks
+ML Region Tracks: 1,958 tracks
+Rejected Tracks: 0 tracks
+
+PHI COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           1.588987       0.875380       
+Baseline Tracks     860            1.601243       0.867106       
+ML Region Tracks    1958           1.588987       0.875380       
+Rejected Tracks     0              N/A            N/A            
+
+ETA COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           1.120113       0.686574       
+Baseline Tracks     860            1.746518       0.399414       
+ML Region Tracks    1958           1.120113       0.686574       
+Rejected Tracks     0              N/A            N/A            
+
+PT COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Mean Residual  STD Residual   
+-----------------------------------------------------------------
+All Tracks          1958           9.373417       4.527116       
+Baseline Tracks     860            9.295913       3.951796       
+ML Region Tracks    1958           9.373417       4.527116       
+Rejected Tracks     0              N/A            N/A            
+
+Q COMPARATIVE METRICS
+------------------------------
+Category            Num Tracks     Accuracy       
+--------------------------------------------------
+All Tracks          1958           0.9305         
+Baseline Tracks     860            0.9209         
+ML Region Tracks    1958           0.9305         
+Rejected Tracks     0              N/A            
+

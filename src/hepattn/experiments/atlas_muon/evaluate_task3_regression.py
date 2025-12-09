@@ -175,7 +175,7 @@ class Task3RegressionEvaluator:
                 # Get regression predictions
                 pred_phi = pred_group['preds/final/parameter_regression/track_truthMuon_phi'][...]  # Shape: (1, 2)
                 pred_eta = pred_group['preds/final/parameter_regression/track_truthMuon_eta'][...]  # Shape: (1, 2)
-                pred_pt = pred_group['preds/final/parameter_regression/track_truthMuon_pt'][...]  # Shape: (1, 2)
+                pred_pt = pred_group['preds/final/parameter_regression/track_truthMuon_pt'][...] * 200  # Shape: (1, 2)
                 pred_q = pred_group['preds/final/parameter_regression/track_truthMuon_q'][...]  # Shape: (1, 2)
                 
                 # Truth track parameters (dataset still has batch dimension of 1)
@@ -383,7 +383,6 @@ class Task3RegressionEvaluator:
                     # For other parameters, use regression approach with normalized residuals
                     # Raw residuals
                     residuals = predictions - truth
-                    
                     # Compute truth-normalized residuals using absolute truth to avoid sign flips
                     residuals = np.abs(truth)
                     
@@ -577,11 +576,13 @@ class Task3RegressionEvaluator:
             print(f"Skipping residual plot for charge parameter (classification mode)")
             return
         
+        
         # Get both normalized and absolute residuals
         residuals = statistics[param]['residuals']
         if residuals.size == 0:
             print(f"Warning: No finite normalized residuals for {param} in {category_name}")
             return
+        
         
         # Calculate absolute residuals (pred - truth)
         predictions = np.array(data[param])
@@ -940,13 +941,12 @@ class Task3RegressionEvaluator:
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Task 3: Regression Outputs with Categories')
     parser.add_argument('--eval_path', type=str, 
-                    #    default="/scratch/epoch=069-val_loss=2.87600_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
-                       default="/scratch/epoch=139-val_loss=2.74982_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/TRK-ATLAS-Muon-smallModel-better-run_20250925-T202923/ckpts/epoch=017-val_loss=4.78361_ml_test_data_156000_hdf5_filtered_mild_cuts_eval.h5",
+                       default="/scratch/epoch=139-val_loss=0.70832_ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', type=str, 
-                       default="/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600",
                     #    default="/home/iwsatlas1/jrenusch/master_thesis/tracking/data/tracking_eval/ml_test_data_156000_hdf5_filtered_mild_cuts",
+                       default="/scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600",
                        help='Path to processed test data directory')
     parser.add_argument('--output_dir', type=str, 
                        default='./tracking_evaluation_results/task3_regression',
