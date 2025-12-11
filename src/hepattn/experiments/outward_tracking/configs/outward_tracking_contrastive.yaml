@@ -1,0 +1,176 @@
+seed_everything: 42
+name: Outward-Edge-Tracking-Contrastive
+
+data:
+  # Data directories with filtered ATLAS muon data
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  test_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+
+  num_workers: 16
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 1024
+
+  # Maximum particles per event (used for padding)
+  event_max_num_particles: 2
+
+  # Define which inputs will be available to the model
+  inputs:
+    hit:
+      # Global hit coordinates
+      - spacePoint_globEdgeHighX
+      - spacePoint_globEdgeHighY
+      - spacePoint_globEdgeHighZ
+      - spacePoint_globEdgeLowX
+      - spacePoint_globEdgeLowY
+      - spacePoint_globEdgeLowZ
+      - spacePoint_driftR
+      # Detector information
+      - spacePoint_channel
+      - spacePoint_layer
+      - spacePoint_stationPhi
+      - spacePoint_stationEta
+      - spacePoint_stationIndex
+      - spacePoint_technology
+      # Derived hit fields
+      - r   # Radial distance (used for edge ordering)
+      - s   # 3D distance
+      - theta  # Polar angle
+      - phi    # Azimuthal angle
+      - eta
+
+  # Targets are built internally by the data module
+  targets:
+    particle: []
+    hit: []
+
+trainer:
+  max_epochs: 60
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [1]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 0.1
+  enable_progress_bar: true
+
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      project: outward_edge_tracking
+
+  callbacks:
+    - class_path: hepattn.callbacks.Compile
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+    - class_path: hepattn.callbacks.PredictionWriter
+      init_args:
+        write_inputs: false
+        write_outputs: true
+        write_preds: true
+        write_targets: true
+        write_losses: false
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+
+model:
+  optimizer: Lion
+  
+  # Minimum hits required for a valid track
+  min_hits_per_track: 3
+
+  lrs_config:
+    initial: 1e-5
+    max: 5e-5
+    end: 1e-5
+    pct_start: 0.05
+    skip_scheduler: false
+    weight_decay: 1e-5
+
+  model:
+    class_path: hepattn.models.HitFilter
+    init_args:
+      input_sort_field: null
+      input_nets:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: hepattn.models.InputNet
+              init_args:
+                input_name: hit
+                fields:
+                 # Global hit coordinates
+                 - spacePoint_globEdgeHighX
+                 - spacePoint_globEdgeHighY
+                 - spacePoint_globEdgeHighZ
+                 - spacePoint_globEdgeLowX
+                 - spacePoint_globEdgeLowY
+                 - spacePoint_globEdgeLowZ
+                 - spacePoint_driftR
+                 # Detector information
+                 - spacePoint_channel
+                 - spacePoint_layer
+                 - spacePoint_stationPhi
+                 - spacePoint_stationEta
+                 - spacePoint_stationIndex
+                 - spacePoint_technology
+                 # Derived hit fields
+                 - r
+                 - s
+                 - theta
+                 - phi
+                 - eta
+                net:
+                  class_path: hepattn.models.Dense
+                  init_args:
+                    input_size: 18
+                    hidden_layers: [64]
+                    output_size: &dim 64
+
+      encoder:
+        class_path: hepattn.models.Encoder
+        init_args:
+          num_layers: 6
+          dim: *dim
+          attn_type: flash
+          window_size: null
+          window_wrap: false
+          hybrid_norm: true
+          norm: RMSNorm
+          dense_kwargs: {activation: SwiGLU}
+          attn_kwargs: {bias: false, num_heads: 8}
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: hepattn.models.task.OutwardEdgeTask
+              init_args:
+                name: hit_edge
+                input_object: hit
+                dim: *dim
+                hidden_dim: 256
+                # Edge prediction threshold
+                threshold: 0.5
+                # HYBRID LOSS: BCE for edge prediction + Triplet for embedding quality
+                loss_fn: bce_triplet
+                # pos_weight computed from data (handles class imbalance)
+                pos_weight: null
+                # Triplet loss settings
+                triplet_margin: 1.0
+                # Weight of triplet loss relative to BCE
+                triplet_weight: 0.5
+                # MLP projection for both edge prediction and contrastive learning
+                use_mlp_projection: true
+                # Use separate embeddings for contrastive (recommended for better separation)
+                # Set to true to share edge prediction embeddings with contrastive
+                shared_contrastive_embeddings: false
+                has_intermediate_loss: false

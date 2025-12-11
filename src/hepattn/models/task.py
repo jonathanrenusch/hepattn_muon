@@ -1291,3 +1291,670 @@ class IncidenceBasedRegressionTask(RegressionTask):
         proxy_feats = proxy_feats_charged + proxy_feats_neutral
 
         return proxy_feats, is_charged
+
+
+class SelfAttentionCorrelationTask(Task):
+    """Task for learning hit-to-hit correlations via self-similarity matrix.
+    
+    This task computes a self-similarity matrix M = O @ O^T from hit embeddings
+    and trains it to match a target correlation matrix indicating which hits
+    belong to the same particle. The rows corresponding to innermost hits of each
+    particle should have True values only for hits belonging to that same particle.
+    
+    This is designed for encoder-only transformers to learn particle tracking
+    associations directly from hit embeddings.
+    """
+    
+    def __init__(
+        self,
+        name: str,
+        input_object: str,
+        target_field: str,
+        dim: int,
+        threshold: float = 0.5,
+        loss_fn: Literal["bce", "focal", "triplet", "bce_triplet"] = "bce",
+        hidden_dim: int = 256,
+        pos_weight: float | None = None,
+        triplet_margin: float = 1.0,
+        triplet_weight: float = 1.0,
+        use_mlp_projection: bool = False,
+        has_intermediate_loss: bool = False,
+    ):
+        """Initialize the self-attention correlation task.
+        
+        Args:
+            name: Name of the task.
+            input_object: Name of the input object type (e.g., "hit").
+            target_field: Name of the target field for the correlation matrix.
+            dim: Embedding dimension from the encoder.
+            threshold: Threshold for binary predictions.
+            loss_fn: Loss function to use ("bce", "focal", "triplet", or "bce_triplet").
+            pos_weight: Positive class weight for BCE loss. If None, computed from data.
+            triplet_margin: Margin for triplet loss (distance between positive and negative).
+            triplet_weight: Weight for triplet loss when using "bce_triplet" (BCE weight is 1.0).
+            use_mlp_projection: If True, use 2-layer MLP instead of linear projection.
+            has_intermediate_loss: Whether to compute loss at intermediate layers.
+        """
+        super().__init__(has_intermediate_loss=has_intermediate_loss, permute_loss=False)
+        
+        self.name = name
+        self.input_object = input_object
+        self.target_field = target_field
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.threshold = threshold
+        self.loss_fn = loss_fn
+        self.pos_weight = pos_weight
+        self.triplet_margin = triplet_margin
+        self.triplet_weight = triplet_weight
+        
+        # Projection layers to create correlation-specific embeddings
+        # Can be linear or MLP depending on use_mlp_projection
+        if use_mlp_projection:
+            self.w1 = nn.Sequential(
+                nn.Linear(dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.w2 = nn.Sequential(
+                nn.Linear(dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+        else:
+            self.w1 = nn.Linear(dim, hidden_dim)
+            self.w2 = nn.Linear(dim, hidden_dim)
+    
+    def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute the self-similarity matrix from hit embeddings.
+        
+        Args:
+            x: Dictionary containing "{input_object}_embed" with shape [B, N, D]
+        
+        Returns:
+            Dictionary with correlation logits of shape [B, N, N]
+            Also stores projected embeddings for triplet loss if needed.
+        """
+        # Get hit embeddings: [B, N, D]
+        embed = x[f"{self.input_object}_embed"]
+        
+        # Project embeddings for correlation computation
+        embed_proj_1 = self.w1(embed)
+        embed_proj_2 = self.w2(embed)
+        
+        # Compute self-similarity matrix: [B, N, N]
+        # M[b, i, j] = similarity between hit i and hit j
+        # Use standard attention scaling (divide by sqrt(hidden_dim)) to prevent large values
+        corr_logits = torch.bmm(embed_proj_1, embed_proj_2.transpose(-2, -1)) / (self.hidden_dim ** 0.5)
+        
+        result = {
+            f"{self.input_object}_{self.target_field}_logit": corr_logits,
+        }
+        
+        # Store projected embeddings for triplet loss (needed for triplet and bce_triplet)
+        if self.loss_fn in ("triplet", "bce_triplet"):
+            result[f"{self.input_object}_embed_proj"] = embed_proj_1
+            result[f"{self.input_object}_embed"] = embed
+        
+        return result
+    
+    def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Generate predictions from correlation logits.
+        
+        Args:
+            outputs: Dictionary containing correlation logits.
+        
+        Returns:
+            Dictionary with predicted correlation probabilities and binary predictions.
+        """
+        logits = outputs[f"{self.input_object}_{self.target_field}_logit"]
+        probs = logits.sigmoid()
+        preds = probs >= self.threshold
+        
+        return {
+            f"{self.input_object}_{self.target_field}_prob": probs,
+            f"{self.input_object}_{self.target_field}": preds,
+        }
+    
+    def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute loss between predicted and target correlation matrices.
+        
+        Supports BCE, focal, and triplet loss functions.
+        
+        For triplet loss, the anchors are the innermost hits (marked by particle_valid),
+        positives are other hits on the same track, and negatives are hits from other tracks.
+        
+        Args:
+            outputs: Dictionary containing correlation logits [B, N, N].
+            targets: Dictionary containing target correlation matrix [B, N, N].
+        
+        Returns:
+            Dictionary with loss values.
+        """
+        logits = outputs[f"{self.input_object}_{self.target_field}_logit"]
+        target = targets[f"{self.input_object}_{self.target_field}"].type_as(logits)
+        
+        # Get valid hits mask to ignore padding
+        valid_mask = targets[f"{self.input_object}_valid"]  # [B, N]
+        
+        # Create 2D valid mask for the correlation matrix
+        # Only compute loss where both hits are valid
+        valid_2d = valid_mask.unsqueeze(-1) & valid_mask.unsqueeze(-2)  # [B, N, N]
+        
+        if self.loss_fn == "bce":
+            # Compute pos_weight from data if not specified
+            if self.pos_weight is not None:
+                pos_weight = torch.tensor(self.pos_weight, device=logits.device)
+            else:
+                # Calculate from the target (ratio of negatives to positives)
+                num_pos = (target * valid_2d).sum()
+                num_neg = ((~target.bool()) * valid_2d).sum()
+                pos_weight = num_neg / (num_pos + 1e-6)
+                pos_weight = pos_weight.clamp(max=100.0)  # Prevent extreme weights
+            
+            # Compute BCE loss only on valid positions
+            loss = nn.functional.binary_cross_entropy_with_logits(
+                logits, target, 
+                pos_weight=pos_weight,
+                reduction='none'
+            )
+            # Mask out invalid positions and compute mean
+            loss = (loss * valid_2d).sum() / (valid_2d.sum() + 1e-6)
+            
+            return {f"{self.input_object}_{self.target_field}_bce": loss}
+        
+        elif self.loss_fn == "focal":
+            loss = mask_focal_loss(logits, target)
+            return {f"{self.input_object}_{self.target_field}_focal": loss}
+        
+        elif self.loss_fn == "triplet":
+            return self._triplet_loss(outputs, targets)
+        
+        elif self.loss_fn == "bce_triplet":
+            # Hybrid loss: BCE for dense gradients + Triplet for hard case focus
+            # Compute BCE loss
+            if self.pos_weight is not None:
+                pos_weight = torch.tensor(self.pos_weight, device=logits.device)
+            else:
+                num_pos = (target * valid_2d).sum()
+                num_neg = ((~target.bool()) * valid_2d).sum()
+                pos_weight = num_neg / (num_pos + 1e-6)
+                pos_weight = pos_weight.clamp(max=100.0)
+            
+            bce_loss = nn.functional.binary_cross_entropy_with_logits(
+                logits, target, 
+                pos_weight=pos_weight,
+                reduction='none'
+            )
+            bce_loss = (bce_loss * valid_2d).sum() / (valid_2d.sum() + 1e-6)
+            
+            # Compute triplet loss
+            triplet_losses = self._triplet_loss(outputs, targets)
+            triplet_loss = triplet_losses[f"{self.input_object}_{self.target_field}_triplet"]
+            
+            # Combined loss (BCE weight = 1.0, triplet weight = self.triplet_weight)
+            return {
+                f"{self.input_object}_{self.target_field}_bce": bce_loss,
+                f"{self.input_object}_{self.target_field}_triplet": self.triplet_weight * triplet_loss,
+            }
+        
+        raise ValueError(f"Unknown loss function: {self.loss_fn}")
+    
+    def _triplet_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute triplet loss with fixed anchors (innermost hits).
+        
+        Vectorized GPU-friendly implementation that:
+        1. Computes pairwise distances once per batch item
+        2. Processes all anchors in parallel using masked reductions
+        
+        For each anchor (innermost hit of a particle):
+        - Positives: All other hits belonging to the same particle
+        - Negatives: All hits belonging to different particles (or noise)
+        
+        Uses hard negative mining: for each anchor, select the hardest negative
+        (closest in embedding space) and hardest positive (farthest in embedding space).
+        
+        Args:
+            outputs: Dictionary containing embeddings.
+            targets: Dictionary containing target masks.
+        
+        Returns:
+            Dictionary with triplet loss value.
+        """
+        # Get the projected embeddings used for similarity computation
+        embed = outputs.get(f"{self.input_object}_embed_proj")
+        if embed is None:
+            # Fall back to computing from scratch if not stored
+            raw_embed = outputs.get(f"{self.input_object}_embed")
+            if raw_embed is None:
+                raise ValueError(f"Missing {self.input_object}_embed in outputs")
+            embed = self.w1(raw_embed)  # Use w1 projection for triplet
+        
+        # Get the correlation target matrix [B, N, N]
+        # target[b, anchor_idx, hit_idx] = True if hit belongs to same particle as anchor
+        target = targets[f"{self.input_object}_{self.target_field}"]
+        
+        # Get anchor mask: which hits are anchors (innermost hits)
+        # This is stored in particle_valid [B, N]
+        anchor_mask = targets.get("particle_valid")
+        if anchor_mask is None:
+            raise ValueError("Triplet loss requires 'particle_valid' in targets to identify anchors")
+        
+        # Get valid hits mask [B, N]
+        valid_mask = targets[f"{self.input_object}_valid"]
+        
+        B, N, D = embed.shape
+        device = embed.device
+        dtype = embed.dtype
+        
+        # ===== VECTORIZED PAIRWISE DISTANCE COMPUTATION =====
+        # Compute squared L2 distances: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
+        # This is O(N^2) but done entirely on GPU with fused ops
+        embed_sq = (embed ** 2).sum(dim=2)  # [B, N]
+        # distances[b, i, j] = squared L2 distance between hit i and hit j
+        distances = embed_sq.unsqueeze(2) + embed_sq.unsqueeze(1) - 2.0 * torch.bmm(embed, embed.transpose(1, 2))
+        # Clamp to avoid numerical issues (small negative values from floating point)
+        distances = distances.clamp(min=0.0)
+        
+        # ===== MASK INVALID PAIRS =====
+        # Create 2D validity mask
+        valid_2d = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)  # [B, N, N]
+        
+        # ===== BUILD POSITIVE AND NEGATIVE MASKS FOR ALL ANCHORS =====
+        # For anchor at position i, positives are where target[b, i, :] is True (same track)
+        # Negatives are where target[b, i, :] is False (different track or noise)
+        
+        # Exclude self-connections from positives (diagonal)
+        eye_mask = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)  # [1, N, N]
+        
+        # pos_mask[b, i, j] = True if anchor i should consider hit j as positive
+        # This is: target[b,i,j] AND valid[b,j] AND (i != j)
+        pos_mask_all = target & valid_2d & (~eye_mask)  # [B, N, N]
+        
+        # neg_mask[b, i, j] = True if anchor i should consider hit j as negative
+        # This is: NOT target[b,i,j] AND valid[b,j]
+        neg_mask_all = (~target) & valid_2d  # [B, N, N]
+        
+        # ===== COMPUTE HARDEST POSITIVE AND NEGATIVE PER ANCHOR =====
+        # For positives: find MAX distance (hardest positive = farthest)
+        # Mask non-positives with -inf so they don't affect max
+        pos_distances = distances.clone()
+        pos_distances[~pos_mask_all] = float('-inf')
+        hardest_pos = pos_distances.max(dim=2).values  # [B, N]
+        
+        # For negatives: find MIN distance (hardest negative = closest)
+        # Mask non-negatives with +inf so they don't affect min
+        neg_distances = distances.clone()
+        neg_distances[~neg_mask_all] = float('inf')
+        hardest_neg = neg_distances.min(dim=2).values  # [B, N]
+        
+        # ===== COMPUTE TRIPLET LOSS PER ANCHOR =====
+        # triplet_loss = max(0, d(a,p) - d(a,n) + margin)
+        triplet_losses = torch.clamp(hardest_pos - hardest_neg + self.triplet_margin, min=0.0)  # [B, N]
+        
+        # ===== MASK TO ONLY VALID ANCHORS =====
+        # Only compute loss for actual anchors (innermost hits)
+        # Also need to check that anchor has at least one valid positive and negative
+        has_positive = (pos_mask_all.sum(dim=2) > 0)  # [B, N]
+        has_negative = (neg_mask_all.sum(dim=2) > 0)  # [B, N]
+        valid_anchors = anchor_mask & has_positive & has_negative  # [B, N]
+        
+        # ===== AVERAGE OVER VALID ANCHORS =====
+        num_valid_anchors = valid_anchors.sum()
+        if num_valid_anchors > 0:
+            total_loss = (triplet_losses * valid_anchors).sum() / num_valid_anchors
+        else:
+            total_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        
+        return {f"{self.input_object}_{self.target_field}_triplet": total_loss}
+
+
+class OutwardEdgeTask(Task):
+    """Task for predicting outward-directed edges between hits on the same track.
+    
+    This task predicts a directed adjacency matrix where edges point from 
+    inner hits to outer hits (sorted by radial distance r). The matrix M[i,j]=1
+    indicates there should be an edge from hit i to hit j (where r_i < r_j).
+    
+    At inference, connected components on the predicted graph are used to 
+    extract tracks, eliminating the need for Hungarian matching.
+    
+    The task uses self-attention style similarity computation:
+    M = sigmoid(W1(x) @ W2(x)^T / sqrt(d))
+    
+    Optionally supports contrastive (triplet) loss as an auxiliary task to 
+    improve embedding quality. The triplet loss can use either:
+    - The same embeddings as edge prediction (shared_contrastive_embeddings=True)
+    - Separate embeddings via a dedicated projection (shared_contrastive_embeddings=False)
+    """
+    
+    def __init__(
+        self,
+        name: str,
+        input_object: str,
+        dim: int,
+        hidden_dim: int = 256,
+        threshold: float = 0.5,
+        loss_fn: Literal["bce", "bce_triplet"] = "bce",
+        pos_weight: float | None = None,
+        triplet_margin: float = 1.0,
+        triplet_weight: float = 0.5,
+        use_mlp_projection: bool = False,
+        shared_contrastive_embeddings: bool = False,
+        has_intermediate_loss: bool = False,
+    ):
+        """Initialize the outward edge prediction task.
+        
+        Args:
+            name: Name of the task.
+            input_object: Name of the input object type (e.g., "hit").
+            dim: Embedding dimension from the encoder.
+            hidden_dim: Hidden dimension for projection layers.
+            threshold: Threshold for converting probabilities to binary edges.
+            loss_fn: Loss function - "bce" for BCE only, "bce_triplet" for BCE + contrastive.
+            pos_weight: Positive class weight for BCE loss. If None, computed from data.
+            triplet_margin: Margin for triplet loss (only used if loss_fn="bce_triplet").
+            triplet_weight: Weight for triplet loss relative to BCE (only if loss_fn="bce_triplet").
+            use_mlp_projection: If True, use 2-layer MLP instead of linear projection.
+            shared_contrastive_embeddings: If True, use same embeddings for edge prediction
+                and contrastive loss. If False, use separate projection for contrastive.
+            has_intermediate_loss: Whether to compute loss at intermediate layers.
+        """
+        super().__init__(has_intermediate_loss=has_intermediate_loss, permute_loss=False)
+        
+        self.name = name
+        self.input_object = input_object
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.threshold = threshold
+        self.loss_fn = loss_fn
+        self.pos_weight = pos_weight
+        self.triplet_margin = triplet_margin
+        self.triplet_weight = triplet_weight
+        self.shared_contrastive_embeddings = shared_contrastive_embeddings
+        
+        # Projection layers for asymmetric similarity computation (edge prediction)
+        # w1 projects "source" hits, w2 projects "target" hits
+        if use_mlp_projection:
+            self.w1 = nn.Sequential(
+                nn.Linear(dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.w2 = nn.Sequential(
+                nn.Linear(dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+        else:
+            self.w1 = nn.Linear(dim, hidden_dim)
+            self.w2 = nn.Linear(dim, hidden_dim)
+        
+        # Separate projection for contrastive learning (if not sharing embeddings)
+        if loss_fn == "bce_triplet" and not shared_contrastive_embeddings:
+            if use_mlp_projection:
+                self.w_contrastive = nn.Sequential(
+                    nn.Linear(dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                )
+            else:
+                self.w_contrastive = nn.Linear(dim, hidden_dim)
+    
+    def forward(self, x: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute the directed edge prediction matrix from hit embeddings.
+        
+        Args:
+            x: Dictionary containing "{input_object}_embed" with shape [B, N, D]
+        
+        Returns:
+            Dictionary with edge logits of shape [B, N, N]
+            M[b, i, j] = logit for edge from hit i to hit j
+            Also stores embeddings for contrastive loss if enabled.
+        """
+        embed = x[f"{self.input_object}_embed"]  # [B, N, D]
+        
+        # Project embeddings for edge prediction
+        embed_source = self.w1(embed)  # [B, N, hidden_dim] - "from" hits
+        embed_target = self.w2(embed)  # [B, N, hidden_dim] - "to" hits
+        
+        # Compute directed similarity: source -> target
+        # logits[b, i, j] = probability of edge from hit i to hit j
+        edge_logits = torch.bmm(embed_source, embed_target.transpose(-2, -1)) / (self.hidden_dim ** 0.5)
+        
+        result = {
+            f"{self.input_object}_outward_edge_logit": edge_logits,
+        }
+        
+        # Store embeddings for contrastive loss if enabled
+        if self.loss_fn == "bce_triplet":
+            if self.shared_contrastive_embeddings:
+                # Use the source embeddings (w1 projection) for contrastive learning
+                result[f"{self.input_object}_contrastive_embed"] = embed_source
+            else:
+                # Use separate projection for contrastive learning
+                result[f"{self.input_object}_contrastive_embed"] = self.w_contrastive(embed)
+        
+        return result
+    
+    def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Generate predictions from edge logits.
+        
+        Args:
+            outputs: Dictionary containing edge logits.
+        
+        Returns:
+            Dictionary with predicted edge probabilities and binary predictions.
+        """
+        logits = outputs[f"{self.input_object}_outward_edge_logit"]
+        probs = logits.sigmoid()
+        preds = probs >= self.threshold
+        
+        return {
+            f"{self.input_object}_outward_edge_prob": probs,
+            f"{self.input_object}_outward_edge": preds,
+        }
+    
+    def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Compute loss for edge prediction.
+        
+        Supports BCE-only or BCE + triplet contrastive loss.
+        
+        Args:
+            outputs: Dictionary containing edge logits [B, N, N].
+            targets: Dictionary containing target adjacency matrix [B, N, N].
+        
+        Returns:
+            Dictionary with loss values.
+        """
+        logits = outputs[f"{self.input_object}_outward_edge_logit"]
+        target = targets["outward_adjacency"].type_as(logits)
+        
+        # Get valid hits mask to ignore padding
+        valid_mask = targets[f"{self.input_object}_valid"]  # [B, N]
+        
+        # Create 2D valid mask - only positions where both source and target are valid
+        valid_2d = valid_mask.unsqueeze(-1) & valid_mask.unsqueeze(-2)  # [B, N, N]
+        
+        # Compute pos_weight from data if not specified
+        if self.pos_weight is not None:
+            pos_weight = torch.tensor(self.pos_weight, device=logits.device)
+        else:
+            # Calculate from the target (ratio of negatives to positives)
+            num_pos = (target * valid_2d).sum()
+            num_neg = ((1.0 - target) * valid_2d).sum()
+            pos_weight = num_neg / (num_pos + 1e-6)
+            pos_weight = pos_weight.clamp(max=100.0)  # Prevent extreme weights
+        
+        # Compute BCE loss only on valid positions
+        bce_loss = nn.functional.binary_cross_entropy_with_logits(
+            logits, target, 
+            pos_weight=pos_weight,
+            reduction='none'
+        )
+        # Mask out invalid positions and compute mean
+        bce_loss = (bce_loss * valid_2d).sum() / (valid_2d.sum() + 1e-6)
+        
+        if self.loss_fn == "bce":
+            return {f"{self.input_object}_outward_edge_bce": bce_loss}
+        
+        elif self.loss_fn == "bce_triplet":
+            # Compute triplet loss as auxiliary task
+            triplet_loss = self._triplet_loss(outputs, targets)
+            
+            return {
+                f"{self.input_object}_outward_edge_bce": bce_loss,
+                f"{self.input_object}_outward_edge_triplet": self.triplet_weight * triplet_loss,
+            }
+        
+        raise ValueError(f"Unknown loss function: {self.loss_fn}")
+    
+    def _triplet_loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> Tensor:
+        """Compute triplet loss with anchor hits (innermost hits per track).
+        
+        Vectorized GPU-friendly implementation using the full adjacency matrix
+        to define positive/negative pairs.
+        
+        For each anchor (innermost hit of a particle):
+        - Positives: All other hits belonging to the same particle
+        - Negatives: All hits belonging to different particles (or noise)
+        
+        Uses hard negative mining: for each anchor, select the hardest negative
+        (closest in embedding space) and hardest positive (farthest in embedding space).
+        
+        Args:
+            outputs: Dictionary containing contrastive embeddings.
+            targets: Dictionary containing target masks.
+        
+        Returns:
+            Scalar triplet loss value.
+        """
+        # Get contrastive embeddings
+        embed = outputs[f"{self.input_object}_contrastive_embed"]  # [B, N, hidden_dim]
+        
+        # Get the full adjacency matrix (which hits are on same track)
+        # full_adjacency[b, i, j] = True if hits i and j are on same track
+        full_adj = targets["full_adjacency"]
+        
+        # Get anchor mask: which hits are anchors (innermost hits)
+        anchor_mask = targets.get("particle_valid")
+        if anchor_mask is None:
+            # Fall back to anchor_mask if particle_valid not available
+            anchor_mask = targets.get("anchor_mask")
+        if anchor_mask is None:
+            raise ValueError("Triplet loss requires 'particle_valid' or 'anchor_mask' in targets")
+        
+        # Get valid hits mask [B, N]
+        valid_mask = targets[f"{self.input_object}_valid"]
+        
+        B, N, D = embed.shape
+        device = embed.device
+        dtype = embed.dtype
+        
+        # ===== VECTORIZED PAIRWISE DISTANCE COMPUTATION =====
+        embed_sq = (embed ** 2).sum(dim=2)  # [B, N]
+        distances = embed_sq.unsqueeze(2) + embed_sq.unsqueeze(1) - 2.0 * torch.bmm(embed, embed.transpose(1, 2))
+        distances = distances.clamp(min=0.0)
+        
+        # ===== MASK INVALID PAIRS =====
+        valid_2d = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)  # [B, N, N]
+        
+        # ===== BUILD POSITIVE AND NEGATIVE MASKS =====
+        eye_mask = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
+        
+        # pos_mask: same track AND valid AND not self
+        pos_mask_all = full_adj & valid_2d & (~eye_mask)  # [B, N, N]
+        
+        # neg_mask: different track AND valid
+        neg_mask_all = (~full_adj) & valid_2d  # [B, N, N]
+        
+        # ===== COMPUTE HARDEST POSITIVE AND NEGATIVE PER ANCHOR =====
+        pos_distances = distances.clone()
+        pos_distances[~pos_mask_all] = float('-inf')
+        hardest_pos = pos_distances.max(dim=2).values  # [B, N]
+        
+        neg_distances = distances.clone()
+        neg_distances[~neg_mask_all] = float('inf')
+        hardest_neg = neg_distances.min(dim=2).values  # [B, N]
+        
+        # ===== COMPUTE TRIPLET LOSS PER ANCHOR =====
+        triplet_losses = torch.clamp(hardest_pos - hardest_neg + self.triplet_margin, min=0.0)  # [B, N]
+        
+        # ===== MASK TO ONLY VALID ANCHORS =====
+        has_positive = (pos_mask_all.sum(dim=2) > 0)  # [B, N]
+        has_negative = (neg_mask_all.sum(dim=2) > 0)  # [B, N]
+        valid_anchors = anchor_mask & has_positive & has_negative  # [B, N]
+        
+        # ===== AVERAGE OVER VALID ANCHORS =====
+        num_valid_anchors = valid_anchors.sum()
+        if num_valid_anchors > 0:
+            total_loss = (triplet_losses * valid_anchors).sum() / num_valid_anchors
+        else:
+            total_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        
+        return total_loss
+    
+    def extract_tracks(self, edge_probs: Tensor, valid_mask: Tensor, min_hits: int = 2) -> list[list[list[int]]]:
+        """Extract tracks from predicted edge probabilities using connected components.
+        
+        This runs on CPU and uses scipy for efficiency.
+        
+        Args:
+            edge_probs: Edge probabilities [B, N, N]
+            valid_mask: Valid hits mask [B, N]
+            min_hits: Minimum number of hits to consider a valid track (default: 2)
+        
+        Returns:
+            List of tracks per batch item. Each track is a list of hit indices.
+        """
+        try:
+            from scipy.sparse import csr_matrix
+            from scipy.sparse.csgraph import connected_components
+        except ImportError:
+            raise ImportError("scipy is required for track extraction")
+        
+        batch_size = edge_probs.shape[0]
+        all_tracks = []
+        
+        # Move to CPU for scipy (convert to float32 for bf16 compatibility)
+        edge_probs_np = edge_probs.detach().float().cpu().numpy()
+        valid_mask_np = valid_mask.detach().cpu().numpy()
+        
+        for b in range(batch_size):
+            valid = valid_mask_np[b]
+            n_valid = int(valid.sum())
+            
+            if n_valid == 0:
+                all_tracks.append([])
+                continue
+            
+            # Get valid hit indices
+            valid_indices = valid.nonzero()[0]
+            
+            # Extract submatrix for valid hits and threshold
+            probs_valid = edge_probs_np[b][valid][:, valid]
+            adj = (probs_valid >= self.threshold).astype(int)
+            
+            # Make symmetric for undirected connected components
+            adj_symmetric = adj | adj.T
+            
+            # Find connected components
+            sparse_adj = csr_matrix(adj_symmetric)
+            n_components, labels = connected_components(sparse_adj, directed=False)
+            
+            # Group hits by component
+            tracks = []
+            for comp_id in range(n_components):
+                track_mask = labels == comp_id
+                if track_mask.sum() >= min_hits:
+                    track_hits = valid_indices[track_mask].tolist()
+                    tracks.append(track_hits)
+            
+            all_tracks.append(tracks)
+        
+        return all_tracks

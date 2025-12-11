@@ -1,0 +1,170 @@
+seed_everything: 42
+name: SelfAtt-Muon-Tracking
+
+data:
+  # TODO: Update these paths to your data directories
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  test_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+
+  num_workers: 16
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 1024
+
+  # Maximum particles per event (used for padding)
+  event_max_num_particles: 2
+
+  # Define which inputs will be available to the model
+  inputs:
+    hit:
+      # Global hit coordinates
+      - spacePoint_globEdgeHighX
+      - spacePoint_globEdgeHighY
+      - spacePoint_globEdgeHighZ
+      - spacePoint_globEdgeLowX
+      - spacePoint_globEdgeLowY
+      - spacePoint_globEdgeLowZ
+      - spacePoint_driftR
+      # Add detector information
+      - spacePoint_channel
+      - spacePoint_layer
+      - spacePoint_stationPhi
+      - spacePoint_stationEta
+      - spacePoint_stationIndex
+      - spacePoint_technology
+      # Add derived hit fields
+      - r  # Radial distance
+      - s  # 3D distance
+      - theta  # Polar angle
+      - phi  # Azimuthal angle
+      - eta
+
+  # Define which targets are needed
+  targets:
+    particle: []
+    hit: []
+
+trainer:
+  max_epochs: 60
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [0]
+  precision: bf16-mixed  # bf16 works better with H100 and avoids RMSNorm dtype warnings
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 0.1
+  enable_progress_bar: true
+
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      project: selfatt_muon_tracking
+
+  callbacks:
+    - class_path: hepattn.callbacks.Compile
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+    - class_path: hepattn.callbacks.PredictionWriter
+      init_args:
+        write_inputs: false
+        write_outputs: true
+        write_preds: true
+        write_targets: true
+        write_losses: false
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+
+model:
+  optimizer: Lion
+  
+  # Minimum hits per row to consider it a track candidate
+  min_hits_per_track: 3
+
+  lrs_config:
+    initial: 1e-5
+    max: 5e-5
+    end: 1e-5
+    pct_start: 0.05
+    skip_scheduler: false
+    weight_decay: 1e-5
+
+  model:
+    class_path: hepattn.models.HitFilter
+    init_args:
+      input_sort_field: null
+      input_nets:
+    # class_path: hepattn.models.SelfAttentionTracking
+    # init_args:
+    #   input_nets:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: hepattn.models.InputNet
+              init_args:
+                input_name: hit
+                fields:
+                 # Global hit coordinates
+                 - spacePoint_globEdgeHighX
+                 - spacePoint_globEdgeHighY
+                 - spacePoint_globEdgeHighZ
+                 - spacePoint_globEdgeLowX
+                 - spacePoint_globEdgeLowY
+                 - spacePoint_globEdgeLowZ
+                 - spacePoint_driftR
+                 # Add detector information
+                 - spacePoint_channel
+                 - spacePoint_layer
+                 - spacePoint_stationPhi
+                 - spacePoint_stationEta
+                 - spacePoint_stationIndex
+                 - spacePoint_technology
+                 # Add derived hit fields
+                 - r  # Radial distance
+                 - s  # 3D distance
+                 - theta  # Polar angle
+                 - phi  # Azimuthal angle
+                 - eta
+                net:
+                  class_path: hepattn.models.Dense
+                  init_args:
+                    input_size: 18
+                    hidden_layers: [64]
+                    output_size: &dim 64
+
+      encoder:
+        class_path: hepattn.models.Encoder
+        init_args:
+          num_layers: 8
+          dim: *dim
+          attn_type: flash
+          # No windowing needed for small events
+          window_size: null
+          window_wrap: false
+          hybrid_norm: true
+          norm: RMSNorm  # Use custom implementation to avoid dtype mismatch warnings
+          # norm: LayerNorm
+          # norm: CustomRMSNorm  # Use custom implementation to avoid dtype mismatch warnings
+          dense_kwargs: {activation: SwiGLU}
+          attn_kwargs: {bias: false, num_heads: 8}
+
+      tasks:
+        class_path: torch.nn.ModuleList
+        init_args:
+          modules:
+            - class_path: hepattn.models.task.SelfAttentionCorrelationTask
+              init_args:
+                name: hit_correlation
+                input_object: hit
+                target_field: particle_hit_corr
+                dim: *dim
+                threshold: 0.5
+                loss_fn: bce
+                has_intermediate_loss: false
+                hidden_dim: 256
