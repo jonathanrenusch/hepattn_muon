@@ -1,14 +1,18 @@
 """
-Data module for outward graph-based particle tracking.
+Data module for connected component based particle tracking.
 
-This module creates training targets for:
-1. Outward edge prediction: hit[i] -> hit[i+1] sorted by r (primary task)
-2. Full adjacency prediction: all pairs of hits on the same track (auxiliary task)
+This module creates training targets for adjacency matrix prediction:
+1. Outward adjacency: hit[i] -> hit[i+1] sorted by r (directed, sparse)
+2. Bidirectional adjacency: outward | outward.T (undirected chains)
+3. Full adjacency: all pairs of hits on the same track (undirected, dense)
+
+Each type supports optional self-connections (diagonal).
 
 Track extraction uses connected components - no Hungarian matching needed.
 """
 
 from pathlib import Path
+from typing import Literal
 import yaml
 import numpy as np
 import torch
@@ -19,20 +23,39 @@ import h5py
 from hepattn.utils.tensor_utils import pad_to_size
 
 
+# Type alias for adjacency matrix types
+AdjacencyType = Literal["outward", "bidirectional", "full", "knn_outward", "station_outward"]
+
+
 def pad_and_concat(items: list[Tensor], target_size: tuple[int], pad_value) -> Tensor:
     """Takes a list of tensors, pads them to a given size, and then concatenates them along a new dimension at zero."""
     return torch.cat([pad_to_size(item, (1, *target_size), pad_value) for item in items], dim=0)
 
 
-class OutwardTrackingDataset(Dataset):
+class CCTrackingDataset(Dataset):
     """
-    Dataset for outward graph-based particle tracking.
+    Dataset for connected component based particle tracking.
     
-    Creates two types of targets:
-    1. outward_edges: Sparse edge list [2, E] for hit[i] -> hit[i+1] (sorted by r)
-    2. full_adjacency: Dense [N, N] matrix where M[i,j]=1 if hits i,j on same track
+    Creates adjacency matrix targets for hit-to-hit correlation prediction:
+    - outward: Sparse directed edges hit[i] -> hit[i+1] sorted by r
+    - bidirectional: Symmetric chain edges (outward | outward.T)
+    - full: Dense symmetric adjacency where M[i,j]=1 if hits i,j on same track
+    - knn_outward: Each hit connects to k nearest hits with larger r (across stations/layers)
+    - station_outward: Within station: chain by r; between stations: connect to innermost hit of next station
     
-    The model learns to predict these, and we use connected components for inference.
+    The model learns to predict these matrices, and we use connected components
+    for track extraction at inference time.
+    
+    Args:
+        dirpath: Path to the data directory.
+        inputs: Dictionary specifying input features per object type.
+        targets: Dictionary specifying target fields per object type.
+        num_events: Number of events to use (-1 for all).
+        event_max_num_particles: Maximum number of particles per event (for padding).
+        adjacency_type: Type of adjacency matrix to build ("outward", "bidirectional", "full", "knn_outward").
+        self_connections: Whether to include self-connections in the adjacency matrix (diagonal).
+        knn_k: Number of nearest neighbors for knn_outward adjacency type (default 5).
+        dummy_testing: If True, filter to only valid hits (for debugging).
     """
     
     def __init__(
@@ -42,6 +65,9 @@ class OutwardTrackingDataset(Dataset):
         targets: dict,
         num_events: int = -1,
         event_max_num_particles: int = 6,
+        adjacency_type: AdjacencyType = "outward",
+        self_connections: bool = False,
+        knn_k: int = 5,
         dummy_testing: bool = False,
     ):
         super().__init__()
@@ -52,6 +78,14 @@ class OutwardTrackingDataset(Dataset):
         self.inputs = inputs
         self.targets = targets
         self.dummy_testing = dummy_testing
+        self.adjacency_type = adjacency_type
+        self.self_connections = self_connections
+        self.knn_k = knn_k
+        
+        # Validate adjacency type
+        valid_types = ["outward", "bidirectional", "full", "knn_outward", "station_outward"]
+        if adjacency_type not in valid_types:
+            raise ValueError(f"adjacency_type must be one of {valid_types}, got {adjacency_type}")
         
         # Load metadata
         with open(self.dirpath / 'metadata.yaml', 'r') as f:
@@ -79,7 +113,10 @@ class OutwardTrackingDataset(Dataset):
         self.num_events = num_events
         self.event_max_num_particles = event_max_num_particles
         
-        print(f"Created OutwardTracking dataset with {self.num_events:,} events")
+        self_conn_str = "with" if self_connections else "without"
+        print(f"Created CCTracking dataset with {self.num_events:,} events")
+        knn_str = f", k={knn_k}" if adjacency_type == "knn_outward" else ""
+        print(f"  Adjacency type: {adjacency_type}{knn_str} ({self_conn_str} self-connections)")
 
     def __len__(self):
         return self.num_events
@@ -132,25 +169,173 @@ class OutwardTrackingDataset(Dataset):
         targets["outward_edge_index"] = edge_index.unsqueeze(0)  # [1, 2, E]
         targets["num_outward_edges"] = torch.tensor([len(source_nodes)], dtype=torch.long)
         
-        # ===== BUILD OUTWARD ADJACENCY MATRIX (for BCE loss) =====
+        # ===== BUILD OUTWARD ADJACENCY MATRIX =====
         # Dense [N, N] matrix where M[i,j]=1 if edge i->j exists
         outward_adj = torch.zeros((1, num_hits, num_hits), dtype=torch.bool)
         if len(source_nodes) > 0:
             outward_adj[0, source_nodes, target_nodes] = True
         targets["outward_adjacency"] = outward_adj
         
-        # ===== BUILD FULL ADJACENCY MATRIX (auxiliary task) =====
-        # M[i,j]=1 if hits i and j are on the same track (symmetric)
+        # ===== BUILD BIDIRECTIONAL ADJACENCY MATRIX =====
+        # Symmetric version of outward: outward | outward.T
+        bidirectional_adj = outward_adj | outward_adj.transpose(-2, -1)
+        targets["bidirectional_adjacency"] = bidirectional_adj
+        
+        # ===== BUILD FULL ADJACENCY MATRIX =====
+        # M[i,j]=1 if hits i and j are on the same track (symmetric, excludes diagonal)
         full_adj = torch.zeros((1, num_hits, num_hits), dtype=torch.bool)
         for pid in unique_pids:
             mask = particle_ids == pid
             hit_indices = np.where(mask)[0]
-            # Create all pairs
+            # Create all pairs (excluding diagonal)
             for i in hit_indices:
                 for j in hit_indices:
                     if i != j:
                         full_adj[0, i, j] = True
         targets["full_adjacency"] = full_adj
+        
+        # ===== BUILD KNN OUTWARD ADJACENCY MATRIX =====
+        # Each hit connects to k nearest hits with strictly larger r value
+        # - Cannot connect backwards in r (only forwards/outward)
+        # - Cannot connect to hits in same station AND same layer
+        knn_outward_adj = torch.zeros((1, num_hits, num_hits), dtype=torch.bool)
+        layers = hits["spacePoint_layer"]
+        stations = hits["spacePoint_stationIndex"]
+        r_values = hits["r"]
+        x_coords = hits["spacePoint_globEdgeLowX"]
+        y_coords = hits["spacePoint_globEdgeLowY"]
+        z_coords = hits["spacePoint_globEdgeLowZ"]
+        
+        for pid in unique_pids:
+            mask = particle_ids == pid
+            hit_indices = np.where(mask)[0]
+            
+            if len(hit_indices) < 2:
+                continue
+            
+            # For each hit, find k nearest hits with larger r (excluding same station+layer)
+            for src_idx in hit_indices:
+                src_r = r_values[src_idx]
+                src_station = stations[src_idx]
+                src_layer = layers[src_idx]
+                src_x, src_y, src_z = x_coords[src_idx], y_coords[src_idx], z_coords[src_idx]
+                
+                # Find candidate targets: same track, larger r, not (same station AND same layer)
+                candidates = []
+                for dst_idx in hit_indices:
+                    if dst_idx == src_idx:
+                        continue
+                    dst_r = r_values[dst_idx]
+                    dst_station = stations[dst_idx]
+                    dst_layer = layers[dst_idx]
+                    
+                    # Must have strictly larger r
+                    if dst_r <= src_r:
+                        continue
+                    
+                    # Cannot be in same station AND same layer
+                    if dst_station == src_station and dst_layer == src_layer:
+                        continue
+                    
+                    # Compute distance
+                    dst_x, dst_y, dst_z = x_coords[dst_idx], y_coords[dst_idx], z_coords[dst_idx]
+                    dist = np.sqrt((src_x - dst_x)**2 + (src_y - dst_y)**2 + (src_z - dst_z)**2)
+                    candidates.append((dist, dst_idx))
+                
+                # Sort by distance and take k nearest
+                candidates.sort(key=lambda x: x[0])
+                k = min(self.knn_k, len(candidates))
+                for i in range(k):
+                    dst_idx = candidates[i][1]
+                    knn_outward_adj[0, src_idx, dst_idx] = True
+        
+        targets["knn_outward_adjacency"] = knn_outward_adj
+        
+        # ===== BUILD STATION OUTWARD ADJACENCY MATRIX =====
+        # Within station: chain hits by r (strictly outward, never same layer)
+        # Between stations: outermost hit of station connects to innermost hit of next station only
+        station_outward_adj = torch.zeros((1, num_hits, num_hits), dtype=torch.bool)
+        
+        for pid in unique_pids:
+            mask = particle_ids == pid
+            hit_indices = np.where(mask)[0]
+            
+            if len(hit_indices) < 2:
+                continue
+            
+            # Group hits by station
+            track_stations = stations[hit_indices]
+            unique_stations = np.unique(track_stations)
+            
+            # Sort stations by their minimum r value (innermost to outermost)
+            station_min_r = {}
+            for station in unique_stations:
+                station_mask = track_stations == station
+                station_hits = hit_indices[station_mask]
+                station_min_r[station] = np.min(r_values[station_hits])
+            sorted_stations = sorted(unique_stations, key=lambda s: station_min_r[s])
+            
+            # Process each station
+            for station_idx, station in enumerate(sorted_stations):
+                station_mask = track_stations == station
+                station_hits = hit_indices[station_mask]
+                
+                # Sort hits within station by r
+                station_r = r_values[station_hits]
+                sorted_order = np.argsort(station_r)
+                sorted_hits = station_hits[sorted_order]
+                
+                # Within station: connect consecutive hits (by r), but not if same layer
+                for i in range(len(sorted_hits) - 1):
+                    src_idx = sorted_hits[i]
+                    dst_idx = sorted_hits[i + 1]
+                    
+                    # Skip if same layer within station
+                    if layers[src_idx] == layers[dst_idx]:
+                        continue
+                    
+                    station_outward_adj[0, src_idx, dst_idx] = True
+                
+                # Between stations: connect outermost hit to innermost hit of next station
+                if station_idx < len(sorted_stations) - 1:
+                    next_station = sorted_stations[station_idx + 1]
+                    next_station_mask = track_stations == next_station
+                    next_station_hits = hit_indices[next_station_mask]
+                    
+                    # Outermost hit of current station (largest r)
+                    outermost_hit = sorted_hits[-1]
+                    
+                    # Innermost hit of next station (smallest r)
+                    next_station_r = r_values[next_station_hits]
+                    innermost_next = next_station_hits[np.argmin(next_station_r)]
+                    
+                    station_outward_adj[0, outermost_hit, innermost_next] = True
+        
+        targets["station_outward_adjacency"] = station_outward_adj
+        
+        # ===== SELECT TARGET ADJACENCY BASED ON TYPE =====
+        if self.adjacency_type == "outward":
+            target_adj = outward_adj.clone()
+        elif self.adjacency_type == "bidirectional":
+            target_adj = bidirectional_adj.clone()
+        elif self.adjacency_type == "full":
+            target_adj = full_adj.clone()
+        elif self.adjacency_type == "knn_outward":
+            target_adj = knn_outward_adj.clone()
+        elif self.adjacency_type == "station_outward":
+            target_adj = station_outward_adj.clone()
+        else:
+            raise ValueError(f"Unknown adjacency type: {self.adjacency_type}")
+        
+        # ===== ADD SELF-CONNECTIONS IF REQUESTED =====
+        if self.self_connections:
+            # Add diagonal for valid hits that are part of a track
+            valid_on_track = hits["on_valid_particle"]
+            for i in range(num_hits):
+                if valid_on_track[i]:
+                    target_adj[0, i, i] = True
+        
+        targets["cc_adjacency"] = target_adj
         
         # ===== BUILD ANCHOR MASK (innermost hits) =====
         # Used for contrastive learning - anchors are innermost hits
@@ -275,8 +460,8 @@ class OutwardTrackingDataset(Dataset):
         return hits, particles, num_hits, num_tracks
 
 
-class OutwardTrackingCollator:
-    """Collator for batching outward tracking data with variable-size events."""
+class CCTrackingCollator:
+    """Collator for batching CC tracking data with variable-size events."""
     
     def __init__(self, dataset_inputs, dataset_targets, max_num_obj):
         self.dataset_inputs = dataset_inputs
@@ -307,15 +492,38 @@ class OutwardTrackingCollator:
         # Batch adjacency matrices
         hit_size = hit_max_sizes["hit"]
         
-        # Outward adjacency [B, N, N]
+        # CC adjacency [B, N, N] - the main target based on adjacency_type
+        batched_targets["cc_adjacency"] = pad_and_concat(
+            [t["cc_adjacency"] for t in targets], 
+            (hit_size, hit_size), False
+        )
+        
+        # Also batch the individual adjacency types for metrics/evaluation
         batched_targets["outward_adjacency"] = pad_and_concat(
             [t["outward_adjacency"] for t in targets], 
+            (hit_size, hit_size), False
+        )
+        
+        batched_targets["bidirectional_adjacency"] = pad_and_concat(
+            [t["bidirectional_adjacency"] for t in targets], 
             (hit_size, hit_size), False
         )
         
         # Full adjacency [B, N, N]  
         batched_targets["full_adjacency"] = pad_and_concat(
             [t["full_adjacency"] for t in targets],
+            (hit_size, hit_size), False
+        )
+        
+        # KNN outward adjacency [B, N, N]
+        batched_targets["knn_outward_adjacency"] = pad_and_concat(
+            [t["knn_outward_adjacency"] for t in targets],
+            (hit_size, hit_size), False
+        )
+        
+        # Station outward adjacency [B, N, N]
+        batched_targets["station_outward_adjacency"] = pad_and_concat(
+            [t["station_outward_adjacency"] for t in targets],
             (hit_size, hit_size), False
         )
         
@@ -348,8 +556,8 @@ class OutwardTrackingCollator:
         return batched_inputs, batched_targets
 
 
-class OutwardTrackingDataModule(LightningDataModule):
-    """Lightning DataModule for outward graph-based tracking."""
+class CCTrackingDataModule(LightningDataModule):
+    """Lightning DataModule for connected component based tracking."""
     
     def __init__(
         self,
@@ -379,14 +587,14 @@ class OutwardTrackingDataModule(LightningDataModule):
 
     def setup(self, stage: str):
         if stage == "fit" or stage == "test":
-            self.train_dataset = OutwardTrackingDataset(
+            self.train_dataset = CCTrackingDataset(
                 dirpath=self.train_dir,
                 num_events=self.num_train,
                 **self.kwargs,
             )
 
         if stage == "fit" or stage == "validate":
-            self.val_dataset = OutwardTrackingDataset(
+            self.val_dataset = CCTrackingDataset(
                 dirpath=self.val_dir,
                 num_events=self.num_val,
                 **self.kwargs,
@@ -398,20 +606,20 @@ class OutwardTrackingDataModule(LightningDataModule):
             
         if stage == "test":
             assert self.test_dir is not None, "No test file specified"
-            self.test_dataset = OutwardTrackingDataset(
+            self.test_dataset = CCTrackingDataset(
                 dirpath=self.test_dir,
                 num_events=self.num_test,
                 **self.kwargs,
             )
             print(f"Created test dataset with {len(self.test_dataset):,} events")
 
-    def get_dataloader(self, stage: str, dataset: OutwardTrackingDataset, shuffle: bool, prefetch_factor: int = 8):
+    def get_dataloader(self, stage: str, dataset: CCTrackingDataset, shuffle: bool, prefetch_factor: int = 8):
         actual_prefetch_factor = None if self.num_workers == 0 else prefetch_factor
         
         return DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
-            collate_fn=OutwardTrackingCollator(
+            collate_fn=CCTrackingCollator(
                 dataset.inputs, 
                 dataset.targets, 
                 dataset.event_max_num_particles

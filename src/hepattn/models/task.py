@@ -1446,13 +1446,15 @@ class SelfAttentionCorrelationTask(Task):
         if self.loss_fn == "bce":
             # Compute pos_weight from data if not specified
             if self.pos_weight is not None:
-                pos_weight = torch.tensor(self.pos_weight, device=logits.device)
+                pos_weight = torch.tensor(self.pos_weight, device=logits.device, dtype=logits.dtype)
             else:
-                # Calculate from the target (ratio of negatives to positives)
+                # Calculate pos_weight as 1 / num_pos (consistent behaviour)
                 num_pos = (target * valid_2d).sum()
-                num_neg = ((~target.bool()) * valid_2d).sum()
-                pos_weight = num_neg / (num_pos + 1e-6)
-                pos_weight = pos_weight.clamp(max=100.0)  # Prevent extreme weights
+                # Handle case with zero positives to avoid division by zero
+                if num_pos.item() == 0:
+                    pos_weight = torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
+                else:
+                    pos_weight = (1.0 / (num_pos + 1e-6)).clamp(max=100.0).to(logits.dtype).to(logits.device)
             
             # Compute BCE loss only on valid positions
             loss = nn.functional.binary_cross_entropy_with_logits(
@@ -1476,12 +1478,14 @@ class SelfAttentionCorrelationTask(Task):
             # Hybrid loss: BCE for dense gradients + Triplet for hard case focus
             # Compute BCE loss
             if self.pos_weight is not None:
-                pos_weight = torch.tensor(self.pos_weight, device=logits.device)
+                pos_weight = torch.tensor(self.pos_weight, device=logits.device, dtype=logits.dtype)
             else:
+                # Calculate pos_weight as 1 / num_pos (consistent behaviour)
                 num_pos = (target * valid_2d).sum()
-                num_neg = ((~target.bool()) * valid_2d).sum()
-                pos_weight = num_neg / (num_pos + 1e-6)
-                pos_weight = pos_weight.clamp(max=100.0)
+                if num_pos.item() == 0:
+                    pos_weight = torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
+                else:
+                    pos_weight = (1.0 / (num_pos + 1e-6)).clamp(max=100.0).to(logits.dtype).to(logits.device)
             
             bce_loss = nn.functional.binary_cross_entropy_with_logits(
                 logits, target, 
@@ -1611,12 +1615,15 @@ class SelfAttentionCorrelationTask(Task):
         return {f"{self.input_object}_{self.target_field}_triplet": total_loss}
 
 
-class OutwardEdgeTask(Task):
-    """Task for predicting outward-directed edges between hits on the same track.
+class CCEdgeTask(Task):
+    """Task for predicting edges between hits on the same track using connected components.
     
-    This task predicts a directed adjacency matrix where edges point from 
-    inner hits to outer hits (sorted by radial distance r). The matrix M[i,j]=1
-    indicates there should be an edge from hit i to hit j (where r_i < r_j).
+    This task predicts an adjacency matrix M[i,j] indicating edges between hits.
+    The target adjacency type can be configured:
+    - "outward": Directed edges from inner to outer hits (sorted by r)
+    - "bidirectional": Symmetric chain edges (outward | outward.T)
+    - "full": All pairs of hits on the same track
+    - "cc_adjacency": Generic target from CCTrackingDataset (default)
     
     At inference, connected components on the predicted graph are used to 
     extract tracks, eliminating the need for Hungarian matching.
@@ -1637,6 +1644,7 @@ class OutwardEdgeTask(Task):
         dim: int,
         hidden_dim: int = 256,
         threshold: float = 0.5,
+        target_field: str = "cc_adjacency",
         loss_fn: Literal["bce", "bce_triplet"] = "bce",
         pos_weight: float | None = None,
         triplet_margin: float = 1.0,
@@ -1645,7 +1653,7 @@ class OutwardEdgeTask(Task):
         shared_contrastive_embeddings: bool = False,
         has_intermediate_loss: bool = False,
     ):
-        """Initialize the outward edge prediction task.
+        """Initialize the CC edge prediction task.
         
         Args:
             name: Name of the task.
@@ -1653,6 +1661,7 @@ class OutwardEdgeTask(Task):
             dim: Embedding dimension from the encoder.
             hidden_dim: Hidden dimension for projection layers.
             threshold: Threshold for converting probabilities to binary edges.
+            target_field: Target field name in targets dict (e.g., "cc_adjacency", "outward_adjacency").
             loss_fn: Loss function - "bce" for BCE only, "bce_triplet" for BCE + contrastive.
             pos_weight: Positive class weight for BCE loss. If None, computed from data.
             triplet_margin: Margin for triplet loss (only used if loss_fn="bce_triplet").
@@ -1666,6 +1675,7 @@ class OutwardEdgeTask(Task):
         
         self.name = name
         self.input_object = input_object
+        self.target_field = target_field
         self.dim = dim
         self.hidden_dim = hidden_dim
         self.threshold = threshold
@@ -1728,7 +1738,7 @@ class OutwardEdgeTask(Task):
         edge_logits = torch.bmm(embed_source, embed_target.transpose(-2, -1)) / (self.hidden_dim ** 0.5)
         
         result = {
-            f"{self.input_object}_outward_edge_logit": edge_logits,
+            f"{self.input_object}_cc_edge_logit": edge_logits,
         }
         
         # Store embeddings for contrastive loss if enabled
@@ -1751,13 +1761,13 @@ class OutwardEdgeTask(Task):
         Returns:
             Dictionary with predicted edge probabilities and binary predictions.
         """
-        logits = outputs[f"{self.input_object}_outward_edge_logit"]
+        logits = outputs[f"{self.input_object}_cc_edge_logit"]
         probs = logits.sigmoid()
         preds = probs >= self.threshold
         
         return {
-            f"{self.input_object}_outward_edge_prob": probs,
-            f"{self.input_object}_outward_edge": preds,
+            f"{self.input_object}_cc_edge_prob": probs,
+            f"{self.input_object}_cc_edge": preds,
         }
     
     def loss(self, outputs: dict[str, Tensor], targets: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -1772,8 +1782,8 @@ class OutwardEdgeTask(Task):
         Returns:
             Dictionary with loss values.
         """
-        logits = outputs[f"{self.input_object}_outward_edge_logit"]
-        target = targets["outward_adjacency"].type_as(logits)
+        logits = outputs[f"{self.input_object}_cc_edge_logit"]
+        target = targets[self.target_field].type_as(logits)
         
         # Get valid hits mask to ignore padding
         valid_mask = targets[f"{self.input_object}_valid"]  # [B, N]
@@ -1785,12 +1795,13 @@ class OutwardEdgeTask(Task):
         if self.pos_weight is not None:
             pos_weight = torch.tensor(self.pos_weight, device=logits.device)
         else:
-            # Calculate from the target (ratio of negatives to positives)
+            # Calculate pos_weight as 1 / num_pos (consistent behaviour)
             num_pos = (target * valid_2d).sum()
-            num_neg = ((1.0 - target) * valid_2d).sum()
-            pos_weight = num_neg / (num_pos + 1e-6)
-            pos_weight = pos_weight.clamp(max=100.0)  # Prevent extreme weights
-        
+            if num_pos.item() == 0:
+                pos_weight = torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
+            else:
+                pos_weight = (1.0 / (num_pos)).to(logits.dtype).to(logits.device)
+
         # Compute BCE loss only on valid positions
         bce_loss = nn.functional.binary_cross_entropy_with_logits(
             logits, target, 
@@ -1798,18 +1809,18 @@ class OutwardEdgeTask(Task):
             reduction='none'
         )
         # Mask out invalid positions and compute mean
-        bce_loss = (bce_loss * valid_2d).sum() / (valid_2d.sum() + 1e-6)
+        bce_loss = (bce_loss * valid_2d).sum() / (valid_2d.sum())
         
         if self.loss_fn == "bce":
-            return {f"{self.input_object}_outward_edge_bce": bce_loss}
+            return {f"{self.input_object}_cc_edge_bce": bce_loss}
         
         elif self.loss_fn == "bce_triplet":
             # Compute triplet loss as auxiliary task
             triplet_loss = self._triplet_loss(outputs, targets)
             
             return {
-                f"{self.input_object}_outward_edge_bce": bce_loss,
-                f"{self.input_object}_outward_edge_triplet": self.triplet_weight * triplet_loss,
+                f"{self.input_object}_cc_edge_bce": bce_loss,
+                f"{self.input_object}_cc_edge_triplet": self.triplet_weight * triplet_loss,
             }
         
         raise ValueError(f"Unknown loss function: {self.loss_fn}")

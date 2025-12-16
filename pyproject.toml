@@ -39,6 +39,7 @@ dependencies = [
     "atlas-ftag-tools>=0.2.9,<0.3",
     "ty==0.0.1a20",
     "lapx>=0.9.2,<0.10",
+    "networkx>=3.4,<4",
 ]
 
 [dependency-groups]

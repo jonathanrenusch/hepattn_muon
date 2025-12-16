@@ -1,8 +1,13 @@
-"""Training script for outward graph-based particle tracking.
+"""Training script for connected component based particle tracking.
 
-This script trains an encoder-only transformer to predict directed edges
-between hits on the same track, pointing outward from the interaction point.
+This script trains an encoder-only transformer to predict adjacency matrices
+indicating which hits belong to the same particle track.
 Track extraction uses connected components instead of Hungarian matching.
+
+Supports three adjacency matrix types:
+- outward: Directed edges from inner to outer hits (sorted by r)
+- bidirectional: Symmetric chain edges (outward | outward.T)
+- full: All pairs of hits on the same track
 """
 
 import torch
@@ -13,13 +18,13 @@ import numpy as np
 # Set float32 matmul precision for better performance on Tensor Core GPUs
 torch.set_float32_matmul_precision('high')
 
-from hepattn.experiments.outward_tracking.data import OutwardTrackingDataModule
+from hepattn.experiments.cc_tracking.data import CCTrackingDataModule
 from hepattn.models.wrapper import ModelWrapper
 from hepattn.utils.cli import CLI
 
 
-class OutwardTracker(ModelWrapper):
-    """Lightning wrapper for the outward edge tracking model.
+class CCTracker(ModelWrapper):
+    """Lightning wrapper for the connected component tracking model.
     
     This wrapper handles training, validation, and connected components
     based track extraction and evaluation.
@@ -37,7 +42,7 @@ class OutwardTracker(ModelWrapper):
         
         Args:
             name: Name of the experiment.
-            model: The tracking model (encoder with OutwardEdgeTask).
+            model: The tracking model (encoder with CCEdgeTask).
             lrs_config: Learning rate scheduler configuration.
             optimizer: Optimizer to use ("AdamW" or "Lion").
             min_hits_per_track: Minimum hits required to count as a valid track.
@@ -46,7 +51,7 @@ class OutwardTracker(ModelWrapper):
         self.min_hits_per_track = min_hits_per_track
     
     def log_custom_metrics(self, preds, targets, stage):
-        """Log custom metrics for the outward edge prediction task.
+        """Log custom metrics for the CC edge prediction task.
         
         Uses connected components on predicted edges to extract tracks,
         then evaluates against ground truth tracks.
@@ -71,9 +76,9 @@ class OutwardTracker(ModelWrapper):
         threshold = task.threshold
         
         # Get predictions and targets
-        pred_probs = preds["final"]["hit_edge"]["hit_outward_edge_prob"]
+        pred_probs = preds["final"]["hit_edge"]["hit_cc_edge_prob"]
         pred_edges = pred_probs >= threshold  # [B, N, N]
-        target_edges = targets["outward_adjacency"]  # [B, N, N]
+        target_edges = targets["cc_adjacency"]  # [B, N, N]
         valid_hits = targets["hit_valid"]  # [B, N]
         
         # Get full adjacency for track assignment evaluation
@@ -215,8 +220,8 @@ class OutwardTracker(ModelWrapper):
 def main(args: ArgsType = None) -> None:
     """Main entry point for training."""
     CLI(
-        model_class=OutwardTracker,
-        datamodule_class=OutwardTrackingDataModule,
+        model_class=CCTracker,
+        datamodule_class=CCTrackingDataModule,
         args=args,
         parser_kwargs={"default_env": True},
     )

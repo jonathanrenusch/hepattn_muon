@@ -1,5 +1,9 @@
+# Connected Component Tracking - Full adjacency (no self-connections)
+# All pairs of hits on the same track (dense symmetric matrix)
+# Target: cc_adjacency with adjacency_type=full, self_connections=false
+
 seed_everything: 42
-name: Outward-Edge-Tracking
+name: CC-Tracking-Full
 
 data:
   # Data directories with filtered ATLAS muon data
@@ -15,6 +19,10 @@ data:
 
   # Maximum particles per event (used for padding)
   event_max_num_particles: 2
+  
+  # Adjacency matrix configuration
+  adjacency_type: full
+  self_connections: false
 
   # Define which inputs will be available to the model
   inputs:
@@ -60,7 +68,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      project: outward_edge_tracking
+      project: cc_tracking
 
   callbacks:
     - class_path: hepattn.callbacks.Compile
@@ -152,12 +160,13 @@ model:
         class_path: torch.nn.ModuleList
         init_args:
           modules:
-            - class_path: hepattn.models.task.OutwardEdgeTask
+            - class_path: hepattn.models.task.CCEdgeTask
               init_args:
                 name: hit_edge
                 input_object: hit
                 dim: *dim
                 hidden_dim: 256
+                target_field: cc_adjacency
                 # Edge prediction threshold - tune for precision/recall tradeoff
                 threshold: 0.8
                 # BCE loss only (no contrastive learning)
