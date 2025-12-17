@@ -186,16 +186,28 @@ class HitFilterTask(Task):
         output = outputs[f"{self.input_object}_logit"]
         target = targets[f"{self.input_object}_{self.target_field}"].type_as(output)
 
+        # Get the valid mask to exclude padded positions from loss calculation
+        # This is important when batching events with different numbers of hits
+        valid_mask = targets.get(f"{self.input_object}_valid", None)
+
+        if valid_mask is not None:
+            # Apply mask to select only valid (non-padded) positions
+            output = output[valid_mask]
+            target = target[valid_mask]
+
         # Calculate the BCE loss with class weighting
         if self.loss_fn == "bce":
-            weight = 1 / target.float().mean()
+            # Guard against edge case where all targets are 0 (or mean is 0)
+            target_mean = target.float().mean()
+            weight = 1 / target_mean if target_mean > 0 else torch.tensor(1.0, device=output.device)
             loss = nn.functional.binary_cross_entropy_with_logits(output, target, pos_weight=weight)
             return {f"{self.input_object}_{self.loss_fn}": loss}
         if self.loss_fn == "focal":
             loss = focal_loss(output, target)
             return {f"{self.input_object}_{self.loss_fn}": loss}
         if self.loss_fn == "both":
-            weight = 1 / target.float().mean()
+            target_mean = target.float().mean()
+            weight = 1 / target_mean if target_mean > 0 else torch.tensor(1.0, device=output.device)
             bce_loss = nn.functional.binary_cross_entropy_with_logits(output, target, pos_weight=weight)
             focal_loss_value = focal_loss(output, target)
             return {

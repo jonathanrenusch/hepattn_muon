@@ -32,6 +32,8 @@ dependencies = [
     "numba>=0.61.2",
     "onnx>=1.18.0",
     "onnxruntime>=1.22.0",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.0.post8/causal_conv1d-1.5.0.post8+cu12torch2.6cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+    "mamba-ssm @ https://github.com/state-spaces/mamba/releases/download/v2.2.4/mamba_ssm-2.2.4+cu12torch2.6cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
 ]
 
 [build-system]
@@ -53,6 +55,7 @@ torch = { version = "==2.7.0", index = "https://download.pytorch.org/whl/test/cu
 [tool.pixi.pypi-options]
 no-build-isolation = ["flash-attn"]
 extra-index-urls = ["https://download.pytorch.org/whl/test/cu126"]
+index-strategy = "unsafe-best-match"
 
 [tool.pixi.system-requirements]
 linux = "3.10.0"

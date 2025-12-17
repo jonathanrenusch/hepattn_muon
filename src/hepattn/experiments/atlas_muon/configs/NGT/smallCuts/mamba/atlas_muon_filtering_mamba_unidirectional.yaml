@@ -1,21 +1,21 @@
 seed_everything: 42
-# name: ATLAS-Muon-small-noCov-noTime
-name: ATLAS-Muon-small-justxyz6features
+name: ATLAS-Muon-Mamba-Unidirectional
+ckpt_path: 
+# Unidirectional Mamba SSM baseline for hit filtering
+# Uses simple Mamba blocks processing hits sorted by phi angle
 
-# ckpt_path: 
 data: 
   train_dir: /scratch/ml_training_data_2694000_hdf5
   val_dir: /scratch/ml_validation_data_144000_hdf5
 
-  num_workers: 100
+  num_workers: 8
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 50  # Start with batch_size=1 to avoid smart batching issues
-  # use_smart_batching: false  # Disable smart batching as requested
+  batch_size: 20
 
   # ATLAS muon data parameters
-  event_max_num_particles: 10  # Typically fewer tracks per event in muon data
+  event_max_num_particles: 10
 
   # Define which inputs will be available to the model
   inputs:
@@ -44,21 +44,13 @@ data:
   targets:
     hit:
       - on_valid_particle
-    # particle:
-    #   - truthMuon_pt
-    #   - truthMuon_eta
-    #   - truthMuon_phi
-    #   - truthMuon_q
 
 trainer:
   # Training configuration
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  # devices: [1]
-  devices: -1
-  # devices: [1,2,3,4,5,6,7]
-  # devices: -1
+  devices: [0,1]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -69,10 +61,10 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: atlas_muon_filtering
+      project_name: atlas_muon_filtering_mamba
 
   callbacks:
-    - class_path: hepattn.callbacks.Compile
+    # Note: Compile callback removed as Mamba uses custom CUDA kernels
     - class_path: hepattn.callbacks.InferenceTimer
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
@@ -102,9 +94,10 @@ trainer:
 model:
   optimizer: Lion
 
+  # SSMs converge more linearly, slightly higher learning rate can help
   lrs_config:
-    initial: 1e-5
-    max: 5e-5
+    initial: 2e-5
+    max: 1e-4
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
@@ -112,6 +105,7 @@ model:
   model:
     class_path: hepattn.models.HitFilter
     init_args:
+      # Sort hits by phi for proper sequence ordering in Mamba
       input_sort_field: phi
       input_nets:
         class_path: torch.nn.ModuleList
@@ -145,7 +139,7 @@ model:
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 6  # Number of input features for ATLAS muon data
+                    input_size: 18  # Number of input features (18 fields listed above)
                     output_size: &dim 128
                     norm_input: true
                 posenc:
@@ -158,19 +152,19 @@ model:
                       - eta
                       - phi
                     dim: *dim
-                    # scale: 0.1
       encoder:
-        class_path: hepattn.models.Encoder
+        # Unidirectional Mamba encoder - doubled depth for fair parameter comparison with bidirectional
+        class_path: hepattn.models.MambaEncoder
         init_args:
-          num_layers: 8 # Slightly fewer layers for muon data
+          num_layers: 16  # Doubled from 8 to match ~2.1M params of bidirectional
           dim: *dim
-          attn_type: flash
-          window_size: 512  # Smaller window size for fewer hits per event
-          window_wrap: true
-          hybrid_norm: true
-          # norm: RMSNorm
-          attn_kwargs:
-            num_heads: 8
+          d_state: 64    # SSM state expansion factor (64 for Mamba-2)
+          d_conv: 4      # Local convolution width
+          expand: 2      # Block expansion factor
+          use_mamba2: true  # Use Mamba-2 architecture (default)
+          headdim: 32    # Head dimension (32 for dim=128, 64 for dim>=256)
+          norm: LayerNorm
+          dropout: 0.0
 
       tasks:
         class_path: torch.nn.ModuleList
