@@ -7,7 +7,7 @@ data:
   train_dir: /scratch/ml_training_data_2694000_hdf5
   val_dir: /scratch/ml_validation_data_144000_hdf5
 
-  num_workers: 100
+  num_workers: 8
   num_train: -1
   num_val: -1
   num_test: -1
@@ -145,7 +145,7 @@ model:
                 net:
                   class_path: hepattn.models.Dense
                   init_args:
-                    input_size: 6  # Number of input features for ATLAS muon data
+                    input_size: 18  # Number of input features for ATLAS muon data
                     output_size: &dim 128
                     norm_input: true
                 posenc:
