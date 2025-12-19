@@ -1,6 +1,6 @@
 seed_everything: 42
 name: ATLAS-Muon-VisionMamba-Bidirectional
-ckpt_path: /scratch/epoch=012-val_loss=0.03428.ckpt
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-VisionMamba-Bidirectional_20251216-T203624/ckpts/epoch=016-val_loss=0.03405.ckpt
 
 # Bidirectional Mamba SSM (Vision Mamba style) for hit filtering
 # Uses bidirectional Mamba blocks processing hits sorted by phi angle
@@ -15,7 +15,7 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 50
+  batch_size: 1
 
   # ATLAS muon data parameters
   event_max_num_particles: 10
@@ -53,7 +53,7 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: -1
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -78,7 +78,7 @@ trainer:
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
-        write_outputs: false
+        write_outputs: True
         write_preds: True
         write_targets: false
         write_losses: false

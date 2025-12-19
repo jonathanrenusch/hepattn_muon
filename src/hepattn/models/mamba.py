@@ -24,6 +24,9 @@ except ImportError:
     Mamba2 = None
 
 
+# TODO: Understand how closely this code aligns with the original Mamba and Vision Mamba that you found online
+
+
 class MambaEncoderLayer(nn.Module):
     """Single Mamba encoder layer with pre-normalization and residual connection.
     
@@ -443,3 +446,5 @@ class BidirectionalMambaEncoder(nn.Module):
             x = torch.gather(x, -2, x_unsort_idx.unsqueeze(-1).expand_as(x))
         
         return x
+
+

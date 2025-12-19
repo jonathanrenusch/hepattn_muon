@@ -1,6 +1,6 @@
 seed_everything: 42
 name: ATLAS-Muon-Mamba-Unidirectional
-ckpt_path: 
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-Mamba-Unidirectional_20251216-T204850/ckpts/epoch=006-val_loss=0.10869.ckpt
 # Unidirectional Mamba SSM baseline for hit filtering
 # Uses simple Mamba blocks processing hits sorted by phi angle
 
