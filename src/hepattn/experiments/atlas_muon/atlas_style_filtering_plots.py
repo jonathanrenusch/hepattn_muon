@@ -1896,7 +1896,8 @@ class ATLASStylePlotter:
 def main():
     parser = argparse.ArgumentParser(description='Generate ATLAS-style plots for muon hit filter evaluation')
     parser.add_argument('--eval_path', '-e', type=str, 
-                       default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
+                       default="/scratch/epoch=016-val_loss=0.03405_ml_test_data_156000_hdf5_eval.h5",
+                    #    default="/scratch/epoch=041-val_loss=0.00402_ml_test_data_156000_hdf5_eval_small_cuts.h5",
                     #    default="/scratch/epoch=023-val_loss=0.00482_ml_test_data_156000_hdf5_no-NSW_no-RPC_eval.h5",
                        help='Path to evaluation HDF5 file')
     parser.add_argument('--data_dir', '-d', type=str, 
