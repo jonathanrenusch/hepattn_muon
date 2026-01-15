@@ -1,0 +1,20 @@
+num_train: 4
+num_val: 4
+batch_size: 100
+trainable_params: 70160
+num_gpus: 1
+gpu_ids:
+- 0
+num_workers: 4
+torch_version: 2.9.1+cu128
+lightning_version: 2.5.2
+cuda_version: '12.8'
+hostname: sess1
+out_dir: !!python/object/apply:pathlib.PosixPath
+- /
+- shared
+- tracking
+- hepattn_muon
+- test_logs
+- atlas-muon-tracking-test_20260113-T134917
+log_url: null
