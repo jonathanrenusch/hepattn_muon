@@ -191,7 +191,7 @@ class BidirectionalMambaEncoderLayer(nn.Module):
         
         # Gating mechanism for combining forward and backward
         self.gate = nn.Linear(dim, dim)
-        self.gate_activation = nn.SiLU()
+        self.gate_activation = nn.Sigmoid()
         
         # Optional dropout
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -226,7 +226,7 @@ class BidirectionalMambaEncoderLayer(nn.Module):
         
         # Gating mechanism to combine forward and backward
         gate = self.gate_activation(self.gate(x_norm))
-        x_combined = gate * x_forward + (1 - gate.sigmoid()) * x_backward
+        x_combined = gate * x_forward + (1 - gate) * x_backward
         
         # Residual connection with dropout
         return skip + self.dropout(x_combined)
@@ -446,5 +446,4 @@ class BidirectionalMambaEncoder(nn.Module):
             x = torch.gather(x, -2, x_unsort_idx.unsqueeze(-1).expand_as(x))
         
         return x
-
 
