@@ -11,7 +11,7 @@ data:
   val_dir: /scratch/ml_validation_data_144000_hdf5
   test_dir: /scratch/ml_test_data_156000_hdf5
 
-  num_workers: 8
+  num_workers: 48  # increase this number even more for multi GPU but keep lscpu in mind
   num_train: -1
   num_val: -1
   num_test: -1
@@ -67,7 +67,7 @@ trainer:
       project_name: atlas_muon_filtering_mamba
 
   callbacks:
-    # Note: Compile callback removed as Mamba uses custom CUDA kernels
+    # Note: Compile callback incompatible with Mamba's custom CUDA/Triton kernels
     - class_path: hepattn.callbacks.InferenceTimer
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
@@ -180,5 +180,5 @@ model:
                 input_object: hit
                 target_field: on_valid_particle
                 dim: *dim
-                threshold: 0.01
+                threshold: 0.01 # Classification threshold
                 loss_fn: bce

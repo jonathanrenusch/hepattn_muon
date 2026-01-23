@@ -1,5 +1,5 @@
 seed_everything: 42
-name: ATLAS-Muon-VisionMamba-Bidirectional_inference
+name: ATLAS-Muon-VisionMamba-Bidirectional_inference_b128
 #ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-VisionMamba-Bidirectional_20251216-T203624/ckpts/epoch=016-val_loss=0.03405.ckpt
 ckpt_path: /shared/ML/hepattn_muon/logs/ATLAS-Muon-VisionMamba-Bidirectional_20260119-T140147/ckpts/epoch=018-val_loss=0.03489.ckpt  
 # Bidirectional Mamba SSM (Vision Mamba style) for hit filtering
@@ -15,12 +15,7 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 256
-  
-  #testing small yaml options, didnt work, should find a way to do it SOS ELENI
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 4
+  batch_size: 128
 
   # ATLAS muon data parameters
   event_max_num_particles: 10
@@ -58,7 +53,7 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0]
+  devices: -1
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
