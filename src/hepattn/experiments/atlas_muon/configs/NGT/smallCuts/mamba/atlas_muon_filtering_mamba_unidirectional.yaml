@@ -163,7 +163,7 @@ model:
           expand: 2      # Block expansion factor
           use_mamba2: true  # Use Mamba-2 architecture (default)
           headdim: 32    # Head dimension (32 for dim=128, 64 for dim>=256)
-          norm: LayerNorm
+          norm: RMSNorm 
           dropout: 0.0
 
       tasks:
