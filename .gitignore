@@ -160,3 +160,11 @@ pytest-temp
 *.parquet
 *.pickle
 *.h5
+
+# User-requested ignores
+*.txt
+*.pdf
+img/
+*.img
+*.png
+*.PNG

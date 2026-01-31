@@ -1,17 +1,15 @@
 seed_everything: 42
-name: Mamba-Track-Regression
+name: Mamba-Track-Regression-Delta
 
-# Mamba-based track parameter regression using ground truth hit-to-track assignments
-# This is a proof-of-concept for using bidirectional Mamba for track fitting
+# Mamba-based track parameter regression using DELTA prediction mode
+# Instead of predicting absolute eta/phi, we predict deltas from the innermost hit
+# This can help with training convergence, especially for phi
 
 data:
   # Use the same data directories as the tracking task
-  train_dir: /scratch/ml_validation_data_144000_hdf5
-  val_dir: /scratch/ml_validation_data_144000_hdf5
-  test_dir: /scratch/ml_test_data_156000_hdf5
-  # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
-  # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
-  # test_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
+  test_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
 
   num_workers: 24
   num_train: -1  # Start with subset for quick iteration
@@ -25,6 +23,7 @@ data:
   event_max_num_particles: 10
 
   # Hit features to use (18 features)
+  # NOTE: eta is at index 17, phi is at index 16 (0-indexed)
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -32,27 +31,18 @@ data:
     - spacePoint_globEdgeLowX
     - spacePoint_globEdgeLowY
     - spacePoint_globEdgeLowZ
-    - spacePoint_globPosX
-    - spacePoint_globPosY
-    - spacePoint_globPosZ
     - spacePoint_driftR
-    - spacePoint_time
     - spacePoint_channel
     - spacePoint_layer
     - spacePoint_stationPhi
     - spacePoint_stationEta
     - spacePoint_stationIndex
     - spacePoint_technology
-    - spacePoint_covXX
-    - spacePoint_covXY
-    - spacePoint_covYX
-    - spacePoint_covYY
-    - tube_length
     - r
     - s
     - theta
-    - phi
-    - eta
+    - phi           # index 16
+    - eta           # index 17
 
   # Required for base dataset compatibility
   inputs:
@@ -63,22 +53,13 @@ data:
       - spacePoint_globEdgeLowX
       - spacePoint_globEdgeLowY
       - spacePoint_globEdgeLowZ
-      - spacePoint_globPosX
-      - spacePoint_globPosY
-      - spacePoint_globPosZ
       - spacePoint_driftR
-      - spacePoint_time
       - spacePoint_channel
       - spacePoint_layer
       - spacePoint_stationPhi
       - spacePoint_stationEta
       - spacePoint_stationIndex
       - spacePoint_technology
-      - spacePoint_covXX
-      - spacePoint_covXY
-      - spacePoint_covYX
-      - spacePoint_covYY
-      - tube_length
       - r
       - s
       - theta
@@ -133,8 +114,6 @@ model:
   optimizer: Lion
   
   # Learning rate schedule
-
-
   lrs_config:
     initial: 2e-5
     max: 1e-4
@@ -156,7 +135,7 @@ model:
     class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
     init_args:
       # Input dimension = number of hit features
-      input_dim: 27
+      input_dim: 18
       
       # Model dimension - minimum for Mamba2 CUDA alignment
       dim: 128
@@ -168,7 +147,6 @@ model:
       expand: 2
       use_mamba2: true
       headdim: 32
-      # norm: LayerNorm
       norm: RMSNorm
       dropout: 0.0           # Mamba encoder dropout (typically 0 for SSMs)
       head_dropout: 0.1      # MLP head dropout
@@ -180,3 +158,11 @@ model:
         - eta
         - phi
         - pt
+      
+      # === DELTA PREDICTION MODE ===
+      # Predict deltas from innermost hit instead of absolute eta/phi
+      # This helps training convergence since deltas are smaller and more uniform
+      use_delta_prediction: true
+      delta_reference: "innermost"  # Use innermost hit (position 1, after CLS token)
+      phi_feature_idx: 16           # Index of phi in hit_fields (0-indexed)
+      eta_feature_idx: 17           # Index of eta in hit_fields (0-indexed)

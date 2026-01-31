@@ -153,6 +153,7 @@ environments:
       - pypi: https://download.pytorch.org/whl/test/aiohappyeyeballs-2.4.3-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/test/aiohttp-3.10.8-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://download.pytorch.org/whl/test/aiosignal-1.3.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/20/93/9230c0806f7ea449ceafb89129a3ceae2cec058b0f88a85f659a514e485e/atlasify-0.8.0.tar.gz
       - pypi: https://download.pytorch.org/whl/test/attrs-24.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/aa/c465e2d4d6430e8505264d9de999e19569416a85258733cb575ed39b94c8/awkward-2.8.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d3/55/32212854831ab59772fa612b0507d94dc9b56ea40123f8a63da040fd3564/awkward_cpp-45-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -273,7 +274,7 @@ environments:
       - pypi: https://download.pytorch.org/whl/test/torchmetrics-1.0.3-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/test/tqdm-4.66.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/6b/2f416568b3c4c91c96e5a365d164f8a4a4a88030aa8ab4644181fdadce97/transformers-4.57.3-py3-none-any.whl
-      - pypi: https://download.pytorch.org/whl/test/triton-3.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: https://download.pytorch.org/whl/test/triton-3.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl#sha256=0f12a8611eff721d3fd837d0cc2a1f2f8a4d382ec3fc3a8d6a07a5b1e535c81c
       - pypi: https://files.pythonhosted.org/packages/fd/39/4702c2901899c018189b9aa7eb75aa8eb54527aed71c3f285895190dc664/typeshed_client-2.7.0-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/test/typing_extensions-4.12.2-py3-none-any.whl
       - pypi: https://download.pytorch.org/whl/test/tzdata-2024.2-py2.py3-none-any.whl
@@ -333,6 +334,13 @@ packages:
   requires_dist:
   - frozenlist>=1.1.0
   requires_python: '>=3.7'
+- pypi: https://files.pythonhosted.org/packages/20/93/9230c0806f7ea449ceafb89129a3ceae2cec058b0f88a85f659a514e485e/atlasify-0.8.0.tar.gz
+  name: atlasify
+  version: 0.8.0
+  sha256: 4623c23c2795fc2e457550783712b390e3626f8ee64309fbe4d53d8c02d93105
+  requires_dist:
+  - matplotlib
+  - packaging
 - pypi: https://download.pytorch.org/whl/test/attrs-24.2.0-py3-none-any.whl
   name: attrs
   version: 24.2.0
@@ -1511,7 +1519,7 @@ packages:
 - pypi: .
   name: hepattn
   version: 0.1.0
-  sha256: ab3cb4113c5005722fa1752b99e2c89bc8afc8a779b66a338f92b2c949f88606
+  sha256: 8bf93b802dc231c37ea36e67ef035b02e2ea5143eb18cb949b89fde3a0d3daa5
   requires_dist:
   - packaging
   - wheel
@@ -1540,6 +1548,7 @@ packages:
   - onnxruntime>=1.22.0
   - causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.0.post8/causal_conv1d-1.5.0.post8+cu12torch2.6cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
   - mamba-ssm @ https://github.com/state-spaces/mamba/releases/download/v2.2.4/mamba_ssm-2.2.4+cu12torch2.6cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+  - atlasify>=0.8.0
   requires_python: ==3.12
   editable: true
 - pypi: https://files.pythonhosted.org/packages/aa/44/afb4051adec67d014ad8bfe45a068ec21f95b1dd357411772c9a5baa0b97/hepunits-2.3.5-py3-none-any.whl
@@ -4618,9 +4627,10 @@ packages:
   - opentelemetry-exporter-otlp ; extra == 'open-telemetry'
   - opentelemetry-sdk ; extra == 'open-telemetry'
   requires_python: '>=3.9.0'
-- pypi: https://download.pytorch.org/whl/test/triton-3.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+- pypi: https://download.pytorch.org/whl/test/triton-3.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl#sha256=0f12a8611eff721d3fd837d0cc2a1f2f8a4d382ec3fc3a8d6a07a5b1e535c81c
   name: triton
   version: 3.3.0
+  sha256: 0f12a8611eff721d3fd837d0cc2a1f2f8a4d382ec3fc3a8d6a07a5b1e535c81c
   requires_dist:
   - setuptools>=40.8.0
   - cmake>=3.20 ; extra == 'build'

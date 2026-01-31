@@ -1,6 +1,6 @@
 seed_everything: 42
 name: Mamba-Track-Regression
-ckpt_path: /shared/tracking/hepattn_muon/logs/Mamba-Track-Regression_20260122-T180302/ckpts/epoch=099-val_loss=1.45214.ckpt
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/Mamba-Track-Regression_20260123-T200856/ckpts/epoch=113-val_loss=0.06819.ckpt
 # Mamba-based track parameter regression using ground truth hit-to-track assignments
 # This is a proof-of-concept for using bidirectional Mamba for track fitting
 
@@ -98,9 +98,9 @@ trainer:
     - class_path: hepattn.callbacks.PredictionWriter
       init_args:
         write_inputs: false
-        write_outputs: True
-        write_preds: True
-        write_targets: false
+        write_outputs: false
+        write_preds: true
+        write_targets: true
         write_losses: false
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
@@ -154,8 +154,8 @@ model:
       expand: 2
       use_mamba2: true
       headdim: 32
-      norm: LayerNorm
-      # norm: RMSNorm
+      # norm: LayerNorm
+      norm: RMSNorm
       dropout: 0.0           # Mamba encoder dropout (typically 0 for SSMs)
       head_dropout: 0.1      # MLP head dropout
       

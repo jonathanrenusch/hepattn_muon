@@ -74,11 +74,7 @@ class MambaRegressionWrapper(ModelWrapper):
     
     def forward(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         """Forward pass through the model."""
-        return self.model(
-            hit_features=inputs['hit_features'],
-            hit_mask=inputs['hit_mask'],
-            sequence_lengths=inputs.get('sequence_lengths'),
-        )
+        return self.model(inputs)
     
     def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
         """Convert model outputs to predictions."""
@@ -152,7 +148,13 @@ class MambaRegressionWrapper(ModelWrapper):
         # Compute losses
         losses = self.task.loss(outputs, targets)
         
-        return outputs, preds, losses
+        # Wrap in layer/task structure for PredictionWriter compatibility
+        # PredictionWriter expects: {'layer_name': {'task_name': {'field': tensor}}}
+        wrapped_outputs = {'final': {'mamba_regression': outputs}}
+        wrapped_preds = {'final': {'mamba_regression': preds}}
+        wrapped_losses = {'final': {'mamba_regression': losses}}
+        
+        return wrapped_outputs, wrapped_preds, wrapped_losses
     
     def log_custom_metrics(self, preds, targets, stage, outputs=None):
         """Log additional custom metrics.

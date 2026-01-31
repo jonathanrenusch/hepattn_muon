@@ -222,7 +222,7 @@ class Task2TrackValidityEvaluator:
                             baseline_stats['tracks_failed_eta_cuts'] += 1
                             passes_baseline = False
                         
-                        # Pre-filter 3: pt threshold >= 3.0 GeV (use truth pt)
+                        # Pre-filter 3: pt threshold >= 5.0 GeV (use truth pt)
                         if passes_baseline and truth_pt < 5.0:
                             baseline_stats['tracks_failed_pt_cuts'] += 1
                             passes_baseline = False
@@ -319,7 +319,7 @@ class Task2TrackValidityEvaluator:
         print(f"  Total tracks checked: {baseline_stats['total_tracks_checked']}")
         print(f"  Failed minimum hits (>=9): {baseline_stats['tracks_failed_min_hits']} ({baseline_stats['tracks_failed_min_hits']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats['tracks_failed_eta_cuts']} ({baseline_stats['tracks_failed_eta_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
-        print(f"  Failed pt cuts (pt >= 3.0 GeV): {baseline_stats['tracks_failed_pt_cuts']} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 5.0 GeV): {baseline_stats['tracks_failed_pt_cuts']} ({baseline_stats['tracks_failed_pt_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Failed station cuts: {baseline_stats['tracks_failed_station_cuts']} ({baseline_stats['tracks_failed_station_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         print(f"  Tracks passing all cuts: {baseline_stats['tracks_passed_all_cuts']} ({baseline_stats['tracks_passed_all_cuts']/baseline_stats['total_tracks_checked']*100:.1f}%)")
         
@@ -660,7 +660,7 @@ class Task2TrackValidityEvaluator:
             f.write(f"Total tracks checked: {baseline_stats.get('total_tracks_checked', 0):,}\n")
             f.write(f"Failed minimum hits (>=9): {baseline_stats.get('tracks_failed_min_hits', 0):,}\n")
             f.write(f"Failed eta cuts (0.1 <= |eta| <= 2.7): {baseline_stats.get('tracks_failed_eta_cuts', 0):,}\n")
-            f.write(f"Failed pt cuts (pt >= 3.0 GeV): {baseline_stats.get('tracks_failed_pt_cuts', 0):,}\n")
+            f.write(f"Failed pt cuts (pt >= 5.0 GeV): {baseline_stats.get('tracks_failed_pt_cuts', 0):,}\n")
             f.write(f"Failed station cuts: {baseline_stats.get('tracks_failed_station_cuts', 0):,}\n")
             f.write(f"Tracks passing all cuts: {baseline_stats.get('tracks_passed_all_cuts', 0):,}\n\n")
             

@@ -6,9 +6,9 @@ name: Mamba-Track-Regression
 
 data:
   # Use the same data directories as the tracking task
-  train_dir: /scratch/ml_validation_data_144000_hdf5
-  val_dir: /scratch/ml_validation_data_144000_hdf5
-  test_dir: /scratch/ml_test_data_156000_hdf5
+  train_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+  val_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
   # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
   # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
   # test_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
@@ -57,33 +57,33 @@ data:
   # Required for base dataset compatibility
   inputs:
     hit:
-      - spacePoint_globEdgeHighX
-      - spacePoint_globEdgeHighY
-      - spacePoint_globEdgeHighZ
-      - spacePoint_globEdgeLowX
-      - spacePoint_globEdgeLowY
-      - spacePoint_globEdgeLowZ
-      - spacePoint_globPosX
-      - spacePoint_globPosY
-      - spacePoint_globPosZ
-      - spacePoint_driftR
-      - spacePoint_time
-      - spacePoint_channel
-      - spacePoint_layer
-      - spacePoint_stationPhi
-      - spacePoint_stationEta
-      - spacePoint_stationIndex
-      - spacePoint_technology
-      - spacePoint_covXX
-      - spacePoint_covXY
-      - spacePoint_covYX
-      - spacePoint_covYY
-      - tube_length
-      - r
-      - s
-      - theta
-      - phi
-      - eta
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
 
   targets:
     particle:
@@ -180,3 +180,9 @@ model:
         - eta
         - phi
         - pt
+      
+
+      use_delta_prediction: true
+      delta_reference: "innermost"  # Use innermost hit (position 1, after CLS token)
+      phi_feature_idx: 25           # Index of phi in hit_fields (0-indexed)
+      eta_feature_idx: 26           # Index of eta in hit_fields (0-indexed)

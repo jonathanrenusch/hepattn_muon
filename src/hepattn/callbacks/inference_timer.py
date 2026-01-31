@@ -23,7 +23,9 @@ class InferenceTimer(Callback):
         self.old_forward = model.forward
 
         def new_forward(*args, **kwargs):
-            self._tmp_dims = sum(v.shape[1] for v in args[0].values())
+            # Sum shape[1] (sequence dimension) for tensors with 2+ dimensions
+            # Skip 1D tensors like sequence_lengths
+            self._tmp_dims = sum(v.shape[1] for v in args[0].values() if v.ndim >= 2)
             with cuda_timer(self.times):
                 return self.old_forward(*args, **kwargs)
 
