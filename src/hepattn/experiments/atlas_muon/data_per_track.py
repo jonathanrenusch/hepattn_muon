@@ -100,13 +100,17 @@ class PerTrackAtlasMuonDataset(Dataset):
         else:
             print(f"No cached track index found, building...")
             self._build_track_index()
-            # Save to cache
+            # Save to cache (track_index is list of 4-tuples: event_idx, particle_idx, pid, num_tracks)
             track_index_array = np.array(self.track_index, dtype=np.int64)
             np.save(cache_file, track_index_array)
             print(f"Saved track index to {cache_file}")
         
     def _build_track_index(self):
-        """Build an index mapping track_idx -> (event_idx, particle_idx)."""
+        """Build an index mapping track_idx -> (event_idx, particle_idx, particle_id, num_tracks).
+        
+        Only counts hits within the valid range [0:num_hits] to avoid counting padding.
+        Stores num_tracks to validate particle_idx is still valid when retrieving.
+        """
         self.track_index = []
         
         print("Building per-track index...")
@@ -114,14 +118,20 @@ class PerTrackAtlasMuonDataset(Dataset):
             # Load event to get track info
             hits, particles, num_hits, num_tracks = self.base_dataset.load_event(event_idx)
             
-            # Count hits per track
-            truth_links = hits['spacePoint_truthLink']
-            particle_ids = particles['particle_id']
+            # Only consider valid hits (not padding) - use num_hits to slice
+            truth_links = hits['spacePoint_truthLink'][:num_hits]  # Only valid hits
+            particle_ids = particles['particle_id'][:num_tracks]  # Only valid particles
+            
+            # Validate we have valid data
+            if num_tracks == 0:
+                continue
             
             for particle_idx, pid in enumerate(particle_ids):
+                # Count hits belonging to this particle (within valid range only)
                 num_track_hits = np.sum(truth_links == pid)
                 if num_track_hits >= self.min_hits_per_track:
-                    self.track_index.append((event_idx, particle_idx, pid))
+                    # Store event_idx, particle_idx, particle_id, and num_tracks for validation
+                    self.track_index.append((event_idx, particle_idx, pid, num_tracks))
         
         print(f"Found {len(self.track_index):,} tracks with >= {self.min_hits_per_track} hits")
     
@@ -142,24 +152,60 @@ class PerTrackAtlasMuonDataset(Dataset):
             - pt: float, true pT (normalized)
             - charge: float, true charge (-1 or 1)
         """
-        event_idx, particle_idx, particle_id = self.track_index[idx]
+        # Unpack index - handle both old (3-tuple) and new (4-tuple) formats for backward compatibility
+        track_info = self.track_index[idx]
+        if len(track_info) == 4:
+            event_idx, particle_idx, particle_id, expected_num_tracks = track_info
+        else:
+            # Old format - no validation possible
+            event_idx, particle_idx, particle_id = track_info
+            expected_num_tracks = None
         
         # Load the event
         hits, particles, num_hits, num_tracks = self.base_dataset.load_event(event_idx)
         
-        # Get hits belonging to this track
-        truth_links = hits['spacePoint_truthLink']
+        # Validate particle_idx is within bounds
+        if particle_idx >= num_tracks:
+            raise ValueError(
+                f"Track index corrupt: particle_idx={particle_idx} >= num_tracks={num_tracks} "
+                f"for event {event_idx}. Index may be stale or built with different data."
+            )
+        
+        # Validate num_tracks matches if we have that info
+        if expected_num_tracks is not None and num_tracks != expected_num_tracks:
+            raise ValueError(
+                f"Track index corrupt: num_tracks changed from {expected_num_tracks} to {num_tracks} "
+                f"for event {event_idx}. Rebuild the track index."
+            )
+        
+        # Get hits belonging to this track - ONLY consider valid hits (not padding)
+        truth_links = hits['spacePoint_truthLink'][:num_hits]  # Only valid hits
         hit_mask = truth_links == particle_id
         
         # Extract hit features for this track
+        # Apply mask to get indices of hits belonging to this track
+        hit_indices = np.where(hit_mask)[0]
+        
+        # Build track_hits dictionary with only valid, non-padded hit data
         track_hits = {}
         for field in self.hit_fields:
             if field in hits:
-                track_hits[field] = hits[field][hit_mask]
+                # Only take valid hits - apply mask within valid range
+                track_hits[field] = hits[field][:num_hits][hit_mask]
         
         # Get radial distance for sorting
+        if 'r' not in track_hits:
+            raise ValueError(f"Missing 'r' field in hit data for track {idx}")
+        
         r_values = track_hits['r']
         num_track_hits = len(r_values)
+        
+        # Sanity check: we should have found hits for this track
+        if num_track_hits == 0:
+            raise ValueError(
+                f"No hits found for track {idx} (particle_id={particle_id}, event={event_idx}). "
+                f"Index may be corrupt. Rebuild track index."
+            )
         
         # Stack hit features into tensor
         feature_list = []
@@ -185,6 +231,7 @@ class PerTrackAtlasMuonDataset(Dataset):
             'charge': torch.tensor(charge, dtype=torch.float32),
             'event_idx': event_idx,
             'particle_idx': particle_idx,
+            'track_idx': idx,  # Global track index for sample_id in PredictionWriter
         }
 
 
@@ -272,6 +319,13 @@ class PerTrackCollator:
             # Convert charge: -1 -> 0, +1 -> 1 for BCE
             charge[i] = (item['charge'] + 1) / 2
         
+        # Build sample_id tensor - each track needs a unique ID across the dataset
+        # Use the track's global index as sample_id (passed from __getitem__)
+        sample_ids = torch.tensor([item.get('track_idx', i) for i, item in enumerate(batch)], dtype=torch.int64)
+        
+        # Build num_hits tensor for filtering during evaluation
+        num_hits_tensor = torch.tensor([min(item['num_hits'], self.max_hits) for item in batch], dtype=torch.int64)
+        
         inputs = {
             'hit_features': hit_features,
             'hit_mask': hit_mask,
@@ -284,6 +338,8 @@ class PerTrackCollator:
             'pt': pt,
             'charge': charge,
             'charge_original': charge_original,
+            'sample_id': sample_ids,  # Required by PredictionWriter
+            'num_hits': num_hits_tensor,  # Required for evaluation filtering
         }
         
         return inputs, targets

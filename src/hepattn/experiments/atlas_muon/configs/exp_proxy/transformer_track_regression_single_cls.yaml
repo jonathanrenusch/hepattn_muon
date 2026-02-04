@@ -1,0 +1,179 @@
+seed_everything: 42
+name: Transformer-Track-Regression-Single-CLS
+
+# EXPERIMENT: Transformer baseline (single CLS token)
+# This is a parameter-matched Transformer baseline for comparison with Mamba.
+# Uses hybrid mode (delta-eta + sin/cos phi) like the best Mamba config.
+#
+# Target parameter count: ~0.5M (matching Mamba baseline)
+# Architecture: Transformer encoder with pre-norm and self-attention
+
+data:
+  # Use the same data directories as the tracking task
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 512
+
+  # Per-track data loading parameters
+  min_hits_per_track: 2
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+     
+  # Hit features to use (27 features)
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  # Required for base dataset compatibility
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 200
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [1]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: transformer_track_regression
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 5
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 40
+        min_delta: 0.0
+        mode: min
+        verbose: true
+
+model:
+  optimizer: Lion
+  
+  lrs_config:
+    initial: 2e-5
+    max: 1e-4
+    end: 1e-6
+    pct_start: 0.05
+    weight_decay: 1e-5
+
+  # Loss weighting - default (no special weighting)
+  regression_weight: 1.0
+  classification_weight: 1.0
+  
+  regression_fields:
+    - eta
+    - phi
+    - pt
+
+  model:
+    class_path: hepattn.models.transformer_regressor.TransformerTrackRegressor
+    init_args:
+      input_dim: 27
+      dim: 128
+      num_layers: 3
+      num_heads: 8
+      attn_type: torch
+      dense_hidden_scale: 2
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.1
+      head_hidden_dim: 256
+      
+      regression_fields:
+        - eta
+        - phi
+        - pt
+      
+      # HYBRID MODE: delta for eta, sin/cos for phi
+      use_delta_prediction: true
+      use_delta_phi: false          # Use sin/cos for phi instead of delta
+      delta_reference: "innermost"
+      phi_feature_idx: 25
+      eta_feature_idx: 26
+      
+      # Single CLS mode
+      use_multi_cls: false

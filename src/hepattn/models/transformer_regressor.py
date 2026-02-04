@@ -1,19 +1,21 @@
-"""Mamba-based track parameter regression model.
+"""Transformer-based track parameter regression model.
 
-This module provides a bidirectional Mamba model for track parameter regression
-using ground truth hit-to-track assignments. It reuses the existing
-BidirectionalMambaEncoder from hepattn.models.mamba.
+This module provides a Transformer encoder model for track parameter regression
+using ground truth hit-to-track assignments. It serves as a baseline to compare
+against the bidirectional Mamba model.
 
 The model:
 1. Projects hit features to model dimension
 2. Adds a learnable CLS token at the start of each sequence
-3. Processes through bidirectional Mamba encoder
+3. Processes through Transformer encoder (self-attention + FFN layers)
 4. Uses CLS token output for regression (eta, phi, pt) and classification (charge)
 
 Delta prediction mode (optional):
 - Instead of predicting absolute eta/phi, predict deltas from innermost hit
 - This provides easier training targets, especially for phi (avoids periodicity issues)
 - Final predictions are: ref_value + delta
+
+This is designed to be a parameter-count-matched baseline for MambaTrackRegressor.
 """
 
 import math
@@ -21,14 +23,13 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from hepattn.models.mamba import BidirectionalMambaEncoder
-from hepattn.models.activation import SwiGLU
+from hepattn.models.transformer import Encoder
 
 
-class MambaTrackRegressor(nn.Module):
-    """Bidirectional Mamba model for track parameter regression.
+class TransformerTrackRegressor(nn.Module):
+    """Transformer encoder model for track parameter regression.
     
-    Uses the existing BidirectionalMambaEncoder for sequence processing,
+    Uses the existing Transformer Encoder for sequence processing,
     with a CLS token for aggregating track information.
     
     The model outputs physics-informed representations:
@@ -41,10 +42,6 @@ class MambaTrackRegressor(nn.Module):
     - Much simpler training target for phi (no periodicity handling needed)
     - Final output: ref_value + delta
     
-    Single-task mode (single_task='eta'/'phi'/'pt'/'charge'):
-    - Train only one task at a time, no gradient interference
-    - Useful for diagnosing per-task performance limits
-    
     Parameters
     ----------
     input_dim : int
@@ -52,21 +49,17 @@ class MambaTrackRegressor(nn.Module):
     dim : int
         Model embedding dimension.
     num_layers : int
-        Number of bidirectional Mamba layers.
-    d_state : int
-        SSM state expansion factor.
-    d_conv : int
-        Local convolution width.
-    expand : int
-        Block expansion factor.
-    use_mamba2 : bool
-        Whether to use Mamba-2 architecture.
-    headdim : int
-        Head dimension for Mamba-2.
+        Number of Transformer encoder layers.
+    num_heads : int
+        Number of attention heads.
+    attn_type : str
+        Attention type: "torch", "flash", or "flex".
+    dense_hidden_scale : int
+        Scale factor for FFN hidden dimension (hidden_dim = dim * scale).
     norm : str
         Normalization type ('LayerNorm' or 'RMSNorm').
     dropout : float
-        Dropout rate for Mamba encoder (typically 0.0 for SSMs).
+        Dropout rate for Transformer encoder.
     head_dropout : float
         Dropout rate for MLP regression/classification heads.
     head_hidden_dim : int
@@ -89,10 +82,6 @@ class MambaTrackRegressor(nn.Module):
         If True, use 4 separate CLS tokens (one per task: eta, phi, pt, charge).
         Each task gets its own dedicated CLS token and MLP head.
         Default: False (single shared CLS token).
-    single_task : str or None
-        If set to 'eta', 'phi', 'pt', or 'charge', only train that single task.
-        The model will only create and use the head for that task.
-        Default: None (train all tasks).
     """
     
     def __init__(
@@ -100,11 +89,9 @@ class MambaTrackRegressor(nn.Module):
         input_dim: int = 18,
         dim: int = 64,
         num_layers: int = 2,
-        d_state: int = 16,
-        d_conv: int = 4,
-        expand: int = 2,
-        use_mamba2: bool = True,
-        headdim: int = 16,
+        num_heads: int = 4,
+        attn_type: str = "torch",
+        dense_hidden_scale: int = 2,
         norm: str = "RMSNorm",
         dropout: float = 0.0,
         head_dropout: float = 0.2,
@@ -116,20 +103,13 @@ class MambaTrackRegressor(nn.Module):
         eta_feature_idx: int = 17,
         phi_feature_idx: int = 16,
         use_multi_cls: bool = False,  # If True, use 4 separate CLS tokens
-        single_task: str | None = None,  # 'eta', 'phi', 'pt', 'charge', or None for all
     ):
         super().__init__()
         
         self.dim = dim
+        self.num_heads = num_heads
         self.regression_fields = regression_fields or ['eta', 'phi', 'pt']
         self.use_multi_cls = use_multi_cls
-        self.single_task = single_task
-        
-        # Validate single_task
-        if single_task is not None:
-            valid_tasks = ['eta', 'phi', 'pt', 'charge']
-            if single_task not in valid_tasks:
-                raise ValueError(f"single_task must be one of {valid_tasks}, got '{single_task}'")
         
         # Delta prediction configuration
         self.use_delta_prediction = use_delta_prediction
@@ -182,24 +162,29 @@ class MambaTrackRegressor(nn.Module):
         self.pos_embedding = nn.Parameter(torch.zeros(1, self.max_seq_len, dim))
         nn.init.trunc_normal_(self.pos_embedding, std=0.02)
         
-        # Bidirectional Mamba encoder (reuses existing implementation)
-        self.encoder = BidirectionalMambaEncoder(
+        # Transformer encoder (reuses existing implementation)
+        # Note: Dense layer uses SwiGLU by default with hidden_dim = dim * hidden_scale
+        dense_kwargs = {
+            "hidden_dim_scale": dense_hidden_scale,
+            "dropout": dropout,
+        }
+        attn_kwargs = {
+            "num_heads": num_heads,
+            "attn_type": attn_type,
+        }
+        
+        self.encoder = Encoder(
             num_layers=num_layers,
             dim=dim,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand,
-            use_mamba2=use_mamba2,
-            headdim=headdim,
+            attn_type=attn_type,
             norm=norm,
-            dropout=dropout,
+            dense_kwargs=dense_kwargs,
+            attn_kwargs=attn_kwargs,
         )
         
         # Task heads - either shared or separate per task
-        # In single_task mode, we still create all heads for forward compatibility,
-        # but only the active task's head will receive gradients during training.
-        if use_multi_cls or single_task is not None:
-            # Separate heads for each task (or single task)
+        if use_multi_cls:
+            # Separate heads for each task
             # Each head: dim -> head_hidden_dim -> output_dim
             
             # Eta head: outputs 1 value (eta or delta_eta)
@@ -233,9 +218,6 @@ class MambaTrackRegressor(nn.Module):
                 nn.Dropout(head_dropout),
                 nn.Linear(head_hidden_dim, 1),
             )
-            
-            # Mark this model as using separate heads (for forward logic)
-            self._use_separate_heads = True
         else:
             # Shared regression head: single hidden layer with GELU
             self.regression_head = nn.Sequential(
@@ -252,15 +234,13 @@ class MambaTrackRegressor(nn.Module):
                 nn.Dropout(head_dropout),
                 nn.Linear(head_hidden_dim, 1),
             )
-            
-            self._use_separate_heads = False
         
         # Initialize weights
         self._init_weights()
     
     def _init_weights(self):
         """Initialize weights with small values for stability."""
-        if self._use_separate_heads:
+        if self.use_multi_cls:
             heads = [self.eta_head, self.phi_head, self.pt_head, self.charge_head]
         else:
             heads = [self.regression_head, self.classification_head]
@@ -297,19 +277,16 @@ class MambaTrackRegressor(nn.Module):
         """
         hit_features = inputs['hit_features']
         hit_mask = inputs['hit_mask']
-        # sequence_lengths = inputs.get('sequence_lengths')  # Currently unused
         
         B, seq_len, _ = hit_features.shape
         
         # Extract reference values for delta prediction BEFORE modifying hit_features
-        # For multi-CLS, hits start at position num_cls_tokens instead of 1
         hit_start_idx = self.num_cls_tokens
         ref_eta = None
         ref_phi = None
         if self.use_delta_prediction:
             if self.delta_reference == "innermost":
                 # Hits are sorted by r ascending with CLS at position(s) 0(-3)
-                # First hit is at position hit_start_idx
                 ref_eta = hit_features[:, hit_start_idx, self.eta_feature_idx]  # (B,)
                 ref_phi = hit_features[:, hit_start_idx, self.phi_feature_idx]  # (B,)
             elif self.delta_reference == "average":
@@ -329,7 +306,6 @@ class MambaTrackRegressor(nn.Module):
         
         if self.use_multi_cls:
             # Multi-CLS mode: Replace positions 0-3 with 4 separate CLS tokens
-            # CLS tokens: [CLS_eta, CLS_phi, CLS_pt, CLS_charge]
             cls_tokens = self.cls_tokens.expand(B, -1, -1)  # (B, 4, dim)
             x = torch.cat([cls_tokens, x[:, self.num_cls_tokens:]], dim=1)  # (B, seq_len, dim)
         else:
@@ -350,13 +326,12 @@ class MambaTrackRegressor(nn.Module):
             ).permute(0, 2, 1)
             x = x + pos_embed
         
-        # Apply mask by zeroing out invalid positions
-        # (Mamba doesn't use attention masks, but we zero out padded positions)
-        x = x * hit_mask.unsqueeze(-1).float()
+        # Pass padding mask via q_mask/kv_mask parameters
+        # The Attention layer merges these with any explicit attn_mask
+        # True values indicate valid positions (not masked out)
         
-        # Process through bidirectional Mamba encoder
-        # Note: We don't use x_sort_value since hits are already sorted by r
-        x = self.encoder(x)  # (B, seq_len, dim)
+        # Process through Transformer encoder with padding masks
+        x = self.encoder(x, q_mask=hit_mask, kv_mask=hit_mask)  # (B, seq_len, dim)
         
         if self.use_multi_cls:
             # Extract 4 separate CLS token representations
@@ -371,195 +346,103 @@ class MambaTrackRegressor(nn.Module):
             pt_output = self.pt_head(cls_pt)           # (B, 1)
             charge_logit = self.charge_head(cls_charge)  # (B, 1)
             
-            # Concatenate regression outputs in the expected order
-            # Order depends on mode: [eta, phi_outputs..., log_pt]
-            regression_output = torch.cat([eta_output, phi_output, pt_output], dim=1)
+            # Concatenate regression outputs: [eta, phi..., pt]
+            regression = torch.cat([eta_output, phi_output, pt_output], dim=-1)  # (B, 3) or (B, 4)
             
-            result = {
-                'regression': regression_output,
-                'charge_logit': charge_logit.squeeze(-1),
-                'cls_embedding': x[:, :4],  # All 4 CLS embeddings (B, 4, dim)
-            }
-        elif self.single_task is not None:
-            # Single-task mode with separate heads but shared CLS token
-            cls_output = x[:, 0]  # (B, dim)
-            
-            # Apply all heads (for forward compatibility) but only active task gets gradients
-            eta_output = self.eta_head(cls_output)        # (B, 1)
-            phi_output = self.phi_head(cls_output)        # (B, 1) or (B, 2)
-            pt_output = self.pt_head(cls_output)          # (B, 1)
-            charge_logit = self.charge_head(cls_output)   # (B, 1)
-            
-            # Concatenate regression outputs in the expected order
-            regression_output = torch.cat([eta_output, phi_output, pt_output], dim=1)
-            
-            result = {
-                'regression': regression_output,
-                'charge_logit': charge_logit.squeeze(-1),
-                'cls_embedding': cls_output,
-                'single_task': self.single_task,  # Pass task info to loss function
-            }
+            # Stack CLS embeddings for analysis
+            cls_embedding = torch.stack([cls_eta, cls_phi, cls_pt, cls_charge], dim=1)  # (B, 4, dim)
         else:
-            # Single CLS mode: Extract CLS token representation (position 0)
-            cls_output = x[:, 0]  # (B, dim)
+            # Extract CLS token output (position 0)
+            cls_embedding = x[:, 0]  # (B, dim)
             
-            # Regression predictions
-            regression_output = self.regression_head(cls_output)  # (B, num_regression_outputs)
-            
-            # Classification prediction (charge)
-            charge_logit = self.classification_head(cls_output)  # (B, 1)
-            
-            result = {
-                'regression': regression_output,
-                'charge_logit': charge_logit.squeeze(-1),
-                'cls_embedding': cls_output,
-            }
+            # Apply heads
+            regression = self.regression_head(cls_embedding)  # (B, num_regression_outputs)
+            charge_logit = self.classification_head(cls_embedding)  # (B, 1)
         
-        # Add reference values for delta prediction mode
+        outputs = {
+            'regression': regression,
+            'charge_logit': charge_logit,
+            'cls_embedding': cls_embedding,
+        }
+        
+        # Include reference values for delta computation during loss
         if self.use_delta_prediction:
-            result['ref_eta'] = ref_eta
-            result['ref_phi'] = ref_phi
+            outputs['ref_eta'] = ref_eta
+            outputs['ref_phi'] = ref_phi
         
-        return result
+        return outputs
     
     def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
         """Convert model outputs to physics predictions.
         
-        Three modes supported:
-        
-        1. Standard mode (use_delta_prediction=False):
-           - Model outputs [eta, sin_phi, cos_phi, log_pt]
-           - Recovers phi from sin/cos using atan2
-        
-        2. Full delta mode (use_delta_prediction=True, use_delta_phi=True):
-           - Model outputs [delta_eta, delta_phi, log_pt]
-           - Final eta = ref_eta + delta_eta
-           - Final phi = ref_phi + delta_phi (wrapped to [-π, π])
-        
-        3. Hybrid mode (use_delta_prediction=True, use_delta_phi=False):
-           - Model outputs [delta_eta, sin_phi, cos_phi, log_pt]
-           - Final eta = ref_eta + delta_eta
-           - Recovers phi from sin/cos using atan2
+        Handles the conversion from internal representation to physical quantities:
+        - Standard mode: eta, phi (from sin/cos), pt (from log)
+        - Delta mode: eta = ref + delta, phi = ref + delta, pt (from log)
+        - Hybrid mode: eta = ref + delta, phi (from sin/cos), pt (from log)
         
         Parameters
         ----------
         outputs : dict
-            Model outputs from forward pass.
+            Model forward outputs.
             
         Returns
         -------
         dict with keys:
-            - eta: (B,) eta predictions
-            - phi: (B,) phi predictions
-            - pt: (B,) pt predictions
-            - sin_phi, cos_phi: (B,) raw network outputs (standard/hybrid mode)
-            - delta_eta: (B,) eta delta (delta/hybrid mode)
-            - delta_phi: (B,) phi delta (full delta mode only)
-            - ref_eta, ref_phi: (B,) reference values (delta/hybrid mode)
-            - charge_prob: (B,) probability of positive charge
-            - charge: (B,) predicted charge (-1 or 1)
+            - eta: (B,) predicted eta values
+            - phi: (B,) predicted phi values in [-pi, pi]
+            - pt: (B,) predicted transverse momentum
+            - charge: (B,) predicted charge (-1 or +1)
         """
         regression = outputs['regression']
         charge_logit = outputs['charge_logit']
         
-        # Charge predictions (common to all modes)
-        charge_prob = torch.sigmoid(charge_logit)
-        charge_pred = torch.where(charge_prob > 0.5, 
-                                   torch.ones_like(charge_prob),
-                                   -torch.ones_like(charge_prob))
-        
+        # Extract components based on mode
         if self.use_delta_prediction:
-            ref_eta = outputs['ref_eta']
-            ref_phi = outputs['ref_phi']
-            
             if self.use_delta_phi:
                 # Full delta mode: [delta_eta, delta_phi, log_pt]
                 delta_eta = regression[:, 0]
                 delta_phi = regression[:, 1]
-                log_pt_pred = regression[:, 2]
+                log_pt = regression[:, 2]
                 
-                # Recover final values: reference + delta
-                eta_pred = ref_eta + delta_eta
-                phi_pred_raw = ref_phi + delta_phi
-                
-                # Wrap phi to [-π, π]
-                phi_pred = torch.atan2(torch.sin(phi_pred_raw), torch.cos(phi_pred_raw))
-                
-                # Recover pt from log
-                pt_pred = torch.exp(log_pt_pred)
-                
-                return {
-                    # Recovered physics values (for evaluation)
-                    'eta': eta_pred,
-                    'phi': phi_pred,
-                    'pt': pt_pred,
-                    # Raw deltas (for debugging/analysis)
-                    'delta_eta': delta_eta,
-                    'delta_phi': delta_phi,
-                    'log_pt': log_pt_pred,
-                    # Reference values
-                    'ref_eta': ref_eta,
-                    'ref_phi': ref_phi,
-                    # Charge predictions
-                    'charge_prob': charge_prob,
-                    'charge': charge_pred,
-                }
+                # Reconstruct absolute values
+                ref_eta = outputs['ref_eta']
+                ref_phi = outputs['ref_phi']
+                eta = ref_eta + delta_eta
+                phi = ref_phi + delta_phi
+                # Normalize phi to [-pi, pi]
+                phi = torch.atan2(torch.sin(phi), torch.cos(phi))
             else:
                 # Hybrid mode: [delta_eta, sin_phi, cos_phi, log_pt]
                 delta_eta = regression[:, 0]
-                sin_phi_pred = regression[:, 1]
-                cos_phi_pred = regression[:, 2]
-                log_pt_pred = regression[:, 3]
+                sin_phi = regression[:, 1]
+                cos_phi = regression[:, 2]
+                log_pt = regression[:, 3]
                 
-                # Recover eta: reference + delta
-                eta_pred = ref_eta + delta_eta
+                # Reconstruct eta
+                ref_eta = outputs['ref_eta']
+                eta = ref_eta + delta_eta
                 
-                # Recover phi from sin/cos (standard approach)
-                phi_pred = torch.atan2(sin_phi_pred, cos_phi_pred)
-                
-                # Recover pt from log
-                pt_pred = torch.exp(log_pt_pred)
-                
-                return {
-                    # Recovered physics values
-                    'eta': eta_pred,
-                    'phi': phi_pred,
-                    'pt': pt_pred,
-                    # Raw network outputs (for debugging/analysis)
-                    'delta_eta': delta_eta,
-                    'sin_phi': sin_phi_pred,
-                    'cos_phi': cos_phi_pred,
-                    'log_pt': log_pt_pred,
-                    # Reference values
-                    'ref_eta': ref_eta,
-                    'ref_phi': ref_phi,
-                    # Charge predictions
-                    'charge_prob': charge_prob,
-                    'charge': charge_pred,
-                }
+                # phi from sin/cos (ignores ref_phi)
+                phi = torch.atan2(sin_phi, cos_phi)
         else:
             # Standard mode: [eta, sin_phi, cos_phi, log_pt]
-            eta_pred = regression[:, 0]
-            sin_phi_pred = regression[:, 1]
-            cos_phi_pred = regression[:, 2]
-            log_pt_pred = regression[:, 3]
+            eta = regression[:, 0]
+            sin_phi = regression[:, 1]
+            cos_phi = regression[:, 2]
+            log_pt = regression[:, 3]
             
-            # Recover phi from sin/cos (NOT normalized - use raw predictions)
-            phi_pred = torch.atan2(sin_phi_pred, cos_phi_pred)
-            
-            # Recover pt from log
-            pt_pred = torch.exp(log_pt_pred)
-            
-            return {
-                # Recovered physics values
-                'eta': eta_pred,
-                'phi': phi_pred,
-                'pt': pt_pred,
-                # Raw network outputs (for debugging/analysis)
-                'sin_phi': sin_phi_pred,
-                'cos_phi': cos_phi_pred,
-                'log_pt': log_pt_pred,
-                # Charge predictions
-                'charge_prob': charge_prob,
-                'charge': charge_pred,
-            }
+            # Reconstruct phi
+            phi = torch.atan2(sin_phi, cos_phi)
+        
+        # Reconstruct pt from log_pt
+        pt = torch.exp(log_pt)
+        
+        # Charge prediction from logit
+        charge = torch.where(charge_logit[:, 0] > 0, 1.0, -1.0)
+        
+        return {
+            'eta': eta,
+            'phi': phi,
+            'pt': pt,
+            'charge': charge,
+        }

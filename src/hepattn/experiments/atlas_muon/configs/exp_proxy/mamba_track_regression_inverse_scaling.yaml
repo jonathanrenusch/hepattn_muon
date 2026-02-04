@@ -1,0 +1,182 @@
+seed_everything: 42
+name: Mamba-Track-Regression-Inverse-Scaling
+
+# EXPERIMENT: Inverse magnitude scaling for loss weights
+# Scales each loss term by the inverse of its typical magnitude
+# This balances gradient contributions across all targets
+
+data:
+  # Use the same data directories as the tracking task
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 512
+
+  # Per-track data loading parameters
+  min_hits_per_track: 2
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+     
+  # Hit features to use (27 features)
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  # Required for base dataset compatibility
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 200
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [0]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: mamba_track_regression
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 5
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 40
+        min_delta: 0.0
+        mode: min
+        verbose: true
+
+model:
+  optimizer: Lion
+  
+  lrs_config:
+    initial: 2e-5
+    max: 1e-4
+    end: 1e-6
+    pct_start: 0.05
+    weight_decay: 1e-5
+
+  # Loss weighting
+  regression_weight: 1.0
+  classification_weight: 1.0
+  
+  # INVERSE MAGNITUDE SCALING
+  # Based on observed loss magnitudes: pT=0.03, phi=0.003, eta=0.0001
+  use_inverse_scaling: true
+  loss_scale_eta: 0.0001    # Typical eta loss magnitude
+  loss_scale_phi: 0.003     # Typical phi loss magnitude  
+  loss_scale_pt: 0.03       # Typical pT loss magnitude
+  
+  regression_fields:
+    - eta
+    - phi
+    - pt
+
+  model:
+    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    init_args:
+      input_dim: 27
+      dim: 128
+      num_layers: 2
+      d_state: 16
+      d_conv: 4
+      expand: 2
+      use_mamba2: true
+      headdim: 32
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.1
+      head_hidden_dim: 256
+      
+      regression_fields:
+        - eta
+        - phi
+        - pt
+      
+      # Keep delta mode for both eta and phi (original config)
+      use_delta_prediction: true
+      use_delta_phi: true           # Full delta mode
+      delta_reference: "innermost"
+      phi_feature_idx: 25
+      eta_feature_idx: 26

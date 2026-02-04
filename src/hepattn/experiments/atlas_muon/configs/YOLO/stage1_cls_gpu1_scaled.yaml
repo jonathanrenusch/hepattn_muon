@@ -1,30 +1,25 @@
-seed_everything: 42
-name: Mamba-Track-Regression
+# YOLO Stage 1: Classification Pretraining - GPU 1 (Medium Resolution)
+# PT: 100 bins, Eta/Phi: 2000 bins
+# Uses CLS token pooling
 
-# Mamba-based track parameter regression using ground truth hit-to-track assignments
-# This is a proof-of-concept for using bidirectional Mamba for track fitting
+seed_everything: 42
+name: YOLO-Stage1-Classification-PrelimBest-GPU1
 
 data:
-  # Use the same data directories as the tracking task
-  train_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
-  val_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
   test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
-  # train_dir: /scratch/ml_training_data_2694000_hdf5_filtered_wp0990_maxtrk2_maxhit600
-  # val_dir: /scratch/ml_validation_data_144000_hdf5_filtered_wp0990_maxtrk2_maxhit600
-  # test_dir: /scratch/ml_test_data_156000_hdf5_filtered_wp0990_maxtrk2_maxhit600
 
   num_workers: 24
-  num_train: -1  # Start with subset for quick iteration
+  num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 512  # Per-track batching allows larger batches
+  batch_size: 1024
 
-  # Per-track data loading parameters
   min_hits_per_track: 2
   max_hits_per_track: 200
   event_max_num_particles: 10
-
-  # Hit features to use (18 features)
+     
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -54,7 +49,6 @@ data:
     - phi
     - eta
 
-  # Required for base dataset compatibility
   inputs:
     hit:
     - spacePoint_globEdgeHighX
@@ -96,17 +90,17 @@ trainer:
   max_epochs: 200
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0]
+  devices: [1]
   precision: bf16-mixed
   log_every_n_steps: 50
-  default_root_dir: logs
+  default_root_dir: logs/YOLO
   gradient_clip_val: 1.0
   enable_progress_bar: true
 
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: mamba_track_regression
+      project_name: yolo_classification_stage1
 
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
@@ -115,7 +109,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 5
+        save_top_k: 20
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -130,59 +124,62 @@ trainer:
         verbose: true
 
 model:
-  optimizer: Lion
+  optimizer: AdamW
   
-  # Learning rate schedule
-
-
   lrs_config:
-    initial: 2e-5
-    max: 1e-4
+    initial: 1e-5
+    max: 5e-4
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Loss weighting
-  # Both regression and classification contribute roughly equally
-  regression_weight: 1.0
-  classification_weight: 1.0
+  # Bin configuration (medium)
+  # NOTE: eta has +1 bins due to gap handling in bin files
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: &eta_bins 2001  # File named eta_bins_2000 but has 2001 bins
+  phi_bins: &phi_bins 2000
+  pt_bins: &pt_bins 100
   
-  regression_fields:
-    - eta
-    - phi
-    - pt
+  # Loss weights
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 1.0
+  charge_loss_weight: 0.5
+  
+  # Focal loss gamma for pt
+  focal_gamma: 2.0
+  
+  # Clipping ranges
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
 
   model:
-    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
-      # Input dimension = number of hit features
-      input_dim: 27
-      
-      # Model dimension - minimum for Mamba2 CUDA alignment
-      dim: 128
-      
-      # Mamba encoder configuration - minimal for ~4x size reduction
-      num_layers: 2      # Single bidirectional layer
-      d_state: 16         # Reduced SSM state
-      d_conv: 4
-      expand: 2
+      dim: 256  # Increased from 128 for more capacity
+      num_layers: 4         
+      d_state: 64           
+      d_conv: 4             
+      expand: 2             
       use_mamba2: true
-      headdim: 32
-      # norm: LayerNorm
-      norm: RMSNorm
-      dropout: 0.0           # Mamba encoder dropout (typically 0 for SSMs)
-      head_dropout: 0.1      # MLP head dropout
-      
-      # Regression/classification head configuration
-      head_hidden_dim: 256
-      
-      regression_fields:
-        - eta
-        - phi
-        - pt
-      
+      headdim: 64           
+      norm: RMSNorm         
+      dropout: 0.0          
+      head_dropout: 0.15    
+      head_hidden_dim: 512
 
-      use_delta_prediction: true
-      delta_reference: "innermost"  # Use innermost hit (position 1, after CLS token)
-      phi_feature_idx: 25           # Index of phi in hit_fields (0-indexed)
-      eta_feature_idx: 26           # Index of eta in hit_fields (0-indexed)
+      
+      # Classification bins (must match training module)
+      eta_bins: *eta_bins  # File named eta_bins_2000 but has 2001 bins
+      phi_bins: *phi_bins
+      pt_bins: *pt_bins
+      
+      # Use CLS token
+      use_attention_pooling: false
+      
+      # Regression heads disabled for Stage 1
+      enable_regression_heads: false

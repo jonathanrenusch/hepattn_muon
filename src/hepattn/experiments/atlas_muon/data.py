@@ -238,9 +238,9 @@ class AtlasMuonDataset(Dataset):
             'spacePoint_globEdgeLowX': hits_dict['spacePoint_globEdgeLowX'] * 0.001,
             'spacePoint_globEdgeLowY': hits_dict['spacePoint_globEdgeLowY'] * 0.001,
             'spacePoint_globEdgeLowZ': hits_dict['spacePoint_globEdgeLowZ'] * 0.001,
-            # 'spacePoint_globPosX': hits_dict['spacePoint_globPosX'] * 0.001,
-            # 'spacePoint_globPosY': hits_dict['spacePoint_globPosY'] * 0.001,
-            # 'spacePoint_globPosZ': hits_dict['spacePoint_globPosZ'] * 0.001,
+            'spacePoint_globPosX': hits_dict['spacePoint_globPosX'] * 0.001,
+            'spacePoint_globPosY': hits_dict['spacePoint_globPosY'] * 0.001,
+            'spacePoint_globPosZ': hits_dict['spacePoint_globPosZ'] * 0.001,
             # 'spacePoint_time': hits_dict['spacePoint_time'] ,
             'spacePoint_time': hits_dict['spacePoint_time'] * 0.00001,
             'spacePoint_driftR': hits_dict['spacePoint_driftR'],
@@ -265,16 +265,16 @@ class AtlasMuonDataset(Dataset):
             'spacePoint_truthLink': hits_dict['spacePoint_truthLink'],
         }
         # Add derived hit fields (vectorized numpy operations)
-        hits["r"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2)
+        hits["r"] = np.sqrt(hits["spacePoint_globPosX"] ** 2 + hits["spacePoint_globPosY"] ** 2)
 
-        hits["s"] = np.sqrt(hits["spacePoint_globEdgeLowX"] ** 2 + hits["spacePoint_globEdgeLowY"] ** 2 + hits["spacePoint_globEdgeLowZ"] ** 2)
+        hits["s"] = np.sqrt(hits["spacePoint_globPosX"] ** 2 + hits["spacePoint_globPosY"] ** 2 + hits["spacePoint_globPosZ"] ** 2)
 
         # Data augmentation absolute length of tube: 
 
         hits["tube_length"] = np.sqrt((hits["spacePoint_globEdgeHighZ"] - hits["spacePoint_globEdgeLowZ"])**2 + (hits["spacePoint_globEdgeHighX"] - hits["spacePoint_globEdgeLowX"])**2 + (hits["spacePoint_globEdgeHighY"] - hits["spacePoint_globEdgeLowY"])**2 )
 
-        hits["theta"] = np.arccos(np.clip(hits["spacePoint_globEdgeLowZ"] / hits["s"], -1, 1))
-        hits["phi"] = np.arctan2(hits["spacePoint_globEdgeLowY"], hits["spacePoint_globEdgeLowX"])
+        hits["theta"] = np.arccos(np.clip(hits["spacePoint_globPosZ"] / hits["s"], -1, 1))
+        hits["phi"] = np.arctan2(hits["spacePoint_globPosY"], hits["spacePoint_globPosX"])
         
         # Add pseudorapidity (eta) derived from theta
         # eta = -ln(tan(theta/2))

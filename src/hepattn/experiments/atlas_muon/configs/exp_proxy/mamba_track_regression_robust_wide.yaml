@@ -1,0 +1,206 @@
+seed_everything: 123
+name: Mamba-Track-Regression-Robust-Wide
+
+# ============================================================================
+# ROBUST WIDE CONFIGURATION  
+# ============================================================================
+# Design Philosophy:
+# This config focuses on robustness and generalization by leveraging
+# physics-informed design choices and wider (rather than deeper) architecture:
+#
+# 1. AVERAGE DELTA REFERENCE: Unlike innermost-only, averaging over all hits
+#    provides a more robust reference that is less sensitive to:
+#    - Individual hit measurement errors (drift tube resolution ~80μm)
+#    - Hits near station boundaries
+#    - Occasional noisy or mis-associated hits
+#    This is similar to how traditional track fitting uses χ² minimization.
+#
+# 2. WIDE BUT SHALLOW (dim=256, 3 layers): Research shows that wider networks
+#    often generalize better than deeper ones. The muon spectrometer geometry
+#    is relatively simple (radial layers), so extreme depth isn't needed.
+#
+# 3. HIGHER EXPAND FACTOR (3): This increases the inner MLP width in Mamba
+#    blocks, allowing more feature mixing. Important for combining spatial
+#    and timing information from drift tubes.
+#
+# 4. SMALLER d_state (32): A moderate state size with wider network often
+#    works better than large state with narrow network.
+#
+# 5. LABEL SMOOTHING VIA HIGHER HEAD DROPOUT: Helps prevent overconfident
+#    predictions, especially for charge classification.
+#
+# 6. COSINE ANNEALING: Better exploration of loss landscape for regression.
+# ============================================================================
+
+data:
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 512  # Larger batch for better gradient estimates
+
+  # Per-track data loading parameters
+  min_hits_per_track: 2  # Accept 2+ hits (some tracks only traverse 2 stations)
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+
+  # Complete hit features (27 features)
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 250
+  num_sanity_val_steps: 2
+  accelerator: gpu
+  devices: [3]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: mamba_track_regression
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 5
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    # - class_path: lightning.pytorch.callbacks.EarlyStopping
+    #   init_args:
+    #     monitor: val/loss
+    #     patience: 25
+    #     min_delta: 0.0
+    #     mode: min
+    #     verbose: true
+
+model:
+  optimizer: Lion  # Lion works well with wider architectures
+  
+  lrs_config:
+    initial: 5e-5      # Moderate starting LR
+    max: 2e-4          # Higher peak for wider network (more params to update)
+    end: 5e-7          # Low final LR
+    pct_start: 0.08    # 8% warmup
+    weight_decay: 5e-5 # Moderate regularization
+
+  # Balanced loss weighting
+  regression_weight: 1.0
+  classification_weight: 1.0
+  
+  regression_fields:
+    - eta
+    - phi
+    - pt
+
+  model:
+    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    init_args:
+      input_dim: 27
+      
+      # Wide model dimension
+      dim: 512  # Wider than baseline (128) and precision (192)
+      
+      # Mamba-2 encoder configuration - wide and robust
+      num_layers: 3         # Moderate depth, width compensates
+      d_state: 32           # Moderate state size
+      d_conv: 4             # Standard convolution
+      expand: 3             # Higher expansion for better feature mixing!
+      use_mamba2: true
+      headdim: 64           # Larger head dimension for 256-dim model
+      norm: RMSNorm
+      dropout: 0.0          # No dropout in SSM
+      head_dropout: 0.2     # Higher dropout in head for regularization
+      
+      # Wider regression head
+      head_hidden_dim: 4096  # Larger head for wide model
+      
+      regression_fields:
+        - eta
+        - phi
+        - pt
+      
+     # HYBRID MODE: delta for eta, sin/cos for phi
+      use_delta_prediction: true
+      use_delta_phi: false          # KEY: Use sin/cos for phi instead of delta
+      delta_reference: "innermost"
+      phi_feature_idx: 25
+      eta_feature_idx: 26

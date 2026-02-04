@@ -1,0 +1,170 @@
+seed_everything: 42
+name: Single-Task-Phi-Only
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/Single-Task-Phi-Only_20260202-T190017/ckpts/epoch=035-val_loss=0.00014.ckpt
+
+# ============================================================================
+# SINGLE-TASK PHI CONFIGURATION
+# ============================================================================
+# This config trains a SEPARATE MODEL for phi regression only.
+# The model has its own encoder and single output head.
+# No other parameters are predicted - complete isolation.
+#
+# Model: MambaPhiRegressor
+# Task: PhiRegressionTask
+# Output: sin_phi, cos_phi (final phi = atan2(sin, cos))
+# Loss: Smooth L1 on normalized sin/cos
+# ============================================================================
+
+data:
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 1
+
+  min_hits_per_track: 3
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 200
+  num_sanity_val_steps: 2
+  accelerator: gpu
+  devices: [0]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+  accumulate_grad_batches: 2
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: mamba_single_task
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        save_top_k: 3
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 40
+        min_delta: 0.0
+        mode: min
+        verbose: true
+    - class_path: hepattn.callbacks.PredictionWriter
+      init_args:
+        write_inputs: false
+        write_outputs: true
+        write_preds: true
+        write_targets: true
+        write_losses: false
+
+model:
+  optimizer: Lion
+  task: phi
+  
+  lrs_config:
+    initial: 1e-5
+    max: 8e-5
+    end: 1e-7
+    pct_start: 0.10
+    weight_decay: 1e-4
+
+  model:
+    class_path: hepattn.models.mamba_single_task.MambaPhiRegressor
+    init_args:
+      input_dim: 27
+      dim: 256
+      num_layers: 4
+      d_state: 64
+      d_conv: 4
+      expand: 2
+      use_mamba2: true
+      headdim: 64
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.15
+      head_hidden_dim: 512
+      phi_feature_idx: 25
+      eta_feature_idx: 26

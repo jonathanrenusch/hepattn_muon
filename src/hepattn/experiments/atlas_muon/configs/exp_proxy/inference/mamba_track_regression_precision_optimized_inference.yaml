@@ -1,0 +1,214 @@
+seed_everything: 42
+name: Mamba-Track-Regression-Precision-Optimized
+
+ckpt_path: /scratch/epoch=040-val_loss=0.04768.ckpt
+
+# ============================================================================
+# PRECISION-OPTIMIZED CONFIGURATION
+# ============================================================================
+# Design Philosophy:
+# The ATLAS Muon Spectrometer requires high-precision momentum measurement
+# (1.7-2.9% resolution). This config optimizes for precision by:
+#
+# 1. LARGER SSM STATE (d_state=64): Muon tracks traverse large detector
+#    volumes with complex magnetic field topology. A larger state allows
+#    the SSM to maintain richer representations of the track geometry.
+#
+# 2. DEEPER NETWORK (4 layers): The sagitta method used in ATLAS requires
+#    understanding correlations between inner, middle, and outer stations.
+#    More layers help capture these long-range dependencies.
+#
+# 3. HIGHER HEADDIM (64): Mamba-2's SSD algorithm benefits from larger
+#    head dimensions for better selective attention over the hit sequence.
+#
+# 4. INNERMOST REFERENCE: Physics-motivated - muon momentum at IP is best
+#    approximated by innermost detector measurement (before energy loss).
+#
+# 5. CONSERVATIVE LR WITH LONG WARMUP: Regression tasks require stable
+#    gradients; slow warmup prevents early overfitting to noise.
+# ============================================================================
+
+data:
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 1  # Slightly smaller batch to accommodate larger model
+
+  # Per-track data loading parameters
+  min_hits_per_track: 3  # Require 3+ hits for meaningful track fit
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+
+  # Complete hit features (27 features)
+  # Grouped by physics meaning:
+  # - Geometry: globEdge*, globPos*, r, s, theta, phi, eta
+  # - Measurement: driftR, time, cov*
+  # - Detector ID: channel, layer, stationPhi, stationEta, stationIndex, technology
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 300  # More epochs for precision convergence
+  num_sanity_val_steps: 2
+  accelerator: gpu
+  devices: [2]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs
+  gradient_clip_val: 0.5  # Tighter gradient clipping for stability
+  enable_progress_bar: true
+  accumulate_grad_batches: 2  # Effective batch size = 768
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: mamba_track_regression
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.PredictionWriter
+      init_args:
+        write_inputs: false
+        write_outputs: true
+        write_preds: true
+        write_targets: true
+        write_losses: false
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        # mode: min
+        save_top_k: -1
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    # - class_path: lightning.pytorch.callbacks.EarlyStopping
+    #   init_args:
+    #     monitor: val/loss
+    #     patience: 30  # More patience for precision training
+    #     min_delta: 1e-5
+    #     mode: min
+    #     verbose: true
+
+model:
+  optimizer: Lion
+  
+  lrs_config:
+    initial: 1e-5      # Very conservative start
+    max: 8e-5          # Lower peak LR for stability
+    end: 1e-7          # Very low final LR for fine-tuning
+    pct_start: 0.10    # 10% warmup - longer for stability
+    weight_decay: 1e-4 # Slightly higher regularization
+
+  # Loss weighting - prioritize regression slightly
+  regression_weight: 1.2  # Slightly higher weight on physics params
+  classification_weight: 0.8  # Charge is simpler, needs less weight
+  
+  regression_fields:
+    - eta
+    - phi
+    - pt
+
+  model:
+    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    init_args:
+      input_dim: 27
+      
+      # Model dimension - larger for precision
+      dim: 256  # Increased from 128 for more capacity
+      
+      # Mamba-2 encoder configuration - precision-focused
+      num_layers: 4         # Deeper network for complex track geometry
+      d_state: 64           # Large state for rich track representation
+      d_conv: 4             # Standard convolution width
+      expand: 2             # Standard expansion
+      use_mamba2: true
+      headdim: 64           # Larger head for better attention-like behavior
+      norm: RMSNorm         # RMSNorm is faster and works well with Mamba
+      dropout: 0.0          # No dropout in SSM (as per Mamba paper)
+      head_dropout: 0.15    # Moderate dropout in MLP head
+      
+      # Larger regression head for better feature extraction
+      head_hidden_dim: 512
+      
+      regression_fields:
+        - eta
+        - phi
+        - pt
+      
+      # HYBRID MODE: delta for eta, sin/cos for phi
+      use_delta_prediction: true
+      use_delta_phi: false          # KEY: Use sin/cos for phi instead of delta
+      delta_reference: "innermost"
+      phi_feature_idx: 25
+      eta_feature_idx: 26

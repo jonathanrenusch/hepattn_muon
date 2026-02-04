@@ -16,9 +16,14 @@ All plots follow ATLAS publication style conventions (without ATLAS label).
 Baseline filtering criteria:
 - >= 9 hits per track
 - |eta| in [0.1, 2.7]
-- pt >= 5.0 GeV
+- pt >= 3.0 GeV
 - >= 3 unique stations
 - >= 3 stations with >= 3 hits each
+
+ML region filtering criteria:
+- >= 3 hits per track
+- |eta| <= 2.7
+- pt >= 5.0 GeV
 
 Usage:
     python evaluate_mamba_regression.py \\
@@ -51,9 +56,6 @@ except ImportError:
 
 # Import sklearn for AUC calculation
 from sklearn.metrics import roc_auc_score, roc_curve
-
-# Import PerTrackAtlasMuonDataset for loading track data
-from hepattn.experiments.atlas_muon.data_per_track import PerTrackAtlasMuonDataset
 
 warnings.filterwarnings('ignore')
 
@@ -96,10 +98,11 @@ class MambaRegressionEvaluator:
         # Category subdirectories
         self.all_tracks_dir = self.output_dir / "all_tracks"
         self.baseline_dir = self.output_dir / "baseline_tracks"
+        self.ml_region_dir = self.output_dir / "ml_region_tracks"
         self.rejected_dir = self.output_dir / "rejected_tracks"
         
         # Plot type subdirectories within each category
-        for cat_dir in [self.all_tracks_dir, self.baseline_dir, self.rejected_dir]:
+        for cat_dir in [self.all_tracks_dir, self.baseline_dir, self.ml_region_dir, self.rejected_dir]:
             (cat_dir / "distributions").mkdir(parents=True, exist_ok=True)
             (cat_dir / "residuals").mkdir(parents=True, exist_ok=True)
             (cat_dir / "precision").mkdir(parents=True, exist_ok=True)
@@ -113,42 +116,86 @@ class MambaRegressionEvaluator:
         print(f"Max tracks: {max_tracks if max_tracks else 'all'}")
     
     def load_predictions_and_data(self):
-        """Load predictions from HDF5 file and station indices from test data.
+        """Load predictions and station indices from the prediction file.
         
         Expected prediction structure:
         - sample_id/preds/final/mamba_regression/{eta, phi, pt, charge, charge_prob}
         - sample_id/targets/{eta, phi, pt, charge}
-        
-        Also loads station indices from the original test data for baseline filtering.
         """
-        print("Loading predictions from HDF5 file...")
+        return self._load_multi_task_predictions()
+    
+    def _load_multi_task_predictions(self):
+        """Load predictions and station indices in a SINGLE PASS for efficiency.
         
-        with h5py.File(self.pred_path, 'r') as f:
-            all_eta_pred = []
-            all_phi_pred = []
-            all_pt_pred = []
-            all_charge_pred = []
-            all_charge_prob = []
-            
-            all_eta_truth = []
-            all_phi_truth = []
-            all_pt_truth = []
-            all_charge_truth = []
-            
-            all_sample_ids = []
-            
-            # Get all event keys (numeric indices)
-            event_keys = sorted([k for k in f.keys() if k.isdigit()], key=int)
-            
-            if self.max_tracks:
-                event_keys = event_keys[:self.max_tracks]
-            
+        This unified approach loads data from both the predictions file AND the 
+        dataset simultaneously, avoiding the slow two-pass approach.
+        
+        Expected prediction structure:
+        - sample_id/preds/final/mamba_regression/{eta, phi, pt, charge, charge_prob}
+        - sample_id/targets/{eta, phi, pt, charge}
+        """
+        from hepattn.experiments.atlas_muon.data import AtlasMuonDataModule
+        
+        print("Setting up data module...")
+        
+        # Setup data module first
+        data_module = AtlasMuonDataModule(
+            train_dir=str(self.data_dir),
+            val_dir=str(self.data_dir),
+            test_dir=str(self.data_dir),
+            num_workers=1,
+            num_train=1,
+            num_val=1,
+            num_test=-1,  # Load all events
+            batch_size=1,
+            event_max_num_particles=2,
+            inputs={
+                'hit': [
+                    'spacePoint_globEdgeHighX', 'spacePoint_globEdgeHighY', 'spacePoint_globEdgeHighZ',
+                    'spacePoint_globEdgeLowX', 'spacePoint_globEdgeLowY', 'spacePoint_globEdgeLowZ',
+                    'spacePoint_time', 'spacePoint_driftR',
+                    'spacePoint_covXX', 'spacePoint_covXY', 'spacePoint_covYX', 'spacePoint_covYY',
+                    'spacePoint_channel', 'spacePoint_layer', 'spacePoint_stationPhi', 'spacePoint_stationEta',
+                    'spacePoint_stationIndex', 'spacePoint_technology',
+                    'r', 's', 'theta', 'phi'
+                ]
+            },
+            targets={
+                'particle': ['truthMuon_pt', 'truthMuon_q', 'truthMuon_eta', 'truthMuon_phi']
+            }
+        )
+        
+        data_module.setup("test")
+        test_dataset = data_module.test_dataloader(shuffle=False).dataset
+        dataset_size = len(test_dataset)
+        
+        print(f"Dataset has {dataset_size} events")
+        print(f"Loading predictions and station indices in SINGLE PASS...")
+        
+        # Storage for all data
+        all_eta_pred = []
+        all_phi_pred = []
+        all_pt_pred = []
+        all_charge_pred = []
+        all_charge_prob = []
+        
+        all_eta_truth = []
+        all_phi_truth = []
+        all_pt_truth = []
+        all_charge_truth = []
+        
+        all_sample_ids = []
+        all_station_indices = []
+        all_num_hits = []
+        
+        # Open predictions file
+        with h5py.File(self.pred_path, 'r') as pred_file:
+            # Get all event keys from predictions
+            event_keys = sorted([k for k in pred_file.keys() if k.isdigit()], key=int)
             print(f"Found {len(event_keys)} events in prediction file")
             
-            # Determine the structure by examining first event
-            first_event = f[event_keys[0]]
-            
-            # Check for layer/task structure vs flat structure
+            # Determine prediction structure from first event
+            first_event = pred_file[event_keys[0]]
             preds_group = first_event.get('preds', None)
             has_layer_structure = False
             preds_path = None
@@ -156,58 +203,105 @@ class MambaRegressionEvaluator:
             if preds_group is not None and len(preds_group.keys()) > 0:
                 first_layer = list(preds_group.keys())[0]
                 if isinstance(preds_group[first_layer], h5py.Group):
-                    # Check if it's layer/task structure
                     first_task = list(preds_group[first_layer].keys())[0] if len(preds_group[first_layer].keys()) > 0 else None
                     if first_task and isinstance(preds_group[first_layer][first_task], h5py.Group):
                         has_layer_structure = True
                         preds_path = f'preds/{first_layer}/{first_task}'
                         print(f"Detected layer/task structure: {preds_path}")
             
-            for event_key in tqdm(event_keys, desc="Loading events"):
-                event_group = f[event_key]
+            # Track sample_id as we iterate through events/tracks
+            sample_id = 0
+            tracks_loaded = 0
+            
+            # SINGLE PASS: Iterate through dataset and match with predictions
+            for event_idx in tqdm(range(dataset_size), desc="Loading data (single pass)"):
+                # Check if we've hit max_tracks limit
+                if self.max_tracks and tracks_loaded >= self.max_tracks:
+                    break
                 
-                # Load predictions
-                if has_layer_structure and preds_path:
-                    try:
-                        preds = event_group[preds_path]
-                        if 'eta' in preds:
-                            all_eta_pred.append(float(preds['eta'][...].flatten()[0]))
-                        if 'phi' in preds:
-                            all_phi_pred.append(float(preds['phi'][...].flatten()[0]))
-                        if 'pt' in preds:
-                            all_pt_pred.append(float(preds['pt'][...].flatten()[0]))
-                        if 'charge' in preds:
-                            all_charge_pred.append(float(preds['charge'][...].flatten()[0]))
-                        if 'charge_prob' in preds:
-                            all_charge_prob.append(float(preds['charge_prob'][...].flatten()[0]))
-                        all_sample_ids.append(int(event_key))
-                    except KeyError:
+                # Load event from dataset
+                batch = test_dataset[event_idx]
+                inputs, targets = batch
+                
+                # Get station indices from dataset
+                true_station_index = inputs["hit_spacePoint_stationIndex"][0].numpy().astype(np.int32)
+                true_particle_valid = targets['particle_valid'][0].numpy()
+                true_hit_assignments = targets['particle_hit_valid'][0].numpy()
+                
+                # Extract valid particles
+                num_valid = int(true_particle_valid.sum())
+                
+                if num_valid == 0:
+                    continue
+                
+                # Process each track in this event
+                for track_idx in range(num_valid):
+                    # Check max_tracks limit
+                    if self.max_tracks and tracks_loaded >= self.max_tracks:
+                        break
+                    
+                    event_key = str(sample_id)
+                    
+                    # Check if this sample exists in predictions
+                    if event_key not in pred_file:
+                        sample_id += 1
                         continue
-                else:
-                    # Flat structure fallback
-                    if 'preds' in event_group:
-                        preds = event_group['preds']
-                        if 'eta' in preds:
-                            all_eta_pred.append(float(preds['eta'][...].flatten()[0]))
-                        if 'phi' in preds:
-                            all_phi_pred.append(float(preds['phi'][...].flatten()[0]))
-                        if 'pt' in preds:
-                            all_pt_pred.append(float(preds['pt'][...].flatten()[0]))
-                        if 'charge' in preds:
-                            all_charge_pred.append(float(preds['charge'][...].flatten()[0]))
-                        all_sample_ids.append(int(event_key))
-                
-                # Load targets
-                if 'targets' in event_group:
-                    targets = event_group['targets']
-                    if 'eta' in targets:
-                        all_eta_truth.append(float(targets['eta'][...].flatten()[0]))
-                    if 'phi' in targets:
-                        all_phi_truth.append(float(targets['phi'][...].flatten()[0]))
-                    if 'pt' in targets:
-                        all_pt_truth.append(float(targets['pt'][...].flatten()[0]))
-                    if 'charge' in targets:
-                        all_charge_truth.append(float(targets['charge'][...].flatten()[0]))
+                    
+                    event_group = pred_file[event_key]
+                    
+                    # Load predictions
+                    try:
+                        if has_layer_structure and preds_path:
+                            preds = event_group[preds_path]
+                        else:
+                            preds = event_group.get('preds', {})
+                        
+                        # Extract predictions
+                        eta_pred = float(preds['eta'][...].flatten()[0]) if 'eta' in preds else None
+                        phi_pred = float(preds['phi'][...].flatten()[0]) if 'phi' in preds else None
+                        pt_pred = float(preds['pt'][...].flatten()[0]) if 'pt' in preds else None
+                        charge_pred = float(preds['charge'][...].flatten()[0]) if 'charge' in preds else None
+                        charge_prob = float(preds['charge_prob'][...].flatten()[0]) if 'charge_prob' in preds else charge_pred
+                        
+                        if eta_pred is None:
+                            sample_id += 1
+                            continue
+                            
+                    except (KeyError, IndexError):
+                        sample_id += 1
+                        continue
+                    
+                    # Load targets from predictions file (as fallback/validation)
+                    targets_group = event_group.get('targets', {})
+                    eta_truth = float(targets_group['eta'][...].flatten()[0]) if 'eta' in targets_group else None
+                    phi_truth = float(targets_group['phi'][...].flatten()[0]) if 'phi' in targets_group else None
+                    pt_truth = float(targets_group['pt'][...].flatten()[0]) if 'pt' in targets_group else None
+                    charge_truth = float(targets_group['charge'][...].flatten()[0]) if 'charge' in targets_group else None
+                    
+                    # Get station indices for this track from dataset
+                    true_hits = true_hit_assignments[track_idx]
+                    track_mask = true_hits.astype(bool)
+                    track_stations = true_station_index[track_mask]
+                    num_hits = int(np.sum(true_hits))
+                    
+                    # Store all data
+                    all_eta_pred.append(eta_pred)
+                    all_phi_pred.append(phi_pred)
+                    all_pt_pred.append(pt_pred)
+                    all_charge_pred.append(charge_pred)
+                    all_charge_prob.append(charge_prob if charge_prob else charge_pred)
+                    
+                    all_eta_truth.append(eta_truth)
+                    all_phi_truth.append(phi_truth)
+                    all_pt_truth.append(pt_truth)
+                    all_charge_truth.append(charge_truth)
+                    
+                    all_sample_ids.append(sample_id)
+                    all_station_indices.append(track_stations)
+                    all_num_hits.append(num_hits)
+                    
+                    sample_id += 1
+                    tracks_loaded += 1
         
         # Convert to numpy arrays
         self.data = {
@@ -215,102 +309,20 @@ class MambaRegressionEvaluator:
             'phi_pred': np.array(all_phi_pred),
             'pt_pred': np.array(all_pt_pred),
             'charge_pred': np.array(all_charge_pred),
-            'charge_prob': np.array(all_charge_prob) if all_charge_prob else np.array(all_charge_pred),
+            'charge_prob': np.array(all_charge_prob),
             'eta_truth': np.array(all_eta_truth),
             'phi_truth': np.array(all_phi_truth),
             'pt_truth': np.array(all_pt_truth),
             'charge_truth': np.array(all_charge_truth),
             'sample_ids': np.array(all_sample_ids),
+            'station_indices': all_station_indices,  # Keep as list of arrays
+            'num_hits': np.array(all_num_hits),
         }
         
-        print(f"Loaded {len(self.data['eta_pred'])} tracks with predictions")
-        print(f"Loaded {len(self.data['eta_truth'])} tracks with targets")
-        
-        # Load station indices from test data for baseline filtering
-        print("\nLoading station indices from test data for baseline filtering...")
-        self._load_station_indices()
+        print(f"\nLoaded {len(self.data['eta_pred']):,} tracks with predictions AND station indices")
+        print(f"Average hits per track: {np.mean(all_num_hits):.1f}")
         
         return self.data
-    
-    def _load_station_indices(self):
-        """Load station indices using PerTrackAtlasMuonDataset.
-        
-        Uses the PerTrackAtlasMuonDataset class which handles track index
-        creation/caching automatically and provides access to hit data.
-        """
-        n_tracks = len(self.data['sample_ids'])
-        
-        # Default inputs/targets needed for dataset initialization
-        inputs = {
-            'hit': [
-                'spacePoint_globEdgeHighX', 'spacePoint_globEdgeHighY', 'spacePoint_globEdgeHighZ',
-                'spacePoint_globEdgeLowX', 'spacePoint_globEdgeLowY', 'spacePoint_globEdgeLowZ',
-                'spacePoint_time', 'spacePoint_driftR',
-                'spacePoint_covXX', 'spacePoint_covXY', 'spacePoint_covYX', 'spacePoint_covYY',
-                'spacePoint_channel', 'spacePoint_layer', 'spacePoint_stationPhi', 'spacePoint_stationEta',
-                'spacePoint_stationIndex', 'spacePoint_technology',
-                'r', 's', 'theta', 'phi'
-            ]
-        }
-        targets = {
-            'particle': ['truthMuon_pt', 'truthMuon_q', 'truthMuon_eta', 'truthMuon_phi', 'truthMuon_qpt']
-        }
-        
-        # Create PerTrackAtlasMuonDataset - this will build/load track index automatically
-        print("Creating PerTrackAtlasMuonDataset to load track data...")
-        per_track_dataset = PerTrackAtlasMuonDataset(
-            dirpath=str(self.data_dir),
-            inputs=inputs,
-            targets=targets,
-            num_events=-1,  # Load all events
-            min_hits_per_track=1,  # We want all tracks, filtering done later
-            max_hits_per_track=600,
-            event_max_num_particles=2,
-        )
-        
-        print(f"PerTrackAtlasMuonDataset has {len(per_track_dataset)} tracks")
-        print(f"Predictions file has {n_tracks} tracks")
-        
-        # Verify track counts match
-        if len(per_track_dataset) != n_tracks:
-            print(f"WARNING: Track count mismatch! Dataset has {len(per_track_dataset)}, predictions have {n_tracks}")
-            print("Will use min of both counts")
-        
-        sample_ids = self.data['sample_ids']
-        station_indices = []
-        num_hits_per_track = []
-        
-        print("Loading station indices from PerTrackAtlasMuonDataset...")
-        for sample_id in tqdm(sample_ids, desc="Loading station indices"):
-            if sample_id < len(per_track_dataset):
-                # Get track data from the dataset
-                track_data = per_track_dataset[sample_id]
-                
-                # Get station indices from hit features
-                # The hit_fields include 'spacePoint_stationIndex' at a specific position
-                hit_features = track_data['hit_features'].numpy()  # (num_hits, num_features)
-                num_hits = track_data['num_hits']
-                
-                # Find the station index position in hit_fields
-                hit_fields = per_track_dataset.hit_fields
-                if 'spacePoint_stationIndex' in hit_fields:
-                    station_idx_pos = hit_fields.index('spacePoint_stationIndex')
-                    track_stations = hit_features[:, station_idx_pos]
-                    # Filter out padding (station index 0 or negative might be padding)
-                    track_stations = track_stations[track_stations > 0]
-                else:
-                    track_stations = np.array([])
-                
-                station_indices.append(track_stations)
-                num_hits_per_track.append(num_hits)
-            else:
-                station_indices.append(np.array([]))
-                num_hits_per_track.append(0)
-        
-        self.data['station_indices'] = station_indices
-        self.data['num_hits'] = np.array(num_hits_per_track)
-        
-        print(f"Loaded station indices for {len(station_indices)} tracks")
 
     def apply_baseline_filtering(self):
         """Apply baseline filtering and split data into categories.
@@ -318,26 +330,42 @@ class MambaRegressionEvaluator:
         Baseline criteria:
         1. >= 9 hits per track
         2. |eta| in [0.1, 2.7]  (excludes very forward/central region)
-        3. pt >= 5.0 GeV  (minimum pt cut)
+        3. pt >= 3.0 GeV  (minimum pt cut for baseline)
         4. >= 3 unique stations
         5. >= 3 stations with >= 3 hits each
+        
+        ML region criteria:
+        1. >= 3 hits per track
+        2. |eta| <= 2.7
+        3. pt >= 5.0 GeV
         """
-        print("Applying baseline filtering...")
+        print("Applying baseline and ML region filtering...")
         
         n_tracks = len(self.data['eta_pred'])
         
-        # Initialize filter statistics
-        self.filter_stats = {
-            'total_tracks': n_tracks,
-            'failed_min_hits': 0,
-            'failed_eta_cuts': 0,
-            'failed_pt_cuts': 0,
-            'failed_station_cuts': 0,
-            'passed_all_cuts': 0,
+        # Initialize baseline filter statistics
+        self.baseline_stats = {
+            'total_tracks_checked': n_tracks,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
+            'tracks_failed_insufficient_stations': 0,
+            'tracks_failed_hits_per_station': 0,
+            'tracks_passed_all_cuts': 0,
         }
         
-        # Create baseline mask - start with all True
+        # Initialize ML region filter statistics
+        self.ml_region_stats = {
+            'total_tracks_checked': n_tracks,
+            'tracks_failed_min_hits': 0,
+            'tracks_failed_eta_cuts': 0,
+            'tracks_failed_pt_cuts': 0,
+            'tracks_passed_all_cuts': 0,
+        }
+        
+        # Create baseline and ML region masks - start with all True
         baseline_mask = np.ones(n_tracks, dtype=bool)
+        ml_region_mask = np.ones(n_tracks, dtype=bool)
         
         eta_truth = self.data['eta_truth']
         pt_truth = self.data['pt_truth']
@@ -346,52 +374,68 @@ class MambaRegressionEvaluator:
         
         # Apply cuts track by track (needed for station filtering)
         for i in range(n_tracks):
-            # 1. Check minimum hits
+            baseline_passed = True
+            ml_region_passed = True
+            
+            # === BASELINE FILTERING ===
+            # Baseline criterion 1: >= 9 hits
             if num_hits[i] < 9:
-                self.filter_stats['failed_min_hits'] += 1
-                baseline_mask[i] = False
-                continue
+                self.baseline_stats['tracks_failed_min_hits'] += 1
+                baseline_passed = False
             
-            # 2. Check eta cuts (|eta| in [0.1, 2.7])
+            # Baseline criterion 2: eta cuts (0.1 <= |eta| <= 2.7)
             if np.abs(eta_truth[i]) < 0.1 or np.abs(eta_truth[i]) > 2.7:
-                self.filter_stats['failed_eta_cuts'] += 1
-                baseline_mask[i] = False
-                continue
+                self.baseline_stats['tracks_failed_eta_cuts'] += 1
+                baseline_passed = False
             
-            # 3. Check pt cuts (pt >= 5.0 GeV)
-            if pt_truth[i] < 5.0:
-                self.filter_stats['failed_pt_cuts'] += 1
-                baseline_mask[i] = False
-                continue
+            # Baseline criterion 3: pt >= 3.0 GeV
+            if pt_truth[i] < 3.0:
+                self.baseline_stats['tracks_failed_pt_cuts'] += 1
+                baseline_passed = False
             
-            # 4 & 5. Check station requirements
+            # Baseline criterion 4: Station requirements (>= 3 stations, >= 3 hits per station)
             track_stations = station_indices[i]
-            if len(track_stations) == 0:
-                self.filter_stats['failed_station_cuts'] += 1
-                baseline_mask[i] = False
-                continue
+            unique_stations = np.unique(track_stations) if len(track_stations) > 0 else np.array([])
             
-            unique_stations = np.unique(track_stations)
-            
-            # Need at least 3 unique stations
             if len(unique_stations) < 3:
-                self.filter_stats['failed_station_cuts'] += 1
+                self.baseline_stats['tracks_failed_insufficient_stations'] += 1
+                baseline_passed = False
+            else:
+                # Check if at least 3 stations have >= 3 hits each
+                station_counts = {}
+                for station in track_stations:
+                    station_counts[station] = station_counts.get(station, 0) + 1
+                
+                n_good_stations = sum(1 for count in station_counts.values() if count >= 3)
+                if n_good_stations < 3:
+                    self.baseline_stats['tracks_failed_hits_per_station'] += 1
+                    baseline_passed = False
+            
+            if baseline_passed:
+                self.baseline_stats['tracks_passed_all_cuts'] += 1
+            else:
                 baseline_mask[i] = False
-                continue
             
-            # Need at least 3 stations with >= 3 hits each
-            station_counts = {}
-            for station in track_stations:
-                station_counts[station] = station_counts.get(station, 0) + 1
+            # === ML REGION FILTERING ===
+            # ML region criterion 1: >= 3 hits
+            if num_hits[i] < 3:
+                self.ml_region_stats['tracks_failed_min_hits'] += 1
+                ml_region_passed = False
             
-            n_good_stations = sum(1 for count in station_counts.values() if count >= 3)
-            if n_good_stations < 3:
-                self.filter_stats['failed_station_cuts'] += 1
-                baseline_mask[i] = False
-                continue
+            # ML region criterion 2: |eta| <= 2.7
+            if np.abs(eta_truth[i]) > 2.7:
+                self.ml_region_stats['tracks_failed_eta_cuts'] += 1
+                ml_region_passed = False
             
-            # Track passed all cuts
-            self.filter_stats['passed_all_cuts'] += 1
+            # ML region criterion 3: pt >= 5.0 GeV
+            if pt_truth[i] < 5.0:
+                self.ml_region_stats['tracks_failed_pt_cuts'] += 1
+                ml_region_passed = False
+            
+            if ml_region_passed:
+                self.ml_region_stats['tracks_passed_all_cuts'] += 1
+            else:
+                ml_region_mask[i] = False
         
         # Split data into categories
         array_keys = ['eta_pred', 'phi_pred', 'pt_pred', 'charge_pred', 'charge_prob',
@@ -399,18 +443,33 @@ class MambaRegressionEvaluator:
         
         self.all_data = {k: self.data[k] for k in array_keys if k in self.data}
         self.baseline_data = {k: self.data[k][baseline_mask] for k in array_keys if k in self.data}
-        self.rejected_data = {k: self.data[k][~baseline_mask] for k in array_keys if k in self.data}
+        self.ml_region_data = {k: self.data[k][ml_region_mask] for k in array_keys if k in self.data}
+        # Rejected tracks = tracks that don't pass ML region filter (for backward compatibility)
+        self.rejected_data = {k: self.data[k][~ml_region_mask] for k in array_keys if k in self.data}
         
         print(f"\nBaseline Filtering Statistics:")
-        print(f"  Total tracks: {self.filter_stats['total_tracks']:,}")
-        print(f"  Failed min hits (>=9): {self.filter_stats['failed_min_hits']:,}")
-        print(f"  Failed eta cuts (|eta| in [0.1, 2.7]): {self.filter_stats['failed_eta_cuts']:,}")
-        print(f"  Failed pt cuts (pt >= 5.0 GeV): {self.filter_stats['failed_pt_cuts']:,}")
-        print(f"  Failed station cuts (>=3 stations with >=3 hits): {self.filter_stats['failed_station_cuts']:,}")
-        print(f"  Passed all cuts (baseline): {self.filter_stats['passed_all_cuts']:,}")
-        print(f"  Rejected: {n_tracks - self.filter_stats['passed_all_cuts']:,}")
+        print(f"  Total tracks checked: {self.baseline_stats['total_tracks_checked']:,}")
+        print(f"  Failed minimum hits (>=9): {self.baseline_stats['tracks_failed_min_hits']:,} ({self.baseline_stats['tracks_failed_min_hits']/self.baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (0.1 <= |eta| <= 2.7): {self.baseline_stats['tracks_failed_eta_cuts']:,} ({self.baseline_stats['tracks_failed_eta_cuts']/self.baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 3.0 GeV): {self.baseline_stats['tracks_failed_pt_cuts']:,} ({self.baseline_stats['tracks_failed_pt_cuts']/self.baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed insufficient stations (<3 stations): {self.baseline_stats['tracks_failed_insufficient_stations']:,} ({self.baseline_stats['tracks_failed_insufficient_stations']/self.baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed hits per station (<3 stations with >=3 hits): {self.baseline_stats['tracks_failed_hits_per_station']:,} ({self.baseline_stats['tracks_failed_hits_per_station']/self.baseline_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {self.baseline_stats['tracks_passed_all_cuts']:,} ({self.baseline_stats['tracks_passed_all_cuts']/self.baseline_stats['total_tracks_checked']*100:.1f}%)")
         
-        return self.all_data, self.baseline_data, self.rejected_data
+        print(f"\nML Region Filtering Statistics:")
+        print(f"  Total tracks checked: {self.ml_region_stats['total_tracks_checked']:,}")
+        print(f"  Failed minimum hits (>=3): {self.ml_region_stats['tracks_failed_min_hits']:,} ({self.ml_region_stats['tracks_failed_min_hits']/self.ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed eta cuts (|eta| <= 2.7): {self.ml_region_stats['tracks_failed_eta_cuts']:,} ({self.ml_region_stats['tracks_failed_eta_cuts']/self.ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Failed pt cuts (pt >= 5.0 GeV): {self.ml_region_stats['tracks_failed_pt_cuts']:,} ({self.ml_region_stats['tracks_failed_pt_cuts']/self.ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        print(f"  Tracks passing all cuts: {self.ml_region_stats['tracks_passed_all_cuts']:,} ({self.ml_region_stats['tracks_passed_all_cuts']/self.ml_region_stats['total_tracks_checked']*100:.1f}%)")
+        
+        print(f"\nCategory Statistics:")
+        print(f"  All tracks: {len(self.all_data['eta_pred']):,}")
+        print(f"  Baseline tracks: {len(self.baseline_data['eta_pred']):,}")
+        print(f"  ML region tracks: {len(self.ml_region_data['eta_pred']):,}")
+        print(f"  Rejected tracks: {len(self.rejected_data['eta_pred']):,}")
+        
+        return self.all_data, self.baseline_data, self.ml_region_data, self.rejected_data
     
     def save_plot(self, fig, output_dir, filename):
         """Save plot in both PNG and PDF formats."""
@@ -832,7 +891,7 @@ class MambaRegressionEvaluator:
             print(f"  Warning: Could not calculate AUC for {category_name}: {e}")
             return None
     
-    def write_statistics(self, all_stats, baseline_stats, rejected_stats):
+    def write_statistics(self, all_stats, baseline_stats, ml_region_stats, rejected_stats):
         """Write statistics summary to text file."""
         stats_path = self.output_dir / "evaluation_statistics.txt"
         
@@ -850,27 +909,45 @@ class MambaRegressionEvaluator:
             f.write("-" * 40 + "\n")
             f.write("BASELINE FILTERING STATISTICS\n")
             f.write("-" * 40 + "\n")
-            f.write(f"Total tracks: {self.filter_stats['total_tracks']:,}\n")
-            f.write(f"Failed min hits (>=9 required): {self.filter_stats['failed_min_hits']:,}\n")
-            f.write(f"Failed eta cuts (|eta| not in [0.1, 2.7]): {self.filter_stats['failed_eta_cuts']:,}\n")
-            f.write(f"Failed pt cuts (pt < 5.0 GeV): {self.filter_stats['failed_pt_cuts']:,}\n")
-            f.write(f"Failed station cuts (>=3 stations with >=3 hits): {self.filter_stats['failed_station_cuts']:,}\n")
-            f.write(f"Passed all cuts (baseline): {self.filter_stats['passed_all_cuts']:,}\n")
-            f.write(f"Rejected: {self.filter_stats['total_tracks'] - self.filter_stats['passed_all_cuts']:,}\n\n")
+            f.write(f"Total tracks checked: {self.baseline_stats['total_tracks_checked']:,}\n")
+            f.write(f"Failed minimum hits (>=9): {self.baseline_stats['tracks_failed_min_hits']:,}\n")
+            f.write(f"Failed eta cuts (0.1 <= |eta| <= 2.7): {self.baseline_stats['tracks_failed_eta_cuts']:,}\n")
+            f.write(f"Failed pt cuts (pt >= 3.0 GeV): {self.baseline_stats['tracks_failed_pt_cuts']:,}\n")
+            f.write(f"Failed insufficient stations (<3 stations): {self.baseline_stats['tracks_failed_insufficient_stations']:,}\n")
+            f.write(f"Failed hits per station (<3 stations with >=3 hits): {self.baseline_stats['tracks_failed_hits_per_station']:,}\n")
+            f.write(f"Tracks passing all cuts: {self.baseline_stats['tracks_passed_all_cuts']:,}\n\n")
+            
+            f.write("-" * 40 + "\n")
+            f.write("ML REGION FILTERING STATISTICS\n")
+            f.write("-" * 40 + "\n")
+            f.write(f"Total tracks checked: {self.ml_region_stats['total_tracks_checked']:,}\n")
+            f.write(f"Failed minimum hits (>=3): {self.ml_region_stats['tracks_failed_min_hits']:,}\n")
+            f.write(f"Failed eta cuts (|eta| <= 2.7): {self.ml_region_stats['tracks_failed_eta_cuts']:,}\n")
+            f.write(f"Failed pt cuts (pt >= 5.0 GeV): {self.ml_region_stats['tracks_failed_pt_cuts']:,}\n")
+            f.write(f"Tracks passing all cuts: {self.ml_region_stats['tracks_passed_all_cuts']:,}\n\n")
             
             # Baseline filtering criteria description
             f.write("-" * 40 + "\n")
             f.write("BASELINE FILTERING CRITERIA\n")
             f.write("-" * 40 + "\n")
             f.write("1. >= 9 hits per track\n")
-            f.write("2. |eta| in [0.1, 2.7]\n")
-            f.write("3. pt >= 5.0 GeV\n")
+            f.write("2. 0.1 <= |eta| <= 2.7\n")
+            f.write("3. pt >= 3.0 GeV\n")
             f.write("4. >= 3 unique stations\n")
             f.write("5. >= 3 stations with >= 3 hits each\n\n")
+            
+            # ML region criteria description
+            f.write("-" * 40 + "\n")
+            f.write("ML REGION FILTERING CRITERIA\n")
+            f.write("-" * 40 + "\n")
+            f.write("1. >= 3 hits per track\n")
+            f.write("2. |eta| <= 2.7\n")
+            f.write("3. pt >= 5.0 GeV\n\n")
             
             # Per-category statistics
             for cat_name, cat_stats in [("ALL TRACKS", all_stats),
                                          ("BASELINE TRACKS", baseline_stats),
+                                         ("ML REGION TRACKS", ml_region_stats),
                                          ("REJECTED TRACKS", rejected_stats)]:
                 f.write("-" * 40 + "\n")
                 f.write(f"{cat_name}\n")
@@ -982,17 +1059,18 @@ class MambaRegressionEvaluator:
         self.load_predictions_and_data()
         
         # Apply filtering
-        all_data, baseline_data, rejected_data = self.apply_baseline_filtering()
+        all_data, baseline_data, ml_region_data, rejected_data = self.apply_baseline_filtering()
         
         # Evaluate each category
         all_stats = self.evaluate_category(all_data, self.all_tracks_dir, "All Tracks")
         baseline_stats = self.evaluate_category(baseline_data, self.baseline_dir, "Baseline Tracks")
+        ml_region_stats = self.evaluate_category(ml_region_data, self.ml_region_dir, "ML Region Tracks")
         rejected_stats = self.evaluate_category(rejected_data, self.rejected_dir, "Rejected Tracks")
         
         # Write statistics
         print("\n" + "=" * 50)
         print("Writing statistics summary...")
-        self.write_statistics(all_stats, baseline_stats, rejected_stats)
+        self.write_statistics(all_stats, baseline_stats, ml_region_stats, rejected_stats)
         
         print(f"\n{'='*80}")
         print(f"EVALUATION COMPLETE")
@@ -1002,6 +1080,7 @@ class MambaRegressionEvaluator:
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Mamba Track Regression Model')
+    
     parser.add_argument('--pred_path', '-p', type=str, required=True,
                         help='Path to predictions HDF5 file')
     parser.add_argument('--data_dir', '-d', type=str, required=True,
@@ -1020,6 +1099,7 @@ def main():
             output_dir=args.output_dir,
             max_tracks=args.max_tracks
         )
+        
         evaluator.run_evaluation()
         
     except Exception as e:

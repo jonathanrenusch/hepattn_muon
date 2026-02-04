@@ -1,0 +1,185 @@
+# YOLO Stage 1: Classification Pretraining - GPU 1 (Medium Resolution)
+# PT: 100 bins, Eta/Phi: 2000 bins
+# Uses CLS token pooling
+
+seed_everything: 42
+name: YOLO-Stage1-Classification-Medium-GPU1
+
+data:
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 1024
+
+  min_hits_per_track: 2
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+     
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 200
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [1]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs/YOLO
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: yolo_classification_stage1
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 20
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 20
+        min_delta: 0.0
+        mode: min
+        verbose: true
+
+model:
+  optimizer: AdamW
+  
+  lrs_config:
+    initial: 1e-5
+    max: 5e-4
+    end: 1e-6
+    pct_start: 0.05
+    weight_decay: 1e-5
+
+  # Bin configuration (medium)
+  # NOTE: eta has +1 bins due to gap handling in bin files
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: 2001  # File named eta_bins_2000 but has 2001 bins
+  phi_bins: 2000
+  pt_bins: 100
+  
+  # Loss weights
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 1.0
+  charge_loss_weight: 0.5
+  
+  # Focal loss gamma for pt
+  focal_gamma: 2.0
+  
+  # Clipping ranges
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
+
+  model:
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
+    init_args:
+      input_dim: 27
+      dim: 128
+      num_layers: 2
+      d_state: 16
+      d_conv: 4
+      expand: 2
+      use_mamba2: true
+      headdim: 32
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.15
+      head_hidden_dim: 256
+      
+      # Classification bins (must match training module)
+      eta_bins: 2001  # File named eta_bins_2000 but has 2001 bins
+      phi_bins: 2000
+      pt_bins: 100
+      
+      # Use CLS token
+      use_attention_pooling: false
+      
+      # Regression heads disabled for Stage 1
+      enable_regression_heads: false
