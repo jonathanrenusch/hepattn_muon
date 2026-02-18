@@ -2,6 +2,34 @@
 
 This comprehensive guide walks you through the complete training pipeline for the ATLAS muon tracking model, from raw data to trained model evaluation.
 
+## Quick Start
+
+**TL;DR - Train a model in 3 commands:**
+
+```bash
+# 1. Preprocess data (ROOT → HDF5)
+python prep_events_multiprocess.py \
+    --input_dir /path/to/root/files \
+    --output_dir /path/to/output/hdf5 \
+    --expected_num_events_per_file 100 \
+    --max_events 1000000 \
+    --num_workers 16
+
+# 2. Train model (using pre-configured settings)
+python run_tracking.py fit \
+    --config configs/NGT/smallCuts/atlas_muon_tracking_NGT_small2track_regression.yaml
+
+# 3. Evaluate model
+python evaluate_tracking_model.py \
+    --checkpoint logs/*/ckpts/epoch=*-val_loss=*.ckpt \
+    --test_dir /path/to/test/hdf5 \
+    --output_dir results/
+```
+
+**That's it!** For detailed explanations, see the full guide below.
+
+---
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -26,6 +54,8 @@ The ATLAS muon tracking system uses a **MaskFormer** architecture (encoder-decod
 - **Charge classification**: Determining particle charge
 
 The model is trained end-to-end using multi-task learning with Hungarian matching for optimal track-to-truth assignment.
+
+**Note on "Mamba":** This codebase uses **Transformer-based** architectures (MaskFormer with FlashAttention), not Mamba (state-space models). The training process described here is for transformer-based muon tracking.
 
 ---
 

@@ -104,6 +104,7 @@ See experiment directories for instructions on how to run experiments.
 
 - [TrackML Tracking](src/hepattn/experiments/trackml/)
 - [CLIC Particle Flow](src/hepattn/experiments/clic/)
+- [ATLAS Muon Tracking](src/hepattn/experiments/atlas_muon/) - See [Training Guide](src/hepattn/experiments/atlas_muon/TRAINING_GUIDE.md) for comprehensive documentation
 
 ## 📖 Terminology
 
