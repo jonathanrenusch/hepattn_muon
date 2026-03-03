@@ -10,11 +10,14 @@ Architecture:
 2. CLS token (or attention pooling) for sequence aggregation
 3. Bidirectional Mamba encoder
 4. Classification heads: eta, phi, pt, charge (4 separate heads)
+   - Supports hierarchical multi-resolution heads (up to 3 levels per variable)
 5. Regression heads: eta, phi, pt (for stages 2 & 3, output per-bin offsets)
 
 Features:
 - Focal loss for pT (handles class imbalance in quantile bins)
 - Variable bin counts for different resolution experiments
+- Hierarchical classification: multiple resolution levels per variable
+- 1/pt binning support (detector measures curvature directly)
 - Freezing mechanisms for multi-stage training
 - Regression heads output per-bin offset predictions (same size as classification)
 """
@@ -154,12 +157,20 @@ class YOLORegressor(nn.Module):
     - Input projection: hit features -> model dimension
     - CLS token (or attention pooling) for sequence aggregation
     - Bidirectional Mamba encoder
-    - Classification heads: eta, phi, pt, charge (4 separate heads)
-    - Regression heads: eta, phi, pt (output per-bin offsets, same size as cls)
+    - Classification heads: eta, phi, pt/inv_pt, charge
+      - Supports hierarchical multi-resolution: pass list of bin counts per level
+    - Regression heads: eta, phi, pt (output per-bin offsets, same size as finest cls)
     
-    The regression heads output the same number of values as classification bins.
-    During inference, the final prediction is: bin_center[argmax(cls)] + offset[argmax(cls)]
-    This allows the model to learn bin-specific refinements.
+    Hierarchical classification:
+        Pass eta_bins=[50, 200, 501] for 3 levels of refinement.
+        Level 0 (coarsest) classifies into 50 bins, level 1 into 200, level 2 into 501.
+        All levels share the same encoder embedding.
+        Pass a scalar (e.g., eta_bins=501) for single-level (backward compatible).
+    
+    1/pt binning:
+        Set use_inv_pt=True to classify in 1/pt space instead of pt.
+        The model output key is 'inv_pt_logits' (or 'inv_pt_logits_L{i}' for hierarchical).
+        The training module handles converting predictions back to pt for metrics.
     
     Parameters
     ----------
@@ -169,16 +180,19 @@ class YOLORegressor(nn.Module):
         Model embedding dimension.
     num_layers : int
         Number of bidirectional Mamba layers.
-    eta_bins : int
-        Number of eta classification bins (and regression outputs).
-    phi_bins : int
-        Number of phi classification bins (and regression outputs).
-    pt_bins : int
-        Number of pT classification bins (and regression outputs).
+    eta_bins : int or list[int]
+        Number of eta classification bins per level. List for hierarchical.
+    phi_bins : int or list[int]
+        Number of phi classification bins per level. List for hierarchical.
+    pt_bins : int or list[int]
+        Number of pT (or 1/pT) classification bins per level. List for hierarchical.
+    use_inv_pt : bool
+        If True, pt heads classify 1/pt instead of pt. Keys use 'inv_pt' prefix.
     use_attention_pooling : bool
         If True, use attention pooling instead of CLS token.
     enable_regression_heads : bool
         If True, create regression heads (for stages 2 & 3).
+        Regression uses finest level bins only.
     regression_hidden_dim : int
         Hidden dimension for regression heads.
     regression_num_layers : int
@@ -199,10 +213,11 @@ class YOLORegressor(nn.Module):
         dropout: float = 0.0,
         head_dropout: float = 0.15,
         head_hidden_dim: int = 256,
-        # Classification/regression bins
-        eta_bins: int = 100,
-        phi_bins: int = 100,
-        pt_bins: int = 50,
+        # Classification/regression bins — scalar or list for hierarchical
+        eta_bins: int | list[int] = 100,
+        phi_bins: int | list[int] = 100,
+        pt_bins: int | list[int] = 50,
+        use_inv_pt: bool = False,
         use_attention_pooling: bool = False,
         attention_heads: int = 4,
         # Regression heads (disabled by default for Stage 1)
@@ -214,11 +229,23 @@ class YOLORegressor(nn.Module):
         super().__init__()
         
         self.dim = dim
-        self.eta_bins = eta_bins
-        self.phi_bins = phi_bins
-        self.pt_bins = pt_bins
+        self.use_inv_pt = use_inv_pt
         self.use_attention_pooling = use_attention_pooling
         self.enable_regression_heads = enable_regression_heads
+        
+        # Normalize bins to lists for hierarchical support
+        self.eta_bins_list = [eta_bins] if isinstance(eta_bins, int) else list(eta_bins)
+        self.phi_bins_list = [phi_bins] if isinstance(phi_bins, int) else list(phi_bins)
+        self.pt_bins_list = [pt_bins] if isinstance(pt_bins, int) else list(pt_bins)
+        
+        self.num_eta_levels = len(self.eta_bins_list)
+        self.num_phi_levels = len(self.phi_bins_list)
+        self.num_pt_levels = len(self.pt_bins_list)
+        
+        # Backward-compatible properties: finest level bin count
+        self.eta_bins = self.eta_bins_list[-1]
+        self.phi_bins = self.phi_bins_list[-1]
+        self.pt_bins = self.pt_bins_list[-1]
         
         # Input projection
         self.input_projection = nn.Sequential(
@@ -254,49 +281,65 @@ class YOLORegressor(nn.Module):
             dropout=dropout,
         )
         
-        # Classification heads
-        self.eta_cls_head = nn.Sequential(
-            nn.Linear(dim, head_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(head_dropout),
-            nn.Linear(head_hidden_dim, eta_bins),
-        )
+        # ===== Classification heads (hierarchical) =====
+        # Each variable has one head per resolution level
+        self.eta_cls_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, head_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(head_hidden_dim, n_bins),
+            )
+            for n_bins in self.eta_bins_list
+        ])
         
-        self.phi_cls_head = nn.Sequential(
-            nn.Linear(dim, head_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(head_dropout),
-            nn.Linear(head_hidden_dim, phi_bins),
-        )
+        self.phi_cls_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, head_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(head_hidden_dim, n_bins),
+            )
+            for n_bins in self.phi_bins_list
+        ])
         
-        self.pt_cls_head = nn.Sequential(
-            nn.Linear(dim, head_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(head_dropout),
-            nn.Linear(head_hidden_dim, pt_bins),
-        )
+        # pt (or inv_pt) heads
+        self.pt_cls_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, head_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(head_hidden_dim, n_bins),
+            )
+            for n_bins in self.pt_bins_list
+        ])
         
+        # Charge head (always single, binary)
         self.charge_head = nn.Sequential(
             nn.Linear(dim, head_hidden_dim),
             nn.GELU(),
             nn.Dropout(head_dropout),
-            nn.Linear(head_hidden_dim, 1),  # Binary classification
+            nn.Linear(head_hidden_dim, 1),
         )
         
-        # Regression heads (optional, for stages 2 & 3)
-        # Output same number of values as classification bins (per-bin offsets)
+        # Backward-compatible aliases: point to finest-level head
+        self.eta_cls_head = self.eta_cls_heads[-1]
+        self.phi_cls_head = self.phi_cls_heads[-1]
+        self.pt_cls_head = self.pt_cls_heads[-1]
+        
+        # ===== Regression heads (optional, finest level only) =====
         if enable_regression_heads:
             self.eta_reg_head = self._make_regression_head(
                 dim, regression_hidden_dim, regression_num_layers, regression_dropout,
-                output_dim=eta_bins
+                output_dim=self.eta_bins
             )
             self.phi_reg_head = self._make_regression_head(
                 dim, regression_hidden_dim, regression_num_layers, regression_dropout,
-                output_dim=phi_bins
+                output_dim=self.phi_bins
             )
             self.pt_reg_head = self._make_regression_head(
                 dim, regression_hidden_dim, regression_num_layers, regression_dropout,
-                output_dim=pt_bins
+                output_dim=self.pt_bins
             )
         
         # Initialize weights
@@ -352,7 +395,7 @@ class YOLORegressor(nn.Module):
     
     def _init_weights(self):
         """Initialize head weights."""
-        heads = [self.eta_cls_head, self.phi_cls_head, self.pt_cls_head, self.charge_head]
+        heads = list(self.eta_cls_heads) + list(self.phi_cls_heads) + list(self.pt_cls_heads) + [self.charge_head]
         if self.enable_regression_heads:
             heads.extend([self.eta_reg_head, self.phi_reg_head, self.pt_reg_head])
             
@@ -391,15 +434,21 @@ class YOLORegressor(nn.Module):
                 
     def freeze_classification_heads(self):
         """Freeze classification heads."""
-        for head in [self.eta_cls_head, self.phi_cls_head, self.pt_cls_head, self.charge_head]:
-            for param in head.parameters():
-                param.requires_grad = False
+        for head_list in [self.eta_cls_heads, self.phi_cls_heads, self.pt_cls_heads]:
+            for head in head_list:
+                for param in head.parameters():
+                    param.requires_grad = False
+        for param in self.charge_head.parameters():
+            param.requires_grad = False
                 
     def unfreeze_classification_heads(self):
         """Unfreeze classification heads."""
-        for head in [self.eta_cls_head, self.phi_cls_head, self.pt_cls_head, self.charge_head]:
-            for param in head.parameters():
-                param.requires_grad = True
+        for head_list in [self.eta_cls_heads, self.phi_cls_heads, self.pt_cls_heads]:
+            for head in head_list:
+                for param in head.parameters():
+                    param.requires_grad = True
+        for param in self.charge_head.parameters():
+            param.requires_grad = True
     
     def forward(
         self,
@@ -423,18 +472,27 @@ class YOLORegressor(nn.Module):
         -------
         dict with:
             Classification outputs (if run_classification=True):
-            - eta_logits: (B, eta_bins) - raw logits
-            - phi_logits: (B, phi_bins) - raw logits
-            - pt_logits: (B, pt_bins) - raw logits
-            - charge_logit: (B, 1) - binary classification logit
+            For single-level (backward compatible):
+                - eta_logits: (B, eta_bins)
+                - phi_logits: (B, phi_bins)
+                - pt_logits or inv_pt_logits: (B, pt_bins)
+                - charge_logit: (B, 1)
+            For multi-level hierarchical:
+                - eta_logits_L0, eta_logits_L1, ...: coarse to fine
+                - phi_logits_L0, phi_logits_L1, ...
+                - pt_logits_L0, pt_logits_L1, ... (or inv_pt_logits_L0, ...)
+                - eta_logits: alias for finest level
+                - phi_logits: alias for finest level
+                - pt_logits/inv_pt_logits: alias for finest level
+                - charge_logit: (B, 1)
             
             Regression outputs (if run_regression=True):
-            - eta_offsets: (B, eta_bins) - per-bin offset predictions
-            - phi_offsets: (B, phi_bins) - per-bin offset predictions
-            - pt_offsets: (B, pt_bins) - per-bin offset predictions
+                - eta_offsets: (B, eta_bins) finest level
+                - phi_offsets: (B, phi_bins) finest level
+                - pt_offsets/inv_pt_offsets: (B, pt_bins) finest level
             
             Always returned:
-            - cls_embedding: (B, dim) - pooled representation
+                - cls_embedding: (B, dim)
         """
         hit_features = inputs['hit_features']
         hit_mask = inputs['hit_mask']
@@ -444,39 +502,54 @@ class YOLORegressor(nn.Module):
         x = self.input_projection(hit_features)
         
         if self.use_attention_pooling:
-            # No CLS token, process all positions
-            # Add positional embedding
             x = x + self.pos_embedding[:, :seq_len, :]
-            
-            # Encode
             x = self.encoder(x)
-            
-            # Attention pooling
             cls_embedding = self.attention_pool(x, hit_mask)
         else:
-            # Replace position 0 with CLS token
             cls_tokens = self.cls_token.expand(B, -1, -1)
             x = torch.cat([cls_tokens, x[:, 1:, :]], dim=1)
-            
-            # Add positional embedding
             x = x + self.pos_embedding[:, :seq_len, :]
-            
-            # Encode
             x = self.encoder(x)
-            
-            # Extract CLS token
             cls_embedding = x[:, 0, :]
         
         outputs = {'cls_embedding': cls_embedding}
         
+        # Determine pt key prefix
+        pt_prefix = 'inv_pt' if self.use_inv_pt else 'pt'
+        
         # Classification heads
         if run_classification:
-            outputs['eta_logits'] = self.eta_cls_head(cls_embedding)
-            outputs['phi_logits'] = self.phi_cls_head(cls_embedding)
-            outputs['pt_logits'] = self.pt_cls_head(cls_embedding)
+            # Eta heads (all levels)
+            for i, head in enumerate(self.eta_cls_heads):
+                key = f'eta_logits_L{i}' if self.num_eta_levels > 1 else 'eta_logits'
+                outputs[key] = head(cls_embedding)
+            
+            # Phi heads (all levels)
+            for i, head in enumerate(self.phi_cls_heads):
+                key = f'phi_logits_L{i}' if self.num_phi_levels > 1 else 'phi_logits'
+                outputs[key] = head(cls_embedding)
+            
+            # PT/inv_pt heads (all levels)
+            for i, head in enumerate(self.pt_cls_heads):
+                key = f'{pt_prefix}_logits_L{i}' if self.num_pt_levels > 1 else f'{pt_prefix}_logits'
+                outputs[key] = head(cls_embedding)
+            
+            # Always provide finest-level aliases for backward compatibility
+            if self.num_eta_levels > 1:
+                outputs['eta_logits'] = outputs[f'eta_logits_L{self.num_eta_levels - 1}']
+            if self.num_phi_levels > 1:
+                outputs['phi_logits'] = outputs[f'phi_logits_L{self.num_phi_levels - 1}']
+            if self.num_pt_levels > 1:
+                outputs[f'{pt_prefix}_logits'] = outputs[f'{pt_prefix}_logits_L{self.num_pt_levels - 1}']
+            
+            # Charge head (always single level)
             outputs['charge_logit'] = self.charge_head(cls_embedding)
+            
+            # For backward compatibility: if using inv_pt, also provide pt_logits alias
+            if self.use_inv_pt:
+                outputs['pt_logits'] = outputs['inv_pt_logits']
         
-        # Regression heads (output per-bin offsets)
+        # Regression heads (finest level only)
         if run_regression:
             if not self.enable_regression_heads:
                 raise ValueError(
@@ -485,7 +558,10 @@ class YOLORegressor(nn.Module):
                 )
             outputs['eta_offsets'] = self.eta_reg_head(cls_embedding)
             outputs['phi_offsets'] = self.phi_reg_head(cls_embedding)
-            outputs['pt_offsets'] = self.pt_reg_head(cls_embedding)
+            outputs[f'{pt_prefix}_offsets'] = self.pt_reg_head(cls_embedding)
+            # Backward compatibility alias
+            if self.use_inv_pt:
+                outputs['pt_offsets'] = outputs['inv_pt_offsets']
         
         return outputs
 

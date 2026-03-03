@@ -112,8 +112,8 @@ def iterate_tracks(data_dir: Path, metadata: dict, max_events: int = -1):
         hits_array = current_h5['hits'][row_idx, :num_hits]
         tracks_array = current_h5['tracks'][row_idx, :num_tracks]
         
-        # Get hit positions (in mm, will convert to km like in data.py for consistency)
-        posX = hits_array[:, posX_idx] * 0.001  # mm -> km scale as in data.py
+        # Get hit positions (in mm, will convert to m like in data.py for consistency)
+        posX = hits_array[:, posX_idx] * 0.001  # mm -> m scale as in data.py
         posY = hits_array[:, posY_idx] * 0.001
         posZ = hits_array[:, posZ_idx] * 0.001
         truth_links = hits_array[:, truth_link_idx].astype(int)
@@ -172,6 +172,20 @@ def compute_quantile_bins(values: np.ndarray, num_bins: int) -> np.ndarray:
     return bin_edges
 
 
+def compute_log_bins(min_val: float, max_val: float, num_bins: int) -> np.ndarray:
+    """Compute logarithmically-spaced bin edges.
+    
+    This provides finer resolution at low values and coarser resolution at high values,
+    which is appropriate for pt where resolution typically scales with pt.
+    
+    Returns array of bin edges of length (num_bins + 1).
+    """
+    log_min = np.log(min_val)
+    log_max = np.log(max_val)
+    log_edges = np.linspace(log_min, log_max, num_bins + 1)
+    return np.exp(log_edges)
+
+
 def compute_uniform_bins(values: np.ndarray, num_bins: int) -> np.ndarray:
     """Compute uniform bin edges.
     
@@ -186,7 +200,7 @@ def compute_bin_centers(bin_edges: np.ndarray) -> np.ndarray:
 
 
 def create_histograms(all_pt, all_eta, all_phi, all_charge, 
-                      eta_residuals, phi_residuals, output_dir):
+                      eta_residuals, phi_residuals, output_dir, all_inv_pt=None):
     """Create and save histogram plots."""
     hist_dir = output_dir / 'histograms'
     hist_dir.mkdir(parents=True, exist_ok=True)
@@ -286,7 +300,57 @@ def create_histograms(all_pt, all_eta, all_phi, all_charge,
     plt.close()
     print(f"  Saved: {hist_dir / 'phi_seed_residuals.png'}")
     
-    # 8. Combined 2x2 summary plot
+    # 8. 1/PT distribution (if provided)
+    if all_inv_pt is not None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(all_inv_pt, bins=100, color='darkred', edgecolor='black', alpha=0.7)
+        ax.set_xlabel('1/pT [1/GeV]', fontsize=12)
+        ax.set_ylabel('Count', fontsize=12)
+        ax.set_title(f'1/pT Distribution (N = {len(all_inv_pt):,} tracks)', fontsize=14)
+        ax.axvline(np.median(all_inv_pt), color='blue', linestyle='--', 
+                   label=f'Median: {np.median(all_inv_pt):.4f} 1/GeV')
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig(hist_dir / 'inv_pt_distribution.png', dpi=150)
+        plt.close()
+        print(f"  Saved: {hist_dir / 'inv_pt_distribution.png'}")
+        
+        # 1/PT distribution (log y-axis)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(all_inv_pt, bins=100, color='darkred', edgecolor='black', alpha=0.7)
+        ax.set_yscale('log')
+        ax.set_xlabel('1/pT [1/GeV]', fontsize=12)
+        ax.set_ylabel('Count (log scale)', fontsize=12)
+        ax.set_title(f'1/pT Distribution - Log Scale (N = {len(all_inv_pt):,} tracks)', fontsize=14)
+        ax.axvline(np.median(all_inv_pt), color='blue', linestyle='--', 
+                   label=f'Median: {np.median(all_inv_pt):.4f} 1/GeV')
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig(hist_dir / 'inv_pt_distribution_logy.png', dpi=150)
+        plt.close()
+        print(f"  Saved: {hist_dir / 'inv_pt_distribution_logy.png'}")
+        
+        # 1/PT vs PT comparison side by side
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        
+        axes[0].hist(all_pt, bins=100, color='steelblue', edgecolor='black', alpha=0.7)
+        axes[0].set_yscale('log')
+        axes[0].set_xlabel('pT [GeV]', fontsize=12)
+        axes[0].set_ylabel('Count (log)', fontsize=12)
+        axes[0].set_title('pT Distribution', fontsize=13)
+        
+        axes[1].hist(all_inv_pt, bins=100, color='darkred', edgecolor='black', alpha=0.7)
+        axes[1].set_xlabel('1/pT [1/GeV]', fontsize=12)
+        axes[1].set_ylabel('Count', fontsize=12)
+        axes[1].set_title('1/pT Distribution (curvature proxy)', fontsize=13)
+        
+        plt.suptitle(f'pT vs 1/pT Distributions (N = {len(all_pt):,} tracks)', fontsize=14)
+        plt.tight_layout()
+        plt.savefig(hist_dir / 'pt_vs_inv_pt_comparison.png', dpi=150)
+        plt.close()
+        print(f"  Saved: {hist_dir / 'pt_vs_inv_pt_comparison.png'}")
+    
+    # 9. Combined 2x2 summary plot
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
     # PT (log y)
@@ -462,6 +526,177 @@ def create_bin_resolution_plots(all_pt, all_eta, output_dir, pt_bin_counts, eta_
     print(f"\nBin resolution plots saved to: {hist_dir}")
 
 
+def create_log_pt_bin_resolution_plots(all_pt, output_dir, pt_bin_counts):
+    """Create visualization plots showing logarithmic pt bin boundaries on distributions.
+    
+    Similar to quantile bins but with log-spaced bin edges, providing finer
+    resolution at low pt and coarser resolution at high pt.
+    """
+    hist_dir = output_dir / 'histograms'
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    
+    print("\n" + "="*60)
+    print("CREATING LOGARITHMIC PT BIN RESOLUTION PLOTS")
+    print("="*60)
+    
+    PT_MIN, PT_MAX = 5.0, 200.0
+    
+    for num_bins in pt_bin_counts:
+        pt_bins = compute_log_bins(PT_MIN, PT_MAX, num_bins)
+        
+        fig, ax = plt.subplots(figsize=(14, 7))
+        
+        # Plot histogram
+        counts, edges, _ = ax.hist(all_pt, bins=200, color='steelblue', 
+                                   edgecolor='none', alpha=0.6, label='pT distribution')
+        ax.set_yscale('log')
+        
+        # Add vertical lines for bin edges
+        for i, edge in enumerate(pt_bins):
+            alpha = 0.8 if i in [0, len(pt_bins)-1] else 0.4
+            linewidth = 2 if i in [0, len(pt_bins)-1] else 0.8
+            color = 'darkgreen' if i in [0, len(pt_bins)-1] else 'green'
+            ax.axvline(edge, color=color, linestyle='-', alpha=alpha, linewidth=linewidth)
+        
+        # Compute bin width statistics
+        bin_widths = np.diff(pt_bins)
+        
+        ax.set_xlabel('pT [GeV]', fontsize=12)
+        ax.set_ylabel('Count (log scale)', fontsize=12)
+        ax.set_title(f'pT Distribution with {num_bins} Logarithmic Bins\n'
+                    f'Bin widths: low pT={bin_widths[0]:.2f} GeV, high pT={bin_widths[-1]:.2f} GeV, '
+                    f'ratio={bin_widths[-1]/bin_widths[0]:.1f}x', fontsize=13)
+        ax.set_xlim(0, PT_MAX + 10)
+        
+        # Add legend with bin info
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='steelblue', alpha=0.6, lw=10, label='pT distribution'),
+            Line2D([0], [0], color='green', lw=1.5, label=f'{num_bins} logarithmic bin edges'),
+        ]
+        ax.legend(handles=legend_elements, loc='upper right')
+        
+        plt.tight_layout()
+        plt.savefig(hist_dir / f'pt_bins_{num_bins}_log_resolution.png', dpi=150)
+        plt.close()
+        print(f"  Saved: {hist_dir / f'pt_bins_{num_bins}_log_resolution.png'}")
+    
+    # Create comparison plot: quantile vs log for same bin count
+    for num_bins in pt_bin_counts:
+        pt_for_binning = all_pt[(all_pt >= PT_MIN) & (all_pt <= PT_MAX)]
+        pt_bins_quantile = compute_quantile_bins(pt_for_binning, num_bins)
+        pt_bins_quantile[0] = PT_MIN
+        pt_bins_quantile[-1] = PT_MAX
+        pt_bins_log = compute_log_bins(PT_MIN, PT_MAX, num_bins)
+        
+        fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+        
+        # Left: Quantile bins
+        axes[0].hist(all_pt, bins=200, color='steelblue', edgecolor='none', alpha=0.6)
+        axes[0].set_yscale('log')
+        for i, edge in enumerate(pt_bins_quantile):
+            alpha = 0.8 if i in [0, len(pt_bins_quantile)-1] else 0.4
+            axes[0].axvline(edge, color='darkred', linestyle='-', alpha=alpha, linewidth=0.8)
+        widths_q = np.diff(pt_bins_quantile)
+        axes[0].set_xlabel('pT [GeV]', fontsize=12)
+        axes[0].set_ylabel('Count (log scale)', fontsize=12)
+        axes[0].set_title(f'Quantile Bins ({num_bins})\n'
+                         f'Width: {np.min(widths_q):.2f}-{np.max(widths_q):.2f} GeV', fontsize=13)
+        axes[0].set_xlim(0, PT_MAX + 10)
+        
+        # Right: Log bins
+        axes[1].hist(all_pt, bins=200, color='steelblue', edgecolor='none', alpha=0.6)
+        axes[1].set_yscale('log')
+        for i, edge in enumerate(pt_bins_log):
+            alpha = 0.8 if i in [0, len(pt_bins_log)-1] else 0.4
+            axes[1].axvline(edge, color='darkgreen', linestyle='-', alpha=alpha, linewidth=0.8)
+        widths_l = np.diff(pt_bins_log)
+        axes[1].set_xlabel('pT [GeV]', fontsize=12)
+        axes[1].set_ylabel('Count (log scale)', fontsize=12)
+        axes[1].set_title(f'Logarithmic Bins ({num_bins})\n'
+                         f'Width: {widths_l[0]:.2f} (low) → {widths_l[-1]:.2f} (high) GeV', fontsize=13)
+        axes[1].set_xlim(0, PT_MAX + 10)
+        
+        plt.suptitle(f'pT Binning Comparison: Quantile vs Logarithmic ({num_bins} bins)', fontsize=14)
+        plt.tight_layout()
+        plt.savefig(hist_dir / f'pt_bins_{num_bins}_quantile_vs_log.png', dpi=150)
+        plt.close()
+        print(f"  Saved: {hist_dir / f'pt_bins_{num_bins}_quantile_vs_log.png'}")
+    
+    print(f"\nLogarithmic pT bin plots saved to: {hist_dir}")
+
+
+def create_inv_pt_bin_resolution_plots(all_inv_pt, output_dir, inv_pt_bin_counts):
+    """Create visualization plots showing 1/pt bin boundaries on distributions.
+    
+    The detector measures curvature ∝ 1/pt directly, so uniform binning in 1/pt
+    should provide more natural resolution for the detector's measurement capability.
+    """
+    hist_dir = output_dir / 'histograms'
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    
+    print("\n" + "="*60)
+    print("CREATING 1/PT BIN RESOLUTION PLOTS")
+    print("="*60)
+    
+    INV_PT_MIN = 1.0 / 200.0  # = 0.005 (from PT_MAX)
+    INV_PT_MAX = 1.0 / 5.0    # = 0.2   (from PT_MIN)
+    
+    for num_bins in inv_pt_bin_counts:
+        # Uniform bins in 1/pt space
+        inv_pt_bins = np.linspace(INV_PT_MIN, INV_PT_MAX, num_bins + 1)
+        
+        fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+        
+        # Left: 1/pt distribution with bins
+        counts, edges, _ = axes[0].hist(all_inv_pt, bins=200, color='darkred',
+                                        edgecolor='none', alpha=0.6)
+        for i, edge in enumerate(inv_pt_bins):
+            alpha_val = 0.8 if i in [0, len(inv_pt_bins)-1] else 0.4
+            linewidth = 2 if i in [0, len(inv_pt_bins)-1] else 0.8
+            color = 'navy' if i in [0, len(inv_pt_bins)-1] else 'blue'
+            axes[0].axvline(edge, color=color, linestyle='-', alpha=alpha_val, linewidth=linewidth)
+        
+        bin_widths = np.diff(inv_pt_bins)
+        axes[0].set_xlabel('1/pT [1/GeV]', fontsize=12)
+        axes[0].set_ylabel('Count', fontsize=12)
+        axes[0].set_title(f'1/pT with {num_bins} Uniform Bins\n'
+                         f'Bin width: {bin_widths[0]*1000:.2f} × 10⁻³ 1/GeV', fontsize=13)
+        
+        # Right: Same bins mapped back to pt space  
+        pt_bin_edges = 1.0 / inv_pt_bins[::-1]  # Invert and reverse for increasing pt
+        all_pt = 1.0 / all_inv_pt
+        counts, edges, _ = axes[1].hist(all_pt, bins=200, color='steelblue',
+                                        edgecolor='none', alpha=0.6)
+        axes[1].set_yscale('log')
+        for i, edge in enumerate(pt_bin_edges):
+            alpha_val = 0.8 if i in [0, len(pt_bin_edges)-1] else 0.4
+            linewidth = 2 if i in [0, len(pt_bin_edges)-1] else 0.8
+            axes[1].axvline(edge, color='blue', linestyle='-', alpha=alpha_val, linewidth=linewidth)
+        
+        pt_widths = np.diff(pt_bin_edges)
+        axes[1].set_xlabel('pT [GeV]', fontsize=12)
+        axes[1].set_ylabel('Count (log scale)', fontsize=12)
+        axes[1].set_title(f'Same {num_bins} bins mapped to pT space\n'
+                         f'pT width: {np.min(pt_widths):.2f}-{np.max(pt_widths):.2f} GeV', fontsize=13)
+        axes[1].set_xlim(0, 210)
+        
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='darkred', alpha=0.6, lw=10, label='Distribution'),
+            Line2D([0], [0], color='blue', lw=1.5, label=f'{num_bins} uniform 1/pT bins'),
+        ]
+        axes[0].legend(handles=legend_elements, loc='upper right')
+        
+        plt.suptitle(f'1/pT Uniform Binning ({num_bins} bins): Curvature-Motivated', fontsize=14)
+        plt.tight_layout()
+        plt.savefig(hist_dir / f'inv_pt_bins_{num_bins}_resolution.png', dpi=150)
+        plt.close()
+        print(f"  Saved: {hist_dir / f'inv_pt_bins_{num_bins}_resolution.png'}")
+    
+    print(f"\n1/pT bin resolution plots saved to: {hist_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Compute YOLO-style classification bins')
     parser.add_argument('--data_dir', type=str, required=True,
@@ -470,12 +705,16 @@ def main():
                         help='Output directory for bins (default: data_dir/bins)')
     parser.add_argument('--max_events', type=int, default=-1,
                         help='Maximum number of events to process (-1 for all)')
-    parser.add_argument('--pt_bins', type=str, default='25,50,100,200,400',
+    parser.add_argument('--pt_bins', type=str, default='10,25,50,100,200,400',
                         help='Comma-separated list of pt bin counts')
-    parser.add_argument('--eta_bins', type=str, default='50,100,2000,6000,12000',
+    parser.add_argument('--eta_bins', type=str, default='50,100,500,1000,2000,6000,12000',
                         help='Comma-separated list of eta bin counts')
-    parser.add_argument('--phi_bins', type=str, default='50,100,1000,2000,6000,12000',
+    parser.add_argument('--phi_bins', type=str, default='50,100,500,1000,2000,6000,12000',
                         help='Comma-separated list of phi bin counts')
+    parser.add_argument('--pt_log_bins', action='store_true',
+                        help='Use logarithmic binning for pt instead of quantile-based')
+    parser.add_argument('--inv_pt_bins', type=str, default='10,25,50,100,200,400',
+                        help='Comma-separated list of 1/pt bin counts (uniform in 1/pt space)')
     
     args = parser.parse_args()
     
@@ -486,10 +725,12 @@ def main():
     pt_bin_counts = [int(x) for x in args.pt_bins.split(',')]
     eta_bin_counts = [int(x) for x in args.eta_bins.split(',')]
     phi_bin_counts = [int(x) for x in args.phi_bins.split(',')]
+    inv_pt_bin_counts = [int(x) for x in args.inv_pt_bins.split(',')]
     
     print(f"Loading dataset from: {data_dir}")
     print(f"Output directory: {output_dir}")
     print(f"PT bin counts: {pt_bin_counts}")
+    print(f"1/PT bin counts: {inv_pt_bin_counts}")
     print(f"Eta bin counts: {eta_bin_counts}")
     print(f"Phi bin counts: {phi_bin_counts}")
     
@@ -541,6 +782,15 @@ def main():
     print(f"  Std: {np.std(all_pt):.4f}")
     print(f"  Median: {np.median(all_pt):.4f}")
     print(f"  Log PT range: [{np.log(np.min(all_pt)):.4f}, {np.log(np.max(all_pt)):.4f}]")
+    
+    # 1/PT statistics
+    all_inv_pt = 1.0 / all_pt
+    print(f"\n1/PT (1/GeV):")
+    print(f"  Min: {np.min(all_inv_pt):.6f}")
+    print(f"  Max: {np.max(all_inv_pt):.6f}")
+    print(f"  Mean: {np.mean(all_inv_pt):.6f}")
+    print(f"  Std: {np.std(all_inv_pt):.6f}")
+    print(f"  Median: {np.median(all_inv_pt):.6f}")
     
     # Eta statistics
     print(f"\nEta:")
@@ -595,13 +845,20 @@ def main():
     
     # Create histogram plots
     create_histograms(all_pt, all_eta, all_phi, all_charge, 
-                      eta_residuals, phi_residuals, output_dir)
+                      eta_residuals, phi_residuals, output_dir, all_inv_pt=all_inv_pt)
     
     # Create bin resolution visualization plots
     create_bin_resolution_plots(all_pt, all_eta, output_dir, pt_bin_counts, eta_bin_counts)
+    
+    # Create logarithmic pt bin resolution plots
+    create_log_pt_bin_resolution_plots(all_pt, output_dir, pt_bin_counts)
+    
+    # Create 1/pt bin resolution plots
+    create_inv_pt_bin_resolution_plots(all_inv_pt, output_dir, inv_pt_bin_counts)
 
     print("\n" + "="*60)
     print("CREATING BIN ARRAYS")
+    print("="*60)
     print("="*60)
     
     # Hard clipping ranges
@@ -615,23 +872,39 @@ def main():
     print(f"\nPT clipping: [{PT_MIN}, {PT_MAX}] GeV")
     print(f"  Tracks in range: {len(pt_for_binning):,} / {len(all_pt):,} ({100*len(pt_for_binning)/len(all_pt):.2f}%)")
     
-    # Create PT bins (quantile-based for equal samples per bin, clipped)
-    print("\nPT bins (quantile-based, clipped):")
-    for num_bins in pt_bin_counts:
-        pt_bins = compute_quantile_bins(pt_for_binning, num_bins)
-        # Ensure exact boundaries
-        pt_bins[0] = PT_MIN
-        pt_bins[-1] = PT_MAX
-        pt_centers = compute_bin_centers(pt_bins)
-        
-        # Save bin edges and centers
-        np.save(output_dir / f'pt_bins_{num_bins}.npy', pt_bins)
-        np.save(output_dir / f'pt_bin_centers_{num_bins}.npy', pt_centers)
-        
-        # Compute bin widths for reporting
-        bin_widths = np.diff(pt_bins)
-        print(f"  {num_bins} bins: edges [{pt_bins[0]:.2f}, {pt_bins[-1]:.2f}] GeV, "
-              f"width range [{np.min(bin_widths):.3f}, {np.max(bin_widths):.3f}] GeV")
+    # Create PT bins - either logarithmic or quantile-based
+    if args.pt_log_bins:
+        print("\nPT bins (LOGARITHMIC, clipped):")
+        for num_bins in pt_bin_counts:
+            pt_bins = compute_log_bins(PT_MIN, PT_MAX, num_bins)
+            pt_centers = compute_bin_centers(pt_bins)
+            
+            # Save bin edges and centers with _log suffix
+            np.save(output_dir / f'pt_bins_{num_bins}_log.npy', pt_bins)
+            np.save(output_dir / f'pt_bin_centers_{num_bins}_log.npy', pt_centers)
+            
+            # Compute bin widths for reporting
+            bin_widths = np.diff(pt_bins)
+            print(f"  {num_bins} bins: edges [{pt_bins[0]:.2f}, {pt_bins[-1]:.2f}] GeV, "
+                  f"width range [{np.min(bin_widths):.3f}, {np.max(bin_widths):.3f}] GeV")
+            print(f"    Low pt width: {bin_widths[0]:.3f} GeV, High pt width: {bin_widths[-1]:.3f} GeV")
+    else:
+        print("\nPT bins (quantile-based, clipped):")
+        for num_bins in pt_bin_counts:
+            pt_bins = compute_quantile_bins(pt_for_binning, num_bins)
+            # Ensure exact boundaries
+            pt_bins[0] = PT_MIN
+            pt_bins[-1] = PT_MAX
+            pt_centers = compute_bin_centers(pt_bins)
+            
+            # Save bin edges and centers
+            np.save(output_dir / f'pt_bins_{num_bins}.npy', pt_bins)
+            np.save(output_dir / f'pt_bin_centers_{num_bins}.npy', pt_centers)
+            
+            # Compute bin widths for reporting
+            bin_widths = np.diff(pt_bins)
+            print(f"  {num_bins} bins: edges [{pt_bins[0]:.2f}, {pt_bins[-1]:.2f}] GeV, "
+                  f"width range [{np.min(bin_widths):.3f}, {np.max(bin_widths):.3f}] GeV")
     
     # Filter eta: remove barrel gap (-0.1, 0.1) where no tracks exist
     eta_for_binning = all_eta[(all_eta <= ETA_GAP_MIN) | (all_eta >= ETA_GAP_MAX)]
@@ -689,12 +962,32 @@ def main():
         print(f"  {num_bins} bins: edges [{phi_bins[0]:.4f}, {phi_bins[-1]:.4f}], "
               f"width {bin_width:.6f} rad = {bin_width * 1000:.3f} mrad")
     
+    # Create 1/PT bins (uniform in 1/pt space)
+    # The detector measures curvature proportional to 1/pt directly
+    INV_PT_MIN = 1.0 / PT_MAX  # = 0.005 (at pt = 200 GeV)
+    INV_PT_MAX = 1.0 / PT_MIN  # = 0.2   (at pt = 5 GeV)
+    print(f"\n1/PT range: [{INV_PT_MIN:.6f}, {INV_PT_MAX:.6f}] (from PT [{PT_MIN}, {PT_MAX}])")
+    print("\n1/PT bins (uniform in 1/pt space):")
+    for num_bins in inv_pt_bin_counts:
+        inv_pt_bins = np.linspace(INV_PT_MIN, INV_PT_MAX, num_bins + 1)
+        inv_pt_centers = compute_bin_centers(inv_pt_bins)
+        
+        np.save(output_dir / f'inv_pt_bins_{num_bins}.npy', inv_pt_bins)
+        np.save(output_dir / f'inv_pt_bin_centers_{num_bins}.npy', inv_pt_centers)
+        
+        bin_width = (INV_PT_MAX - INV_PT_MIN) / num_bins
+        print(f"  {num_bins} bins: 1/pt edges [{inv_pt_bins[0]:.6f}, {inv_pt_bins[-1]:.6f}], "
+              f"width {bin_width*1000:.4f}e-3 1/GeV")
+        print(f"    -> pt resolution: {1/inv_pt_bins[1]:.1f}-{1/inv_pt_bins[0]:.1f} GeV (low pt), "
+              f"{1/inv_pt_bins[-1]:.1f}-{1/inv_pt_bins[-2]:.1f} GeV (high pt)")
+    
     # Save raw data arrays for histogram plotting
     print("\nSaving raw data arrays for plotting...")
     np.save(output_dir / 'all_pt.npy', all_pt)
     np.save(output_dir / 'all_eta.npy', all_eta)
     np.save(output_dir / 'all_phi.npy', all_phi)
     np.save(output_dir / 'all_charge.npy', all_charge)
+    np.save(output_dir / 'all_inv_pt.npy', all_inv_pt)
     
     # Save statistics to text file
     stats_file = output_dir / 'statistics.txt'

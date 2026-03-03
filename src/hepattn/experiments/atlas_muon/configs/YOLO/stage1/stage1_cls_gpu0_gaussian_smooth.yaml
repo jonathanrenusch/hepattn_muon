@@ -1,0 +1,229 @@
+# YOLO Stage 1: Classification Pretraining - GPU 0 with Gaussian Label Smoothing
+# PT: 25 bins (logarithmic), Eta/Phi: 100 bins
+# Uses CLS token pooling
+#
+# NEW FEATURES:
+# 1. Gaussian Label Smoothing - provides smoother gradients by using soft labels
+#    - For eta/phi: Gaussian centered at true value spread over nearby bins
+#    - For phi: Uses circular Gaussian with proper wrapping at ±π
+#    - For pt: Uses log-space Gaussian (since pt resolution scales with pt)
+# 
+# 2. Logarithmic PT binning - finer resolution at low pt, coarser at high pt
+#    - Better matches physics: pt resolution typically degrades at higher pt
+#    - Run compute_yolo_bins.py with --pt_log_bins to generate these files
+#
+# 3. Top-5 and Top-10 physics-informed accuracy metrics
+#    - Measures if prediction is within k adjacent bins of truth
+#    - For phi: adjacency wraps around (bin 0 adjacent to bin N-1)
+#    - Logged as val/eta_top5_acc, val/phi_top10_acc, etc.
+
+seed_everything: 42
+name: YOLO-Stage1-Classification-GaussianSmooth-LogPT-GPU0
+
+data:
+  train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
+  val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
+  test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
+
+  num_workers: 24
+  num_train: -1
+  num_val: -1
+  num_test: -1
+  batch_size: 1024
+
+  min_hits_per_track: 2
+  max_hits_per_track: 200
+  event_max_num_particles: 10
+     
+  hit_fields:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  inputs:
+    hit:
+    - spacePoint_globEdgeHighX
+    - spacePoint_globEdgeHighY
+    - spacePoint_globEdgeHighZ
+    - spacePoint_globEdgeLowX
+    - spacePoint_globEdgeLowY
+    - spacePoint_globEdgeLowZ
+    - spacePoint_globPosX
+    - spacePoint_globPosY
+    - spacePoint_globPosZ
+    - spacePoint_driftR
+    - spacePoint_time
+    - spacePoint_channel
+    - spacePoint_layer
+    - spacePoint_stationPhi
+    - spacePoint_stationEta
+    - spacePoint_stationIndex
+    - spacePoint_technology
+    - spacePoint_covXX
+    - spacePoint_covXY
+    - spacePoint_covYX
+    - spacePoint_covYY
+    - tube_length
+    - r
+    - s
+    - theta
+    - phi
+    - eta
+
+  targets:
+    particle:
+      - truthMuon_pt
+      - truthMuon_q
+      - truthMuon_eta
+      - truthMuon_phi
+
+trainer:
+  max_epochs: 200
+  num_sanity_val_steps: 1
+  accelerator: gpu
+  devices: [0]
+  precision: bf16-mixed
+  log_every_n_steps: 50
+  default_root_dir: logs/YOLO
+  gradient_clip_val: 1.0
+  enable_progress_bar: true
+
+  logger:
+    class_path: lightning.pytorch.loggers.CometLogger
+    init_args:
+      project_name: yolo_classification_stage1
+
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 20
+    - class_path: lightning.pytorch.callbacks.ModelSummary
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 20
+        min_delta: 0.0
+        mode: min
+        verbose: true
+
+model:
+  optimizer: AdamW
+  
+  lrs_config:
+    initial: 1e-5
+    max: 5e-4
+    end: 1e-6
+    pct_start: 0.05
+    weight_decay: 1e-5
+
+  # Bin configuration (coarse)
+  # NOTE: eta has +1 bins due to gap handling in bin files
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: &eta_bins 101  # File named eta_bins_100 but has 101 bins
+  phi_bins: &phi_bins 100
+  pt_bins: &pt_bins 25
+  
+  # ===== LOGARITHMIC PT BINNING =====
+  # Use log-spaced pt bins for better high-pt resolution
+  # Requires running compute_yolo_bins.py with --pt_log_bins first
+  pt_log_bins: true
+  # ==================================
+  
+  # Loss weights
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 1.0
+  charge_loss_weight: 0.5
+  
+  # Focal loss gamma for pt (only used if NOT using Gaussian label smoothing)
+  focal_gamma: 2.0
+  
+  # Clipping ranges
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
+  
+  # ===== GAUSSIAN LABEL SMOOTHING =====
+  # Instead of hard one-hot labels, use Gaussian soft labels centered at true value.
+  # This provides smoother gradients and teaches the network that nearby bins
+  # are "almost correct" - a physics-informed inductive bias.
+  use_gaussian_label_smoothing: true
+  
+  # Sigma values control how spread out the soft labels are:
+  # - Smaller sigma = sharper peak, more like hard labels
+  # - Larger sigma = more spread, gentler gradients
+  
+  # For eta: sigma in radians
+  # 0.01 rad = 10 mrad spreads over ~2-3 bins at 100 bins resolution
+  eta_label_sigma: 0.01
+  
+  # For phi: sigma in radians (uses circular wrapping!)
+  # The circular Gaussian properly handles labels near ±π
+  phi_label_sigma: 0.01
+  
+  # For pt: sigma as fraction in log-space
+  # 0.05 = 5% fractional width, good for relative pt resolution
+  pt_label_sigma_frac: 0.05
+  # =====================================
+
+  model:
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
+    init_args:
+      input_dim: 27
+      dim: 128
+      num_layers: 2
+      d_state: 16
+      d_conv: 4
+      expand: 2
+      use_mamba2: true
+      headdim: 32
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.15
+      head_hidden_dim: 256
+      
+      # Classification bins (must match training module)
+      eta_bins: *eta_bins  # File named eta_bins_100 but has 101 bins
+      phi_bins: *phi_bins
+      pt_bins: *pt_bins
+      
+      # Use CLS token (not attention pooling)
+      use_attention_pooling: false
+      
+      # Regression heads disabled for Stage 1
+      enable_regression_heads: false

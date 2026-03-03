@@ -1,13 +1,18 @@
-seed_everything: 42
-name: Mamba-Track-Regression-Hybrid-Mode
+# YOLO Stage 2: Regression Head Training with Frozen Encoder
+# Trains regression heads to predict per-bin offsets
+# Encoder and classification heads are frozen from Stage 1
+#
+# Key features:
+# - Multi-bin loss: All bins within a window around predicted bin are trained
+# - Softmax weighting: Classification probabilities weight the bin losses
+# - Normalized offsets: Offsets normalized by bin width (typically ∈ [-0.5, +0.5])
+# - Clamping: Predicted bin clamped to be within k bins of truth
+# - Phi wrapping: Proper circular handling for phi predictions
 
-# EXPERIMENT: Hybrid mode (delta-eta + sin/cos phi)
-# This combines the best of both worlds:
-# - Delta prediction for eta (30% improvement observed)
-# - Sin/cos representation for phi (better convergence)
+seed_everything: 42
+name: YOLO-Stage2-Regression-GPU0
 
 data:
-  # Use the same data directories as the tracking task
   train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
   val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
   test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
@@ -16,14 +21,12 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 512
+  batch_size: 1024
 
-  # Per-track data loading parameters
   min_hits_per_track: 2
   max_hits_per_track: 200
   event_max_num_particles: 10
      
-  # Hit features to use (27 features)
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -53,7 +56,6 @@ data:
     - phi
     - eta
 
-  # Required for base dataset compatibility
   inputs:
     hit:
     - spacePoint_globEdgeHighX
@@ -92,20 +94,20 @@ data:
       - truthMuon_phi
 
 trainer:
-  max_epochs: 200
+  max_epochs: 100
   num_sanity_val_steps: 1
   accelerator: gpu
   devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
-  default_root_dir: logs
+  default_root_dir: logs/YOLO
   gradient_clip_val: 1.0
   enable_progress_bar: true
 
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: mamba_track_regression
+      project_name: yolo_regression_stage2
 
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
@@ -114,7 +116,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 5
+        save_top_k: 10
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -123,32 +125,62 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 40
+        patience: 15
         min_delta: 0.0
         mode: min
         verbose: true
 
 model:
-  optimizer: Lion
+  optimizer: AdamW
   
   lrs_config:
-    initial: 2e-5
+    initial: 1e-5
     max: 1e-4
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Loss weighting - default (no special weighting)
-  regression_weight: 1.0
-  classification_weight: 1.0
-  
-  regression_fields:
-    - eta
-    - phi
-    - pt
+  # Stage 1 checkpoint to load encoder/classification weights
+  stage1_checkpoint: /shared/tracking/hepattn_muon/src/logs/YOLO/YOLO-Stage1-Classification-PhysicsInformed-GPU0_20260205-T145739/ckpts/epoch=033-val_loss=36.41271.ckpt
 
+  # Bin configuration (must match Stage 1)
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: &eta_bins 1001
+  phi_bins: &phi_bins 500
+  pt_bins: &pt_bins 100
+  pt_log_bins: true
+
+  # Clipping ranges (must match Stage 1)
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
+
+  # ===== CLAMPING CONFIGURATION =====
+  # Predicted bin is clamped to be within these distances of the true bin
+  # This prevents training on wildly wrong classifier predictions
+  eta_clamp_bins: 15
+  phi_clamp_bins: 10
+  pt_clamp_bins: 5
+  
+  # ===== MULTI-BIN LOSS WINDOW =====
+  # Half-width of window around clamped predicted bin
+  # All bins in window contribute to loss, weighted by softmax probabilities
+  eta_window_bins: 50
+  phi_window_bins: 25
+  pt_window_bins: 10
+  
+  # ===== LOSS CONFIGURATION =====
+  smooth_l1_beta: 0.1  # Smooth L1 beta parameter
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 1.0
+
+  # Model configuration (must match Stage 1, but with regression heads enabled)
   model:
-    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
       input_dim: 27
       dim: 128
@@ -160,19 +192,19 @@ model:
       headdim: 32
       norm: RMSNorm
       dropout: 0.0
-      head_dropout: 0.1
-      head_hidden_dim: 256
-
+      head_dropout: 0.15
+      head_hidden_dim: 2048
       
+      # Classification bins (must match Stage 1)
+      eta_bins: *eta_bins
+      phi_bins: *phi_bins
+      pt_bins: *pt_bins
       
-      regression_fields:
-        - eta
-        - phi
-        - pt
+      # Use CLS token (must match Stage 1)
+      use_attention_pooling: false
       
-      # HYBRID MODE: delta for eta, sin/cos for phi
-      use_delta_prediction: true
-      use_delta_phi: false          # KEY: Use sin/cos for phi instead of delta
-      delta_reference: "innermost"
-      phi_feature_idx: 25
-      eta_feature_idx: 26
+      # ===== REGRESSION HEADS ENABLED =====
+      enable_regression_heads: true
+      regression_hidden_dim: 256
+      regression_num_layers: 3
+      regression_dropout: 0.15

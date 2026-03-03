@@ -1,9 +1,26 @@
-# YOLO Stage 1: Classification Pretraining - GPU 1 (Medium Resolution)
-# PT: 100 bins, Eta/Phi: 2000 bins
-# Uses CLS token pooling
+# YOLO Dual-Backbone Regression Training - GPU 0
+#
+# Architecture:
+#   Backbone 1 (FROZEN): Classification encoder + heads from Stage 1
+#     → bin predictions via argmax
+#   Backbone 2 (TRAINABLE, from scratch): Same Mamba architecture
+#     → processes the same hit sequence independently
+#     → learns its own representation for high-resolution offset regression
+#
+# Offsets (same as unified):
+#   eta: linear (truth - center)
+#   phi: wrapped via atan2
+#   pt:  log-space (log(truth/center))
+#
+# The regression backbone has the same architecture as the classification
+# backbone (dim=128, 2-layer Mamba2, head_hidden_dim=512) so it has equal
+# capacity, but learns a completely independent representation.
+#
+# Stage 1 checkpoint: SSorting, epoch 199
+#   eta=501, phi=100, pt=50 (log), sort_by=s, head_hidden_dim=512
 
 seed_everything: 42
-name: YOLO-Stage1-Classification-PrelimBest-GPU1
+name: YOLO-DualBackbone-Regression-GPU0
 
 data:
   train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
@@ -16,10 +33,13 @@ data:
   num_test: -1
   batch_size: 1024
 
+  # ===== S-SORTING (must match Stage 1 checkpoint) =====
+  sort_by: s
+
   min_hits_per_track: 2
   max_hits_per_track: 200
   event_max_num_particles: 10
-     
+
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -90,7 +110,7 @@ trainer:
   max_epochs: 200
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [1]
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs/YOLO
@@ -100,7 +120,7 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: yolo_classification_stage1
+      project_name: yolo_dual_backbone_regression
 
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
@@ -109,7 +129,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 20
+        save_top_k: 10
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -118,38 +138,34 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 20
+        patience: 25
         min_delta: 0.0
         mode: min
         verbose: true
 
 model:
+  name: YOLO-DualBackbone-Regression
   optimizer: AdamW
-  
+
   lrs_config:
     initial: 1e-5
-    max: 5e-4
+    max: 1e-4
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Bin configuration (medium)
-  # NOTE: eta has +1 bins due to gap handling in bin files
+  # ===== STAGE 1 CHECKPOINT (frozen classification backbone) =====
+  stage1_checkpoint: /shared/tracking/hepattn_muon/src/logs/YOLO/YOLO-Stage1-Classification-PhysicsInformed-SSorting-GPU0_20260205-T215741/ckpts/epoch=199-val_loss=25.46230.ckpt
+
+  # Bin configuration (must match Stage 1)
   bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
-  eta_bins: &eta_bins 2001  # File named eta_bins_2000 but has 2001 bins
-  phi_bins: &phi_bins 2000
-  pt_bins: &pt_bins 100
-  
-  # Loss weights
-  eta_loss_weight: 1.0
-  phi_loss_weight: 1.0
-  pt_loss_weight: 1.0
-  charge_loss_weight: 0.5
-  
-  # Focal loss gamma for pt
-  focal_gamma: 2.0
-  
-  # Clipping ranges
+  eta_bins: &eta_bins 501
+  phi_bins: &phi_bins 100
+  pt_bins: &pt_bins 50
+  pt_log_bins: true
+  use_inv_pt: false
+
+  # Clipping ranges (must match Stage 1)
   pt_min: 5.0
   pt_max: 200.0
   eta_min: -2.7
@@ -157,29 +173,50 @@ model:
   eta_gap_min: -0.1
   eta_gap_max: 0.1
 
-  model:
+  # ===== REGRESSION BACKBONE (same architecture as classification) =====
+  input_dim: 27
+  reg_dim: 128          # Same as cls backbone dim
+  reg_num_layers: 2     # Same as cls backbone num_layers
+  reg_d_state: 16       # Same as cls backbone d_state
+  reg_d_conv: 4         # Same as cls backbone d_conv
+  reg_expand: 2         # Same as cls backbone expand
+  reg_use_mamba2: true   # Same as cls backbone
+  reg_headdim: 32       # Same as cls backbone headdim
+  reg_norm: RMSNorm      # Same as cls backbone norm
+  reg_dropout: 0.0       # Same as cls backbone dropout
+
+  # ===== REGRESSION HEADS (same size as classification heads) =====
+  reg_head_hidden_dim: 512   # Same as cls head_hidden_dim
+  reg_head_dropout: 0.15     # Same as cls head_dropout
+
+  # ===== LOSS CONFIGURATION =====
+  smooth_l1_beta: 0.1
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 1.0
+
+  # ===== CLASSIFICATION MODEL (frozen backbone) =====
+  # Must match Stage 1 checkpoint architecture EXACTLY
+  cls_model:
     class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
-      dim: 256  # Increased from 128 for more capacity
-      num_layers: 4         
-      d_state: 64           
-      d_conv: 4             
-      expand: 2             
+      input_dim: 27
+      dim: 128
+      num_layers: 2
+      d_state: 16
+      d_conv: 4
+      expand: 2
       use_mamba2: true
-      headdim: 64           
-      norm: RMSNorm         
-      dropout: 0.0          
-      head_dropout: 0.15    
+      headdim: 32
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.15
       head_hidden_dim: 512
 
-      
-      # Classification bins (must match training module)
-      eta_bins: *eta_bins  # File named eta_bins_2000 but has 2001 bins
+      # Classification bins (must match Stage 1)
+      eta_bins: *eta_bins
       phi_bins: *phi_bins
       pt_bins: *pt_bins
-      
-      # Use CLS token
+
       use_attention_pooling: false
-      
-      # Regression heads disabled for Stage 1
       enable_regression_heads: false

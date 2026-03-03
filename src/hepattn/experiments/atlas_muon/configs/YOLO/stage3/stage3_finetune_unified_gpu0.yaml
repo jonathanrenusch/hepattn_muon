@@ -1,13 +1,20 @@
-seed_everything: 42
-name: Mamba-Track-Regression-Hybrid-Mode
+# YOLO Stage 3: Joint Finetuning - GPU 0
+#
+# End-to-end finetuning with ALL parameters unfrozen:
+#   - SSM (Mamba2) encoder: UNFROZEN
+#   - Classification heads: UNFROZEN
+#   - Regression heads (external): UNFROZEN
+#
+# Starting from Stage 2 unified regression checkpoint (epoch 5).
+# Lower learning rate to avoid catastrophic forgetting.
+# Regression loss only (Smooth L1 on scalar offsets).
+#
+# Architecture: eta=501, phi=100, pt=50 (log), sort_by=s, head_hidden_dim=512
 
-# EXPERIMENT: Hybrid mode (delta-eta + sin/cos phi)
-# This combines the best of both worlds:
-# - Delta prediction for eta (30% improvement observed)
-# - Sin/cos representation for phi (better convergence)
+seed_everything: 42
+name: YOLO-Stage3-Finetune-Unified-GPU0
 
 data:
-  # Use the same data directories as the tracking task
   train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
   val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
   test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
@@ -16,14 +23,15 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 512
+  batch_size: 1024
 
-  # Per-track data loading parameters
+  # ===== S-SORTING (must match Stage 1 & 2) =====
+  sort_by: s
+
   min_hits_per_track: 2
   max_hits_per_track: 200
   event_max_num_particles: 10
      
-  # Hit features to use (27 features)
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -53,7 +61,6 @@ data:
     - phi
     - eta
 
-  # Required for base dataset compatibility
   inputs:
     hit:
     - spacePoint_globEdgeHighX
@@ -92,20 +99,20 @@ data:
       - truthMuon_phi
 
 trainer:
-  max_epochs: 200
+  max_epochs: 100
   num_sanity_val_steps: 1
   accelerator: gpu
   devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
-  default_root_dir: logs
+  default_root_dir: logs/YOLO
   gradient_clip_val: 1.0
   enable_progress_bar: true
 
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: mamba_track_regression
+      project_name: yolo_regression_stage3
 
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
@@ -114,7 +121,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 5
+        save_top_k: 10
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -123,32 +130,58 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 40
+        patience: 15
         min_delta: 0.0
         mode: min
         verbose: true
 
 model:
-  optimizer: Lion
+  optimizer: AdamW
   
+  # Lower LR for finetuning to avoid catastrophic forgetting
   lrs_config:
-    initial: 2e-5
-    max: 1e-4
-    end: 1e-6
+    initial: 1e-6
+    max: 5e-5
+    end: 1e-7
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Loss weighting - default (no special weighting)
-  regression_weight: 1.0
-  classification_weight: 1.0
-  
-  regression_fields:
-    - eta
-    - phi
-    - pt
+  # ===== STAGE 2 CHECKPOINT (loads model + regression heads) =====
+  stage2_checkpoint: /shared/tracking/hepattn_muon/src/logs/YOLO/YOLO-Stage2-Regression-Unified-GPU0_20260206-T163959/ckpts/epoch=005-val_loss=0.00434.ckpt
 
+  # Bin configuration (must match Stage 1 & 2)
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: &eta_bins 501
+  phi_bins: &phi_bins 100
+  pt_bins: &pt_bins 50
+  pt_log_bins: true
+  use_inv_pt: false
+
+  # Clipping ranges
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
+
+  # Regression head config (must match Stage 2)
+  reg_hidden_dim: 512
+  reg_num_layers: 2
+  reg_dropout: 0.15
+
+  # Loss configuration
+  smooth_l1_beta: 0.1
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 1.0
+
+  # ===== STAGE 3: UNFREEZE EVERYTHING =====
+  freeze_backbone: false
+
+  # Model configuration (must match Stage 1 & 2 EXACTLY)
   model:
-    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
       input_dim: 27
       dim: 128
@@ -160,19 +193,13 @@ model:
       headdim: 32
       norm: RMSNorm
       dropout: 0.0
-      head_dropout: 0.1
-      head_hidden_dim: 256
-
+      head_dropout: 0.15
+      head_hidden_dim: 512
       
+      # Classification bins (must match Stage 1 & 2)
+      eta_bins: *eta_bins
+      phi_bins: *phi_bins
+      pt_bins: *pt_bins
       
-      regression_fields:
-        - eta
-        - phi
-        - pt
-      
-      # HYBRID MODE: delta for eta, sin/cos for phi
-      use_delta_prediction: true
-      use_delta_phi: false          # KEY: Use sin/cos for phi instead of delta
-      delta_reference: "innermost"
-      phi_feature_idx: 25
-      eta_feature_idx: 26
+      use_attention_pooling: false
+      enable_regression_heads: false

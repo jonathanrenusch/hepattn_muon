@@ -1,13 +1,13 @@
-seed_everything: 42
-name: Mamba-Track-Regression-Hybrid-Mode
+# YOLO Stage 1: Classification Pretraining - GPU 0 (with S-sorting)
+# Same as stage1_cls_gpu0_physics.yaml but with sort_by: s instead of r
+# S-sorting makes more physical sense for forward detector regions
+# PT: 100 bins (log), Eta: 1001 bins, Phi: 500 bins
+# Uses CLS token pooling
 
-# EXPERIMENT: Hybrid mode (delta-eta + sin/cos phi)
-# This combines the best of both worlds:
-# - Delta prediction for eta (30% improvement observed)
-# - Sin/cos representation for phi (better convergence)
+seed_everything: 42
+name: YOLO-Stage1-Classification-PhysicsInformed-InvPt-SSorting-GPU0
 
 data:
-  # Use the same data directories as the tracking task
   train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
   val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
   test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
@@ -16,14 +16,15 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 512
+  batch_size: 1024
 
-  # Per-track data loading parameters
+  # ===== S-SORTING: Sort hits by arc length s instead of radial distance r =====
+  sort_by: s
+
   min_hits_per_track: 2
   max_hits_per_track: 200
   event_max_num_particles: 10
      
-  # Hit features to use (27 features)
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -53,7 +54,6 @@ data:
     - phi
     - eta
 
-  # Required for base dataset compatibility
   inputs:
     hit:
     - spacePoint_globEdgeHighX
@@ -95,17 +95,17 @@ trainer:
   max_epochs: 200
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0]
+  devices: [2]
   precision: bf16-mixed
   log_every_n_steps: 50
-  default_root_dir: logs
+  default_root_dir: logs/YOLO
   gradient_clip_val: 1.0
   enable_progress_bar: true
 
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: mamba_track_regression
+      project_name: yolo_classification_stage1
 
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
@@ -114,7 +114,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 5
+        save_top_k: 20
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -123,32 +123,59 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 40
+        patience: 20
         min_delta: 0.0
         mode: min
         verbose: true
 
 model:
-  optimizer: Lion
+  optimizer: AdamW
   
   lrs_config:
-    initial: 2e-5
-    max: 1e-4
+    initial: 1e-5
+    max: 5e-4
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Loss weighting - default (no special weighting)
-  regression_weight: 1.0
-  classification_weight: 1.0
+  # Bin configuration
+  # NOTE: eta has +1 bins due to gap handling in bin files
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: &eta_bins 501
+  phi_bins: &phi_bins 100
+  pt_bins: &pt_bins 50
   
-  regression_fields:
-    - eta
-    - phi
-    - pt
+  # Loss weights
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 10.0
+  charge_loss_weight: 1.0
+
+  use_gaussian_label_smoothing: false
+  
+  # Sigma values control how spread out the soft labels are
+  eta_label_sigma: 0.01
+  phi_label_sigma: 0.1
+  pt_label_sigma_frac: 0.05
+
+  pt_log_bins: true  # Use logarithmic pt binning files
+
+  # Focal loss gamma for pt
+  focal_gamma: 2.0
+  
+  # Clipping ranges
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
+
+    # ===== 1/pT binning =====
+  use_inv_pt: true
 
   model:
-    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
       input_dim: 27
       dim: 128
@@ -160,19 +187,19 @@ model:
       headdim: 32
       norm: RMSNorm
       dropout: 0.0
-      head_dropout: 0.1
-      head_hidden_dim: 256
+      head_dropout: 0.15
+      head_hidden_dim: 512
+      
+      # Classification bins (must match training module)
+      eta_bins: *eta_bins
+      phi_bins: *phi_bins
+      pt_bins: *pt_bins
+      
+      # 1/pt binning (must match training module)
+      use_inv_pt: true
 
+      # Use CLS token (not attention pooling)
+      use_attention_pooling: false
       
-      
-      regression_fields:
-        - eta
-        - phi
-        - pt
-      
-      # HYBRID MODE: delta for eta, sin/cos for phi
-      use_delta_prediction: true
-      use_delta_phi: false          # KEY: Use sin/cos for phi instead of delta
-      delta_reference: "innermost"
-      phi_feature_idx: 25
-      eta_feature_idx: 26
+      # Regression heads disabled for Stage 1
+      enable_regression_heads: false

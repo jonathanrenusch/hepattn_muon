@@ -37,6 +37,9 @@ class PerTrackAtlasMuonDataset(Dataset):
         Maximum number of hits per track (for padding/truncation).
     hit_fields : list[str]
         List of hit feature fields to include.
+    sort_by : str
+        Field to sort hits by. Options: 'r' (radial distance), 's' (arc length).
+        Default is 's' which makes more physical sense for forward detector regions.
     """
     
     def __init__(
@@ -49,6 +52,7 @@ class PerTrackAtlasMuonDataset(Dataset):
         max_hits_per_track: int = 200,
         hit_fields: list[str] | None = None,
         event_max_num_particles: int = 10,
+        sort_by: str = 's',
     ):
         super().__init__()
         
@@ -58,6 +62,11 @@ class PerTrackAtlasMuonDataset(Dataset):
         self.min_hits_per_track = min_hits_per_track
         self.max_hits_per_track = max_hits_per_track
         self.event_max_num_particles = event_max_num_particles
+        self.sort_by = sort_by
+        
+        # Validate sort_by
+        if sort_by not in ['r', 's']:
+            raise ValueError(f"sort_by must be 'r' or 's', got '{sort_by}'")
         
         # Default hit fields if not specified
         if hit_fields is None:
@@ -193,12 +202,12 @@ class PerTrackAtlasMuonDataset(Dataset):
                 # Only take valid hits - apply mask within valid range
                 track_hits[field] = hits[field][:num_hits][hit_mask]
         
-        # Get radial distance for sorting
-        if 'r' not in track_hits:
-            raise ValueError(f"Missing 'r' field in hit data for track {idx}")
+        # Get sorting field
+        if self.sort_by not in track_hits:
+            raise ValueError(f"Missing '{self.sort_by}' field in hit data for track {idx}")
         
-        r_values = track_hits['r']
-        num_track_hits = len(r_values)
+        sort_values = track_hits[self.sort_by]
+        num_track_hits = len(sort_values)
         
         # Sanity check: we should have found hits for this track
         if num_track_hits == 0:
@@ -223,7 +232,7 @@ class PerTrackAtlasMuonDataset(Dataset):
         
         return {
             'hit_features': torch.from_numpy(hit_features).float(),
-            'hit_r': torch.from_numpy(r_values).float(),
+            'sort_values': torch.from_numpy(sort_values).float(),
             'num_hits': num_track_hits,
             'eta': torch.tensor(eta, dtype=torch.float32),
             'phi': torch.tensor(phi, dtype=torch.float32),
@@ -239,7 +248,7 @@ class PerTrackCollator:
     """Collator for per-track batching.
     
     Handles:
-    - Sorting hits by radial distance r (ascending, inner to outer)
+    - Sorting hits by configured field (ascending, inner to outer)
     - Prepending CLS token placeholder
     - Padding sequences to max length
     - Converting charge labels from (-1, 1) to (0, 1) for BCE
@@ -296,13 +305,13 @@ class PerTrackCollator:
         charge_original = torch.zeros(batch_size)
         
         for i, item in enumerate(batch):
-            # Get hits and sort by r (ascending)
+            # Get hits and sort by configured field (ascending)
             features = item['hit_features']  # (num_hits, num_features)
-            r_values = item['hit_r']
+            sort_values = item['sort_values']
             num_hits = min(item['num_hits'], self.max_hits)
             
-            # Sort by radial distance (inner to outer)
-            sort_indices = torch.argsort(r_values)[:num_hits]
+            # Sort by sort field (inner to outer)
+            sort_indices = torch.argsort(sort_values)[:num_hits]
             sorted_features = features[sort_indices]
             
             # Position 0 is CLS token (leave as zeros, will be replaced by learnable embedding)
@@ -372,6 +381,9 @@ class PerTrackDataModule(LightningDataModule):
         Maximum hits per track.
     hit_fields : list[str], optional
         List of hit feature fields.
+    sort_by : str
+        Field to sort hits by. Options: 'r' (radial distance), 's' (arc length).
+        Default is 's' which makes more physical sense for forward detector regions.
     """
     
     def __init__(
@@ -389,6 +401,7 @@ class PerTrackDataModule(LightningDataModule):
         max_hits_per_track: int = 200,
         hit_fields: list[str] | None = None,
         event_max_num_particles: int = 10,
+        sort_by: str = 's',
         **kwargs,
     ):
         super().__init__()
@@ -406,6 +419,7 @@ class PerTrackDataModule(LightningDataModule):
         self.max_hits_per_track = max_hits_per_track
         self.hit_fields = hit_fields
         self.event_max_num_particles = event_max_num_particles
+        self.sort_by = sort_by
         self.kwargs = kwargs
         
         # These will be set from config

@@ -1,9 +1,24 @@
-# YOLO Stage 1: Classification Pretraining - GPU 1 (Medium Resolution)
-# PT: 100 bins, Eta/Phi: 2000 bins
-# Uses CLS token pooling
+# YOLO Stage 1: Hierarchical Classification with SCHEDULED Hierarchy Weights
+# 
+# Features:
+#   - Hierarchical multi-resolution classification heads (3 levels)
+#     Eta:  L0=51, L1=101, L2=501  (coarse → fine)
+#     Phi:  L0=50, L1=100, L2=500
+#     Pt:   L0=10, L1=25, L2=50    (in 1/pt space)
+#   - 1/pt binning: classifier operates in curvature space
+#   - COSINE-SCHEDULED hierarchy weights over training:
+#     L0 (coarse): 1.0 → 0.1  (focus coarse early, fade out)
+#     L1 (middle): 0.5 constant
+#     L2 (fine):   0.1 → 1.0  (ramp up fine precision)
+#   - S-sorting for hit ordering
+#
+# Rationale:
+#   Early in training, coarse bins provide easy gradient signal.
+#   As training progresses, fine bins become the primary objective.
+#   Middle levels stay constant as background regularization.
 
 seed_everything: 42
-name: YOLO-Stage1-Classification-PrelimBest-GPU1-XXL
+name: YOLO-Stage1-Hierarchical-Scheduled-GPU0
 
 data:
   train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
@@ -15,6 +30,8 @@ data:
   num_val: -1
   num_test: -1
   batch_size: 1024
+
+  sort_by: s
 
   min_hits_per_track: 2
   max_hits_per_track: 200
@@ -90,7 +107,7 @@ trainer:
   max_epochs: 200
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [2]
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs/YOLO
@@ -133,23 +150,45 @@ model:
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Bin configuration (medium)
-  # NOTE: eta has +1 bins due to gap handling in bin files
+  # ===== Hierarchical bin configuration =====
   bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
-  eta_bins: &eta_bins 2001  # File named eta_bins_2000 but has 2001 bins
-  phi_bins: &phi_bins 2000
-  pt_bins: &pt_bins 100
+  eta_bins: &eta_bins [51, 101, 501]
+  phi_bins: &phi_bins [50, 100, 500]
+  pt_bins:  &pt_bins  [10, 25, 50]
+  
+  # ===== 1/pT binning =====
+  use_inv_pt: true
+  
+  # ===== HIERARCHY WEIGHT SCHEDULING =====
+  # Initial weights (used as starting point for L0/L2, constant for L1)
+  hierarchy_loss_weights: [1.0, 0.5, 0.1]
+  
+  # Enable cosine scheduling of hierarchy weights
+  schedule_hierarchy_weights: true
+  hierarchy_weight_schedule:
+    # L0 (coarsest): fade from 1.0 → 0.1 over training
+    coarse_start: 1.0
+    coarse_end: 0.1
+    # L2 (finest): ramp from 0.1 → 1.0 over training
+    fine_start: 0.1
+    fine_end: 1.0
+    # L1 (middle): stays at hierarchy_loss_weights[1] = 0.5
+    schedule_type: cosine  # smooth cosine interpolation
   
   # Loss weights
   eta_loss_weight: 1.0
   phi_loss_weight: 1.0
-  pt_loss_weight: 1.0
-  charge_loss_weight: 0.5
-  
-  # Focal loss gamma for pt
+  pt_loss_weight: 10.0
+  charge_loss_weight: 1.0
+
+  use_gaussian_label_smoothing: false
+  eta_label_sigma: 0.01
+  phi_label_sigma: 0.1
+  pt_label_sigma_frac: 0.05
+
+  pt_log_bins: false
   focal_gamma: 2.0
   
-  # Clipping ranges
   pt_min: 5.0
   pt_max: 200.0
   eta_min: -2.7
@@ -160,25 +199,23 @@ model:
   model:
     class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
-      dim: 256  # Increased from 128 for more capacity
-      num_layers: 6         
-      d_state: 64           
-      d_conv: 4             
-      expand: 2             
+      input_dim: 27
+      dim: 128
+      num_layers: 2
+      d_state: 16
+      d_conv: 4
+      expand: 2
       use_mamba2: true
-      headdim: 64           
-      norm: RMSNorm         
-      dropout: 0.0          
-      head_dropout: 0.15    
-      head_hidden_dim: 1024
+      headdim: 32
+      norm: RMSNorm
+      dropout: 0.0
+      head_dropout: 0.15
+      head_hidden_dim: 512
       
-      # Classification bins (must match training module)
-      eta_bins: *eta_bins  # File named eta_bins_2000 but has 2001 bins
+      eta_bins: *eta_bins
       phi_bins: *phi_bins
-      pt_bins: *pt_bins
+      pt_bins:  *pt_bins
       
-      # Use CLS token
+      use_inv_pt: true
       use_attention_pooling: false
-      
-      # Regression heads disabled for Stage 1
       enable_regression_heads: false

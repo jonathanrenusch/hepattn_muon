@@ -1,13 +1,11 @@
-seed_everything: 42
-name: Mamba-Track-Regression-Hybrid-Mode
+# YOLO Stage 1: Classification Pretraining - GPU 0 (Coarse Resolution)
+# PT: 50 bins, Eta/Phi: 100 bins
+# Uses CLS token pooling
 
-# EXPERIMENT: Hybrid mode (delta-eta + sin/cos phi)
-# This combines the best of both worlds:
-# - Delta prediction for eta (30% improvement observed)
-# - Sin/cos representation for phi (better convergence)
+seed_everything: 42
+name: YOLO-Stage1-Classification-PhysicsInformedSmallHeads-GPU0
 
 data:
-  # Use the same data directories as the tracking task
   train_dir: /scratch/ml_training_data_2694000_regression_true_hits_only
   val_dir: /scratch/ml_validation_data_144000_regression_true_hits_only
   test_dir: /scratch/ml_test_156000_regression_hdf5_true_hits_only
@@ -16,14 +14,13 @@ data:
   num_train: -1
   num_val: -1
   num_test: -1
-  batch_size: 512
+  batch_size: 1024
+  # batch_size: 8192
 
-  # Per-track data loading parameters
   min_hits_per_track: 2
   max_hits_per_track: 200
   event_max_num_particles: 10
      
-  # Hit features to use (27 features)
   hit_fields:
     - spacePoint_globEdgeHighX
     - spacePoint_globEdgeHighY
@@ -53,7 +50,6 @@ data:
     - phi
     - eta
 
-  # Required for base dataset compatibility
   inputs:
     hit:
     - spacePoint_globEdgeHighX
@@ -95,17 +91,18 @@ trainer:
   max_epochs: 200
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0]
+  devices: [3]
+  # devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
-  default_root_dir: logs
+  default_root_dir: logs/YOLO
   gradient_clip_val: 1.0
   enable_progress_bar: true
 
   logger:
     class_path: lightning.pytorch.loggers.CometLogger
     init_args:
-      project_name: mamba_track_regression
+      project_name: yolo_classification_stage1
 
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
@@ -114,7 +111,7 @@ trainer:
       init_args:
         monitor: val/loss
         mode: min
-        save_top_k: 5
+        save_top_k: 20
     - class_path: lightning.pytorch.callbacks.ModelSummary
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
@@ -123,32 +120,69 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
-        patience: 40
+        patience: 20
         min_delta: 0.0
         mode: min
         verbose: true
 
 model:
-  optimizer: Lion
+  # optimizer: Lion
+  optimizer: AdamW
   
   lrs_config:
-    initial: 2e-5
-    max: 1e-4
+    initial: 1e-5
+    max: 5e-4
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-5
 
-  # Loss weighting - default (no special weighting)
-  regression_weight: 1.0
-  classification_weight: 1.0
+  # Bin configuration (coarse)
+  # NOTE: eta has +1 bins due to gap handling in bin files
+  bin_dir: /scratch/ml_training_data_2694000_regression_true_hits_only/bins
+  eta_bins: &eta_bins 1001  # File named eta_bins_100 but has 101 bins
+  phi_bins: &phi_bins 500
+  pt_bins: &pt_bins 100
   
-  regression_fields:
-    - eta
-    - phi
-    - pt
+  # Loss weights
+  eta_loss_weight: 1.0
+  phi_loss_weight: 1.0
+  pt_loss_weight: 10.0
+  charge_loss_weight: 1.0
+
+  use_gaussian_label_smoothing: true
+  
+  # Sigma values control how spread out the soft labels are:
+  # - Smaller sigma = sharper peak, more like hard labels
+  # - Larger sigma = more spread, gentler gradients
+  
+  # For eta: sigma in radians
+  # 0.01 rad = 10 mrad spreads over ~2-3 bins at 100 bins resolution
+  eta_label_sigma: 0.01
+  
+  # For phi: sigma in radians (uses circular wrapping!)
+  # The circular Gaussian properly handles labels near ±π
+  phi_label_sigma: 0.1
+  
+  # For pt: sigma as fraction in log-space
+  # 0.05 = 5% fractional width, good for relative pt resolution
+  pt_label_sigma_frac: 0.05
+
+  pt_log_bins: true  # Use logarithmic pt binning files
+
+  
+  # Focal loss gamma for pt
+  focal_gamma: 2.0
+  
+  # Clipping ranges
+  pt_min: 5.0
+  pt_max: 200.0
+  eta_min: -2.7
+  eta_max: 2.7
+  eta_gap_min: -0.1
+  eta_gap_max: 0.1
 
   model:
-    class_path: hepattn.models.mamba_regressor.MambaTrackRegressor
+    class_path: hepattn.models.yolo_regressor.YOLORegressor
     init_args:
       input_dim: 27
       dim: 128
@@ -160,19 +194,18 @@ model:
       headdim: 32
       norm: RMSNorm
       dropout: 0.0
-      head_dropout: 0.1
+      head_dropout: 0.15
       head_hidden_dim: 256
+      
+      # Classification bins (must match training module)
+      eta_bins: *eta_bins  # File named eta_bins_100 but has 101 bins
+      phi_bins: *phi_bins
+      pt_bins: *pt_bins
+      
+      # Use CLS token (not attention pooling)
+      use_attention_pooling: false
+      
+      # Regression heads disabled for Stage 1
+      enable_regression_heads: false
 
-      
-      
-      regression_fields:
-        - eta
-        - phi
-        - pt
-      
-      # HYBRID MODE: delta for eta, sin/cos for phi
-      use_delta_prediction: true
-      use_delta_phi: false          # KEY: Use sin/cos for phi instead of delta
-      delta_reference: "innermost"
-      phi_feature_idx: 25
-      eta_feature_idx: 26
+       
