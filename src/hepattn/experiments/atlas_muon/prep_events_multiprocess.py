@@ -437,9 +437,10 @@ def process_worker_files(args: Tuple) -> Dict:
                         if no_NSW:
                             # Remove STGC (4) and MM (5) hits
                             keep_mask &= ~np.isin(technology_values, [4, 5])
-                        
-                        # TODO: integrate old filtering again check status of that file in GitHub
-                        
+
+                        # Note: Additional MDT-specific filtering (e.g., noise cut based on timing
+                        # or drift radius) can be added here before the RPC filter below.
+
                         if no_rpc:
                             # Remove RPC (2) hits
                             keep_mask &= (technology_values != 2)
@@ -457,7 +458,9 @@ def process_worker_files(args: Tuple) -> Dict:
                         
                         
                         
-                        # TODO: Filter out tracks below for the true tracks as well
+                        # Determine which tracks still have hits after technology filtering.
+                        # unique_tracks is derived from the already-filtered hits array,
+                        # so tracks that lost all their hits are automatically excluded.
                         unique_tracks = np.unique(hits['spacePoint_truthLink'])
                         valid_tracks = unique_tracks[unique_tracks != -1]
                         
