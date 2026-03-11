@@ -84,8 +84,8 @@ model:
     initial: 5.0e-06
     max: 2.0e-05
     end: 5.0e-07
-    pct_start: 0.10
-    weight_decay: 2.0e-05
+    pct_start: 0.15
+    weight_decay: 1.0e-03
     skip_scheduler: false
 
   optimizer: Lion

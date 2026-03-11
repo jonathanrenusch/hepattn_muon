@@ -32,12 +32,12 @@ model:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_d0.yaml
-              beta: 0.1
+              beta: 0.3
             z0:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_z0.yaml
-              beta: 0.1
+              beta: 0.3
             phi:
               type: circular
               weight: 1.0
@@ -46,9 +46,9 @@ model:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_theta.yaml
-              beta: 0.1
+              beta: 0.3
             qop:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_qop.yaml
-              beta: 0.1
+              beta: 0.3

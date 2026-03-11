@@ -24,11 +24,12 @@
 #   - Learning rate reduced vs alt configs: larger models are more sensitive
 #     to learning rate.  Following μP-inspired scaling, the max LR is
 #     reduced from 5e-5 → 2e-5 (roughly √(128/256) ≈ 0.7× downscale).
-#     Warmup is extended (5% → 10%) for stable early training.
+#     Warmup is extended (5% → 15%) for stable early training.
 #   - Dropout 0.05 in encoder: mild regularisation to prevent overfitting
 #     with 10× more parameters.  Not too aggressive to avoid under-utilising
 #     the SSM capacity.
-#   - Lion optimizer with reduced weight decay suited for this scale.
+#   - Lion optimizer with weight_decay=1e-3 (Lion needs 3-10× larger
+#     weight decay than AdamW per the Lion paper).
 #
 # Loaded as an overlay on top of base.yaml (which is auto-loaded by train.py):
 #
@@ -78,8 +79,8 @@ model:
     initial: 5.0e-06
     max: 2.0e-05
     end: 5.0e-07
-    pct_start: 0.10
-    weight_decay: 2.0e-05
+    pct_start: 0.15
+    weight_decay: 1.0e-03
     skip_scheduler: false
 
   optimizer: Lion

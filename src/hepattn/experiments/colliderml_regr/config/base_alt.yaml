@@ -45,4 +45,4 @@ model:
           ngroups: 1
           chunk_size: 256
           norm: LayerNorm
-          dropout: 0.0
+          dropout: 0.05

@@ -20,7 +20,7 @@ trainer:
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
-  gradient_clip_val: 1.0
+  gradient_clip_val: 5.0
   enable_progress_bar: true
   deterministic: false
   benchmark: true
@@ -50,7 +50,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/total
-        patience: 15
+        patience: 25
         min_delta: 0.0
         mode: min
         verbose: true
@@ -77,8 +77,8 @@ model:
       input_net_dropout: 0.0
       input_net_activation: SiLU
       sort_field: s
-      fourier_scales: [-3, -2, -1, 0, 1, 2, 3]
-      fourier_base: 3
+      fourier_scales: [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+      fourier_base: 2
       norm_min: [-1031.0, -1031.0, -3026.0, 31.0, -3.1416, 0.027, 31.0, 16.0, 2.0, 1.0, 0.0, -4.3]
       norm_max: [1031.0, 1031.0, 3026.0, 1032.0, 3.1416, 3.114, 3185.0, 30.0, 16.0, 3360.0, 8.0, 4.3]
       input_fields:
@@ -113,8 +113,8 @@ model:
     initial: 1.0e-05
     max: 5.0e-05
     end: 1.0e-06
-    pct_start: 0.05
-    weight_decay: 1.0e-05
+    pct_start: 0.10
+    weight_decay: 1.0e-03
     skip_scheduler: false
 
   optimizer: Lion
@@ -123,7 +123,7 @@ model:
 
 data:
   preprocessed_dir: /scratch/colliderml/p0_preprocessed
-  batch_size: 2048
+  batch_size: 10000
   num_workers: 12
   pin_memory: true
   num_train_shards: -1  # -1 for all train shards from split.json

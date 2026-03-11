@@ -26,13 +26,13 @@ model:
               weight: 1.0
               norm_min: -1.0
               norm_max: 1.0
-              beta: 0.1
+              beta: 0.3
             z0:
               type: smooth_l1
               weight: 1.0
               norm_min: -150.0
               norm_max: 150.0
-              beta: 0.1
+              beta: 0.3
             phi:
               type: circular
               weight: 1.0
@@ -42,13 +42,13 @@ model:
               weight: 1.0
               norm_min: 0.0
               norm_max: 3.141592653589793
-              beta: 0.1
+              beta: 0.3
             qop:
               type: smooth_l1
               weight: 1.0
               norm_min: -2.0
               norm_max: 2.0
-              beta: 0.1
+              beta: 0.3
 
   lrs_config:
     max: 5.0e-04

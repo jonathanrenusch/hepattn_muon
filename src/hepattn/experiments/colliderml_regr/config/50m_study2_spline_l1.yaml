@@ -57,12 +57,12 @@ model:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_d0.yaml
-              beta: 0.1
+              beta: 0.3
             z0:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_z0.yaml
-              beta: 0.1
+              beta: 0.3
             phi:
               type: circular
               weight: 1.0
@@ -71,20 +71,20 @@ model:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_theta.yaml
-              beta: 0.1
+              beta: 0.3
             qop:
               type: spline_l1
               weight: 1.0
               spline_config: config/splines/spline_qop.yaml
-              beta: 0.1
+              beta: 0.3
 
   # Scaled LR for 50M model
   lrs_config:
     initial: 5.0e-06
     max: 2.0e-05
     end: 5.0e-07
-    pct_start: 0.10
-    weight_decay: 2.0e-05
+    pct_start: 0.15
+    weight_decay: 1.0e-03
     skip_scheduler: false
 
   optimizer: Lion
