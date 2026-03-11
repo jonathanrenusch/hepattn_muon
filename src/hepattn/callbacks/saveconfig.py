@@ -34,6 +34,12 @@ class SaveConfig(Callback):
             if isinstance(trainer.logger, CometLogger):
                 for file in log_dir.glob("*.yaml"):
                     trainer.logger.experiment.log_asset(file)
+                    # Also upload as .txt for easy viewing in Comet UI
+                    txt_copy = file.with_suffix(".txt")
+                    txt_copy.write_text(file.read_text())
+                    trainer.logger.experiment.log_asset(
+                        txt_copy, file_name=file.stem + "_config.txt",
+                    )
                 base_dir = Path(__file__).parents[3]
                 for file in (base_dir / "src").glob("**/*.py"):
                     trainer.logger.experiment.log_code(file)

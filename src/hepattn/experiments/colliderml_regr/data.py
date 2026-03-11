@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from lightning import LightningDataModule
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import BatchSampler, DataLoader, Dataset, Sampler
 
 
 # ============================================================================
@@ -47,23 +47,25 @@ class ColliderMLTrackDataset(Dataset):
     max_hits : int
         Maximum number of hits per track. Tracks longer than this are
         truncated (keeps the closest hits to IP by s-sorted order).
+    d0_range : tuple[float, float]
+        (min, max) filter range for d0 target parameter.
+    z0_range : tuple[float, float]
+        (min, max) filter range for z0 target parameter.
     """
-
-    # Global filter cuts applied at dataset load time (hardcoded)
-    D0_MIN = -1.0
-    D0_MAX = 1.0
-    Z0_MIN = -150.0
-    Z0_MAX = 150.0
 
     def __init__(
         self,
         preprocessed_dir: str | Path,
         shard_indices: list[int],
         max_hits: int = 50,
+        d0_range: tuple[float, float] = (-1.0, 1.0),
+        z0_range: tuple[float, float] = (-150.0, 150.0),
     ):
         super().__init__()
         self.preprocessed_dir = Path(preprocessed_dir)
         self.max_hits = max_hits
+        self.d0_min, self.d0_max = d0_range
+        self.z0_min, self.z0_max = z0_range
 
         # Build global index: list of (shard_idx, local_track_idx)
         # and cache memmap references per shard
@@ -91,12 +93,12 @@ class ColliderMLTrackDataset(Dataset):
             }
 
             for t in range(n_tracks):
-                # Apply global d0/z0 range filter
+                # Apply d0/z0 range filter
                 tgt = targets[t]  # [d0, z0, phi, theta, qop]
                 d0_val, z0_val = float(tgt[0]), float(tgt[1])
-                if not (self.D0_MIN <= d0_val <= self.D0_MAX):
+                if not (self.d0_min <= d0_val <= self.d0_max):
                     continue
-                if not (self.Z0_MIN <= z0_val <= self.Z0_MAX):
+                if not (self.z0_min <= z0_val <= self.z0_max):
                     continue
                 length = int(offsets[t + 1] - offsets[t])
                 self._global_index.append((si, t))
@@ -174,23 +176,17 @@ def collate_tracks(batch: list[dict[str, np.ndarray]]) -> tuple[dict[str, Tensor
     hit_s = torch.zeros(batch_size, max_len, dtype=torch.float32)
     hit_valid = torch.zeros(batch_size, max_len, dtype=torch.bool)
 
-    d0 = torch.empty(batch_size, dtype=torch.float32)
-    z0 = torch.empty(batch_size, dtype=torch.float32)
-    phi = torch.empty(batch_size, dtype=torch.float32)
-    theta = torch.empty(batch_size, dtype=torch.float32)
-    qop = torch.empty(batch_size, dtype=torch.float32)
-
     for i, item in enumerate(batch):
         L = item["length"]
         hit_features[i, :L] = torch.from_numpy(item["hit_features"])
         hit_s[i, :L] = torch.from_numpy(item["hit_s"])
         hit_valid[i, :L] = True
-        targets = item["targets"]
-        d0[i] = float(targets[0])
-        z0[i] = float(targets[1])
-        phi[i] = float(targets[2])
-        theta[i] = float(targets[3])
-        qop[i] = float(targets[4])
+
+    # Vectorise target extraction
+    all_targets = torch.as_tensor(
+        np.stack([item["targets"] for item in batch]),
+        dtype=torch.float32,
+    )  # (B, 5)
 
     inputs = {
         "hit_features": hit_features,
@@ -198,11 +194,11 @@ def collate_tracks(batch: list[dict[str, np.ndarray]]) -> tuple[dict[str, Tensor
         "hit_valid": hit_valid,
     }
     target_dict = {
-        "d0": d0,
-        "z0": z0,
-        "phi": phi,
-        "theta": theta,
-        "qop": qop,
+        "d0": all_targets[:, 0],
+        "z0": all_targets[:, 1],
+        "phi": all_targets[:, 2],
+        "theta": all_targets[:, 3],
+        "qop": all_targets[:, 4],
         "track_valid": torch.ones(batch_size, dtype=torch.bool),
     }
     return inputs, target_dict
@@ -213,11 +209,14 @@ def collate_tracks(batch: list[dict[str, np.ndarray]]) -> tuple[dict[str, Tensor
 # ============================================================================
 
 
-class LengthBucketSampler(Sampler):
+class LengthBucketBatchSampler(BatchSampler):
     """Groups tracks by length to minimize padding waste.
 
-    Sorts by length, chunks into buckets, shuffles bucket order +
-    within-bucket order each epoch.
+    Yields *batches* of indices directly, so it must be passed as
+    ``batch_sampler=`` (not ``sampler=``) to :class:`DataLoader`.
+
+    Sorts by length, chunks into buckets of ``batch_size``, shuffles
+    bucket order + within-bucket order each epoch.
 
     Parameters
     ----------
@@ -238,6 +237,7 @@ class LengthBucketSampler(Sampler):
         drop_last: bool = False,
         shuffle: bool = True,
     ):
+        # BatchSampler.__init__ is not called — we manage state ourselves
         self.lengths = lengths
         self.batch_size = batch_size
         self.drop_last = drop_last
@@ -247,13 +247,11 @@ class LengthBucketSampler(Sampler):
         self._sorted_indices = np.argsort(lengths).tolist()
 
     def __len__(self) -> int:
-        # Return number of *individual items* yielded, not batches.
-        # DataLoader wraps this sampler in a BatchSampler which re-divides
-        # by batch_size, so we must report sample count here.
         n = len(self.lengths)
-        if self.drop_last:
-            return (n // self.batch_size) * self.batch_size
-        return n
+        n_batches = n // self.batch_size
+        if not self.drop_last and n % self.batch_size != 0:
+            n_batches += 1
+        return n_batches
 
     def __iter__(self):
         indices = list(self._sorted_indices)
@@ -264,7 +262,7 @@ class LengthBucketSampler(Sampler):
             for i in range(0, len(indices), self.batch_size)
         ]
 
-        if self.drop_last and len(batches[-1]) < self.batch_size:
+        if self.drop_last and batches and len(batches[-1]) < self.batch_size:
             batches = batches[:-1]
 
         if self.shuffle:
@@ -276,8 +274,7 @@ class LengthBucketSampler(Sampler):
             for b in batches:
                 rng.shuffle(b)
 
-        for batch in batches:
-            yield from batch
+        yield from batches
 
 
 # ============================================================================
@@ -349,9 +346,19 @@ class ColliderMLRegrDataModule(LightningDataModule):
             shard_indices = shard_indices[: self.num_shards_limit]
 
         n = len(shard_indices)
+        need_test = stage in (None, "test", "predict")
+        min_shards = 3 if need_test else 2
+        if n < min_shards:
+            raise ValueError(
+                f"Need at least {min_shards} shards for the requested split, got {n}. "
+                "Increase num_shards or add more data."
+            )
         n_train = max(1, int(n * self.train_frac))
         n_val = max(1, int(n * self.val_frac))
-        n_test = max(1, n - n_train - n_val)
+        n_test = n - n_train - n_val
+        if need_test and n_test < 1:
+            n_val = max(1, n - n_train - 1)
+            n_test = n - n_train - n_val
 
         # Deterministic split by shard index order
         train_shards = shard_indices[:n_train]
@@ -378,7 +385,7 @@ class ColliderMLRegrDataModule(LightningDataModule):
         assert self._train_ds is not None
 
         if self.bucketed_sampling:
-            sampler = LengthBucketSampler(
+            batch_sampler = LengthBucketBatchSampler(
                 self._train_ds.track_lengths,
                 batch_size=self.batch_size,
                 drop_last=True,
@@ -386,12 +393,10 @@ class ColliderMLRegrDataModule(LightningDataModule):
             )
             return DataLoader(
                 self._train_ds,
-                batch_size=self.batch_size,
-                sampler=sampler,
+                batch_sampler=batch_sampler,
                 num_workers=self.num_workers,
                 pin_memory=self.pin_memory,
                 collate_fn=collate_tracks,
-                drop_last=True,
                 persistent_workers=self.num_workers > 0,
             )
 

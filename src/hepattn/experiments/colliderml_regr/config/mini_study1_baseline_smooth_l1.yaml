@@ -1,11 +1,7 @@
 # =============================================================================
-# Study 1 — Baseline Smooth-L1
+# Mini Study 1 — Baseline Smooth-L1 (~1.4M params)
 # =============================================================================
-# Direct regression with Smooth-L1 loss on linearly normalised targets.
-# This is the simplest configuration — no spline transforms, no quantiles.
-# Serves as the performance baseline for all other studies.
-#
-# Usage:  python train.py fit --config config/study1_baseline_smooth_l1.yaml
+# Usage:  python train.py fit --config config/mini_study1_baseline_smooth_l1.yaml
 # (base.yaml is loaded automatically)
 # =============================================================================
 
@@ -14,12 +10,35 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-Study1-Baseline-SmoothL1
+      name: TRK-Mini-Study1-Baseline-SmoothL1
       offline_directory: logs/comet_offline
 
 model:
   model:
     init_args:
+      # --- Mini architecture overrides (from base_mini.yaml) ---
+      dim: 64
+      state_head_output_dim: 128
+      state_head_hidden_layers: [128]
+      state_head_dropout: 0.1
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: []
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 4
+          dim: 64
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: LayerNorm
+          dropout: 0.05
+      # --- Loss ---
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
@@ -30,7 +49,7 @@ model:
               weight: 1.0
               norm_min: -1.0
               norm_max: 1.0
-              beta: 0.1
+              beta: 0.01
             z0:
               type: smooth_l1
               weight: 1.0

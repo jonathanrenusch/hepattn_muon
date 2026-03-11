@@ -33,6 +33,37 @@ from torch import Tensor, nn
 
 from hepattn.experiments.colliderml_regr.spline import MonotonicSplineTransform
 
+# Directory containing this file — used to resolve relative spline config paths
+_EXPERIMENT_DIR = Path(__file__).resolve().parent
+
+
+def _resolve_spline_path(spline_config: str | Path) -> Path:
+    """Resolve a spline config path relative to the experiment directory."""
+    p = Path(spline_config)
+    if p.is_absolute():
+        return p
+    # Try relative to experiment dir first (handles 'config/splines/...')
+    resolved = _EXPERIMENT_DIR / p
+    if resolved.exists():
+        return resolved
+    # Fall back to CWD-relative (original behaviour)
+    return p
+
+
+# ============================================================================
+# Shared normalisation helpers
+# ============================================================================
+
+
+def _linear_normalise(x: Tensor, norm_min: Tensor, norm_max: Tensor) -> Tensor:
+    """Map physical value to [-1, 1]."""
+    return 2.0 * (x - norm_min) / (norm_max - norm_min) - 1.0
+
+
+def _linear_denormalise(u: Tensor, norm_min: Tensor, norm_max: Tensor) -> Tensor:
+    """Map [-1, 1] back to physical value."""
+    return (u + 1.0) / 2.0 * (norm_max - norm_min) + norm_min
+
 
 # ============================================================================
 # Per-parameter loss components
@@ -73,23 +104,15 @@ class SmoothL1Loss(nn.Module):
         self.register_buffer("norm_min", torch.tensor(norm_min, dtype=torch.float32))
         self.register_buffer("norm_max", torch.tensor(norm_max, dtype=torch.float32))
 
-    def _normalise(self, x: Tensor) -> Tensor:
-        """Map physical value to [-1, 1]."""
-        return 2.0 * (x - self.norm_min) / (self.norm_max - self.norm_min) - 1.0
-
-    def _denormalise(self, u: Tensor) -> Tensor:
-        """Map [-1, 1] back to physical value."""
-        return (u + 1.0) / 2.0 * (self.norm_max - self.norm_min) + self.norm_min
-
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """Compute loss.  Both tensors have shape ``(N,)`` or ``(N, 1)``."""
-        t_norm = self._normalise(target)
+        t_norm = _linear_normalise(target, self.norm_min, self.norm_max)
         p = pred.squeeze(-1) if pred.dim() > target.dim() else pred
         return self.weight * F.smooth_l1_loss(p, t_norm, beta=self.beta)
 
     def predict(self, raw: Tensor) -> Tensor:
         """Convert raw model output to physical value."""
-        return self._denormalise(raw.squeeze(-1))
+        return _linear_denormalise(raw.squeeze(-1), self.norm_min, self.norm_max)
 
 
 class SplineL1Loss(nn.Module):
@@ -118,7 +141,7 @@ class SplineL1Loss(nn.Module):
         self.beta = beta
 
         if isinstance(spline_config, (str, Path)):
-            self.spline = MonotonicSplineTransform.from_config(spline_config)
+            self.spline = MonotonicSplineTransform.from_config(_resolve_spline_path(spline_config))
         else:
             self.spline = MonotonicSplineTransform.from_dict(spline_config)
 
@@ -170,21 +193,9 @@ class QuantileLoss(nn.Module):
     def num_outputs(self) -> int:
         return len(self.quantiles)
 
-    def _normalise(self, x: Tensor) -> Tensor:
-        return 2.0 * (x - self.norm_min) / (self.norm_max - self.norm_min) - 1.0
-
-    def _denormalise(self, u: Tensor) -> Tensor:
-        return (u + 1.0) / 2.0 * (self.norm_max - self.norm_min) + self.norm_min
-
-    @staticmethod
-    def _pinball(pred: Tensor, target: Tensor, tau: Tensor) -> Tensor:
-        """Pinball loss: τ * max(0, target-pred) + (1-τ) * max(0, pred-target)."""
-        diff = target - pred
-        return torch.mean(torch.max(tau * diff, (tau - 1) * diff))
-
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """pred: (N, num_quantiles),  target: (N,)."""
-        t_norm = self._normalise(target).unsqueeze(-1)  # (N, 1)
+        t_norm = _linear_normalise(target, self.norm_min, self.norm_max).unsqueeze(-1)  # (N, 1)
         tau = self.quantiles.unsqueeze(0)  # (1, Q)
         diff = t_norm - pred  # (N, Q)
         loss = torch.mean(torch.max(tau * diff, (tau - 1) * diff))
@@ -193,7 +204,7 @@ class QuantileLoss(nn.Module):
     def predict(self, raw: Tensor) -> Tensor:
         """Return median quantile mapped back to physical space."""
         median_idx = (self.quantiles - 0.5).abs().argmin()
-        return self._denormalise(raw[..., median_idx])
+        return _linear_denormalise(raw[..., median_idx], self.norm_min, self.norm_max)
 
 
 class SplineQuantileLoss(nn.Module):
@@ -222,7 +233,7 @@ class SplineQuantileLoss(nn.Module):
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
 
         if isinstance(spline_config, (str, Path)):
-            self.spline = MonotonicSplineTransform.from_config(spline_config)
+            self.spline = MonotonicSplineTransform.from_config(_resolve_spline_path(spline_config))
         else:
             self.spline = MonotonicSplineTransform.from_dict(spline_config)
 
@@ -461,7 +472,7 @@ class TrackParameterLoss(nn.Module):
                 if isinstance(loss_fn, SplineQuantileLoss):
                     preds[name] = loss_fn.spline.inverse(torch.sigmoid(raw))
                 else:
-                    preds[name] = loss_fn._denormalise(raw)
+                    preds[name] = _linear_denormalise(raw, loss_fn.norm_min, loss_fn.norm_max)
             else:
                 preds[name] = loss_fn.predict(raw)
         return preds

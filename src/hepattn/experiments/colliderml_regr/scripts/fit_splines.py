@@ -30,6 +30,11 @@ import numpy as np
 import yaml
 from tqdm import tqdm
 
+from hepattn.experiments.colliderml_regr.spline import (
+    evaluate_pchip_np as evaluate_pchip,
+    fritsch_carlson_slopes_np as fritsch_carlson_slopes,
+)
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -101,17 +106,64 @@ def load_targets_from_preprocessed(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Per-parameter knot placement strategies
+# ---------------------------------------------------------------------------
+
+# Default tail quantiles (used for z0, theta, and as fallback)
+_DEFAULT_TAIL_Q = [0.001, 0.005, 0.01, 0.02, 0.98, 0.99, 0.995, 0.999]
+
+# d0: very peaked at zero — need much denser tails to resolve the edges
+_D0_TAIL_Q = [
+    0.0001, 0.0005, 0.001, 0.002, 0.003, 0.005, 0.007,
+    0.01, 0.015, 0.02, 0.03,
+    0.97, 0.98, 0.985, 0.99, 0.993, 0.995, 0.997,
+    0.998, 0.999, 0.9995, 0.9999,
+]
+
+# qop: bimodal (positive/negative charge) — need denser middle where CDF
+# transitions rapidly between the two charge peaks
+_QOP_TAIL_Q = _DEFAULT_TAIL_Q  # keep the original tails
+_QOP_EXTRA_Q = [
+    0.35, 0.37, 0.39, 0.41, 0.43, 0.45, 0.47, 0.48, 0.49,
+    0.51, 0.52, 0.53, 0.55, 0.57, 0.59, 0.61, 0.63, 0.65,
+]
+
+# Registry: param_name -> (num_core_knots, tail_quantiles, extra_quantiles)
+PARAM_KNOT_CONFIG: dict[str, tuple[int, list[float], list[float]]] = {
+    "d0":    (35, _D0_TAIL_Q,      []),
+    "z0":    (25, _DEFAULT_TAIL_Q,  []),
+    "theta": (25, _DEFAULT_TAIL_Q,  []),
+    "qop":   (35, _QOP_TAIL_Q,      _QOP_EXTRA_Q),
+}
+
+
 def compute_quantile_knots(
     values: np.ndarray,
     num_knots: int = 25,
     tail_quantiles: list[float] | None = None,
+    extra_quantiles: list[float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute knot positions at quantile boundaries."""
+    """Compute knot positions at quantile boundaries.
+
+    Parameters
+    ----------
+    values : array
+        1-D data samples.
+    num_knots : int
+        Number of uniformly-spaced core quantiles (0 to 1 inclusive).
+    tail_quantiles : list[float] | None
+        Additional quantile positions for the distribution tails.
+    extra_quantiles : list[float] | None
+        Any other extra quantile positions (e.g. densifying the middle).
+    """
     if tail_quantiles is None:
-        tail_quantiles = [0.001, 0.005, 0.01, 0.02, 0.98, 0.99, 0.995, 0.999]
+        tail_quantiles = _DEFAULT_TAIL_Q
+    if extra_quantiles is None:
+        extra_quantiles = []
 
     core_q = np.linspace(0.0, 1.0, num_knots)
-    all_q = np.unique(np.concatenate([core_q, tail_quantiles]))
+    all_q = np.unique(np.concatenate([core_q, tail_quantiles, extra_quantiles]))
     all_q = np.clip(all_q, 0.0, 1.0)
     all_q = np.sort(all_q)
 
@@ -126,59 +178,6 @@ def compute_quantile_knots(
     knot_y[-1] = 1.0
 
     return knot_x, knot_y
-
-
-def fritsch_carlson_slopes(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Compute monotone Hermite slopes via Fritsch-Carlson."""
-    n = len(x)
-    dx = np.diff(x)
-    dy = np.diff(y)
-    delta = dy / dx
-
-    m = np.zeros(n)
-    for k in range(1, n - 1):
-        if delta[k - 1] * delta[k] <= 0:
-            m[k] = 0.0
-        else:
-            m[k] = 2.0 * delta[k - 1] * delta[k] / (delta[k - 1] + delta[k])
-
-    m[0] = delta[0]
-    m[-1] = delta[-1]
-
-    for k in range(n - 1):
-        if delta[k] == 0:
-            m[k] = 0.0
-            m[k + 1] = 0.0
-        else:
-            alpha = m[k] / delta[k]
-            beta = m[k + 1] / delta[k]
-            mag = alpha**2 + beta**2
-            if mag > 9.0:
-                tau = 3.0 / np.sqrt(mag)
-                m[k] = tau * alpha * delta[k]
-                m[k + 1] = tau * beta * delta[k]
-
-    return m
-
-
-def evaluate_pchip(x_query: np.ndarray, kx: np.ndarray, ky: np.ndarray, slopes: np.ndarray) -> np.ndarray:
-    """Evaluate the PCHIP interpolant at query points."""
-    x_clamped = np.clip(x_query, kx[0], kx[-1])
-    idx = np.searchsorted(kx, x_clamped, side="right") - 1
-    idx = np.clip(idx, 0, len(kx) - 2)
-
-    x0, x1 = kx[idx], kx[idx + 1]
-    y0, y1 = ky[idx], ky[idx + 1]
-    m0, m1 = slopes[idx], slopes[idx + 1]
-    h = x1 - x0
-    t = (x_clamped - x0) / h
-
-    h00 = 2 * t**3 - 3 * t**2 + 1
-    h10 = t**3 - 2 * t**2 + t
-    h01 = -2 * t**3 + 3 * t**2
-    h11 = t**3 - t**2
-
-    return h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +608,17 @@ def main():
             "q99": float(np.quantile(values, 0.99)),
         }
 
-        knot_x, knot_y = compute_quantile_knots(values, num_knots=args.num_knots)
+        n_core, tail_q, extra_q = PARAM_KNOT_CONFIG.get(
+            param_name, (args.num_knots, None, None)
+        )
+        # CLI --num-knots overrides the default core count only if
+        # the param has no custom config entry
+        if param_name not in PARAM_KNOT_CONFIG:
+            n_core = args.num_knots
+        knot_x, knot_y = compute_quantile_knots(
+            values, num_knots=n_core,
+            tail_quantiles=tail_q, extra_quantiles=extra_q,
+        )
         slopes = fritsch_carlson_slopes(knot_x, knot_y)
         spline_fits[param_name] = (knot_x, knot_y, slopes)
 

@@ -17,17 +17,29 @@ import os
 # Must be set before any torch/triton import.
 os.environ.setdefault("TRITON_CACHE_DIR", "/tmp/triton_cache")
 
+from pathlib import Path
+
 from lightning.pytorch.cli import LightningCLI
 
 from hepattn.experiments.colliderml_regr.data import ColliderMLRegrDataModule
 from hepattn.experiments.colliderml_regr.model import TrackRegressionWrapper
 
 
+class CLI(LightningCLI):
+    """CLI with implicit base config loading."""
+
+    def add_arguments_to_parser(self, parser):
+        parser.default_config_files = [
+            str(Path(__file__).parent / "config" / "base.yaml")
+        ]
+
+
 def main():
-    LightningCLI(
+    CLI(
         model_class=TrackRegressionWrapper,
         datamodule_class=ColliderMLRegrDataModule,
         seed_everything_default=42,
+        save_config_kwargs={"overwrite": True},
     )
 
 

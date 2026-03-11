@@ -1,0 +1,136 @@
+# ACTS Track Reconstruction Evaluation Configuration
+# ==================================================
+
+# Data settings
+data:
+  directory: "/scratch/p0/CERN__ColliderML-Release-1"
+  n_events: 100  # Number of events to evaluate
+  random_seed: 42
+
+# Output settings
+output:
+  directory: "/shared/tracking/logs/acts_tracking_evaluation"
+
+# Binning configuration for eta-dependent plots
+binning:
+  # Pseudorapidity binning
+  eta_range: [-4.0, 4.0]
+  n_eta_bins: 30
+  
+  # pT binning for resolution studies [GeV]
+  pt_range: [0.5, 100.0]
+  n_pt_bins: 30
+
+# Efficiency calculation settings
+efficiency:
+  # Minimum number of hits for a particle to be considered reconstructible
+  min_hits: 7
+  
+  # Minimum energy for reconstructible particles [GeV]
+  min_energy: 1.0
+
+# Matching settings
+matching:
+  # Use majority_particle_id from ACTS tracks
+  use_majority_id: true
+
+# Residual histogram settings
+residuals:
+  d0:
+    bins: 100
+    range: [-0.5, 0.5]  # mm
+    xlabel: "$d_0$ residual [mm]"
+  
+  z0:
+    bins: 100
+    range: [-2.0, 2.0]  # mm
+    xlabel: "$z_0$ residual [mm]"
+  
+  phi:
+    bins: 100
+    range: [-0.01, 0.01]  # rad
+    xlabel: "$\\phi$ residual [rad]"
+  
+  theta:
+    bins: 100
+    range: [-0.01, 0.01]  # rad
+    xlabel: "$\\theta$ residual [rad]"
+  
+  qop:
+    bins: 100
+    range: [-0.1, 0.1]  # 1/GeV
+    xlabel: "$q/p$ residual [1/GeV]"
+  
+  pt_rel:
+    bins: 100
+    range: [-0.2, 0.2]  # relative
+    xlabel: "$(p_T^{reco} - p_T^{truth}) / p_T^{truth}$"
+
+# Pull distribution settings (for validation of uncertainties)
+pulls:
+  expected_mean: 0.0
+  expected_std: 1.0
+
+# Plot aesthetics
+plot:
+  figsize: [10, 8]
+  dpi: 150
+  title_fontsize: 14
+  label_fontsize: 12
+  legend_fontsize: 10
+  
+  # Colors
+  efficiency_color: "#2ca02c"
+  fake_color: "#d62728"
+  residual_color: "#1f77b4"
+  resolution_color: "#ff7f0e"
+
+# Track parameter names and units for labeling
+parameters:
+  d0:
+    name: "Transverse Impact Parameter"
+    symbol: "$d_0$"
+    unit: "mm"
+  
+  z0:
+    name: "Longitudinal Impact Parameter"
+    symbol: "$z_0$"
+    unit: "mm"
+  
+  phi:
+    name: "Azimuthal Angle"
+    symbol: "$\\phi$"
+    unit: "rad"
+  
+  theta:
+    name: "Polar Angle"
+    symbol: "$\\theta$"
+    unit: "rad"
+  
+  qop:
+    name: "Charge over Momentum"
+    symbol: "$q/p$"
+    unit: "1/GeV"
+  
+  pt:
+    name: "Transverse Momentum"
+    symbol: "$p_T$"
+    unit: "GeV"
+  
+  eta:
+    name: "Pseudorapidity"
+    symbol: "$\\eta$"
+    unit: ""
+
+# PDG particle names (for particle composition plots)
+pdg_names:
+  11: "e⁻"
+  -11: "e⁺"
+  13: "μ⁻"
+  -13: "μ⁺"
+  211: "π⁺"
+  -211: "π⁻"
+  321: "K⁺"
+  -321: "K⁻"
+  2212: "p"
+  -2212: "p̄"

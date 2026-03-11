@@ -31,12 +31,11 @@ References
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 from torch import Tensor, nn
 
 try:
@@ -46,7 +45,6 @@ except ImportError:
 
 try:
     from mamba_ssm.modules.mamba2 import Mamba2
-    from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
     from mamba_ssm.ops.triton.ssd_combined import (
         mamba_chunk_scan_combined,
         mamba_split_conv1d_scan_combined,
@@ -55,7 +53,7 @@ try:
     MAMBA_AVAILABLE = True
 except ImportError:
     MAMBA_AVAILABLE = False
-    Mamba2 = None  # type: ignore[assignment, misc]
+    Mamba2 = nn.Module  # type: ignore[assignment, misc]
 
 
 # ---------------------------------------------------------------------------
@@ -80,150 +78,28 @@ class Mamba2Output:
     final_state: Tensor | None = None
 
 
-class Mamba2WithState(nn.Module):
-    """Thin wrapper around :class:`mamba_ssm.modules.mamba2.Mamba2` that can
+class Mamba2WithState(Mamba2):  # type: ignore[misc]
+    """Subclass of :class:`mamba_ssm.modules.mamba2.Mamba2` that can
     optionally return the final SSM recurrent state.
 
-    The wrapper re-implements the forward path of ``Mamba2`` but passes
-    ``return_final_states=True`` to the underlying fused triton kernel so
-    that the state tensor is surfaced.  On the fused memory-efficient path
-    (``use_mem_eff_path=True``, the default), the kernel
-    ``mamba_split_conv1d_scan_combined`` is called directly; on the fallback
-    path ``mamba_chunk_scan_combined`` is used instead.
+    The upstream ``Mamba2.forward`` does not expose ``return_final_states``
+    on the fused memory-efficient path.  This subclass overrides ``forward``
+    to inject that flag into the underlying triton kernels when
+    ``return_state=True`` is requested.
 
-    Parameters
-    ----------
-    d_model : int
-        Model / input dimension.
-    d_state : int
-        SSM state expansion factor.
-    d_conv : int
-        Local convolution width.
-    expand : int
-        Block expansion factor.
-    headdim : int
-        Head dimension (must divide ``d_model * expand``).
-    ngroups : int
-        Number of head groups for B/C projections.
-    chunk_size : int
-        Chunk size for the SSD kernel.
-    use_mem_eff_path : bool
-        Use the fused memory-efficient triton kernel (recommended).
-    rmsnorm : bool
-        Apply gated RMSNorm before output projection.
-    norm_before_gate : bool
-        Norm placement relative to the gate.
-    dt_limit : tuple[float, float]
-        Clamp range for the discretised dt.
-    bias : bool
-        Use bias in linear projections.
-    conv_bias : bool
-        Use bias in the 1-D convolution.
+    All weight initialisation, projections, and other logic are inherited
+    from upstream ``Mamba2`` — only the forward path is customised.
+
+    Forked from mamba-ssm==2.3.0.  If you upgrade mamba-ssm, check for
+    upstream changes to ``Mamba2.forward`` and update accordingly.
     """
 
-    def __init__(
-        self,
-        d_model: int,
-        d_state: int = 64,
-        d_conv: int = 4,
-        conv_init: float | None = None,
-        expand: int = 2,
-        headdim: int = 64,
-        d_ssm: int | None = None,
-        ngroups: int = 1,
-        A_init_range: tuple[int, int] = (1, 16),
-        D_has_hdim: bool = False,
-        rmsnorm: bool = True,
-        norm_before_gate: bool = False,
-        dt_min: float = 0.001,
-        dt_max: float = 0.1,
-        dt_init_floor: float = 1e-4,
-        dt_limit: tuple[float, float] = (0.0, float("inf")),
-        bias: bool = False,
-        conv_bias: bool = True,
-        chunk_size: int = 256,
-        use_mem_eff_path: bool = True,
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ):
+    def __init__(self, *args, **kwargs):
         if not MAMBA_AVAILABLE:
             raise ImportError(
                 "mamba-ssm is required.  Install with: pip install mamba-ssm[causal-conv1d]"
             )
-
-        super().__init__()
-
-        factory_kwargs = {"device": device, "dtype": dtype}
-        self.d_model = d_model
-        self.d_state = d_state
-        self.d_conv = d_conv
-        self.conv_init = conv_init
-        self.expand = expand
-        self.d_inner = self.expand * self.d_model
-        self.headdim = headdim
-        self.d_ssm = self.d_inner if d_ssm is None else d_ssm
-        self.ngroups = ngroups
-        assert self.d_ssm % self.headdim == 0
-        self.nheads = self.d_ssm // self.headdim
-        self.D_has_hdim = D_has_hdim
-        self.rmsnorm = rmsnorm
-        self.norm_before_gate = norm_before_gate
-        self.dt_limit = dt_limit
-        self.activation = "silu"
-        self.chunk_size = chunk_size
-        self.use_mem_eff_path = use_mem_eff_path
-
-        # ---- projections (same layout as Mamba2) ----
-        d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
-        self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=bias, **factory_kwargs)
-
-        conv_dim = self.d_ssm + 2 * self.ngroups * self.d_state
-        self.conv1d = nn.Conv1d(
-            in_channels=conv_dim,
-            out_channels=conv_dim,
-            bias=conv_bias,
-            kernel_size=d_conv,
-            groups=conv_dim,
-            padding=d_conv - 1,
-            **factory_kwargs,
-        )
-        if self.conv_init is not None:
-            nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
-
-        self.act = nn.SiLU()
-
-        # dt bias
-        dt = torch.exp(
-            torch.rand(self.nheads, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min)
-        )
-        dt = torch.clamp(dt, min=dt_init_floor)
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-        self.dt_bias = nn.Parameter(inv_dt)
-        self.dt_bias._no_weight_decay = True  # type: ignore[attr-defined]
-
-        # A
-        assert A_init_range[0] > 0 and A_init_range[1] >= A_init_range[0]
-        A = torch.empty(self.nheads, dtype=torch.float32, device=device).uniform_(*A_init_range)
-        A_log = torch.log(A).to(dtype=dtype)
-        self.A_log = nn.Parameter(A_log)
-        self.A_log._no_weight_decay = True  # type: ignore[attr-defined]
-
-        # D skip
-        self.D = nn.Parameter(torch.ones(self.d_ssm if self.D_has_hdim else self.nheads, device=device))
-        self.D._no_weight_decay = True  # type: ignore[attr-defined]
-
-        if self.rmsnorm:
-            assert RMSNormGated is not None
-            self.norm = RMSNormGated(
-                self.d_ssm,
-                eps=1e-5,
-                norm_before_gate=self.norm_before_gate,
-                group_size=self.d_ssm // ngroups,
-                **factory_kwargs,
-            )
-
-        self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        super().__init__(*args, **kwargs)
 
     # -- state dimension helpers -------------------------------------------
 

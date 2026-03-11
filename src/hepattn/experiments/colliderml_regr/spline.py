@@ -27,6 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 from torch import Tensor, nn
@@ -209,3 +210,70 @@ class MonotonicSplineTransform(nn.Module):
 
     def extra_repr(self) -> str:
         return f"name={self.name!r}, n_knots={len(self.kx)}"
+
+
+# ============================================================================
+# NumPy helper functions (used by scripts/fit_splines.py)
+# ============================================================================
+
+
+def fritsch_carlson_slopes_np(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Compute monotone Hermite slopes via Fritsch-Carlson (numpy version).
+
+    This is the single source of truth for the slope algorithm.  The torch
+    version in :class:`MonotonicSplineTransform` mirrors this logic.
+    """
+    n = len(x)
+    dx = np.diff(x)
+    dy = np.diff(y)
+    delta = dy / dx
+
+    m = np.zeros(n)
+    for k in range(1, n - 1):
+        if delta[k - 1] * delta[k] <= 0:
+            m[k] = 0.0
+        else:
+            m[k] = 2.0 * delta[k - 1] * delta[k] / (delta[k - 1] + delta[k])
+
+    m[0] = delta[0]
+    m[-1] = delta[-1]
+
+    for k in range(n - 1):
+        if delta[k] == 0:
+            m[k] = 0.0
+            m[k + 1] = 0.0
+        else:
+            alpha = m[k] / delta[k]
+            beta = m[k + 1] / delta[k]
+            mag = alpha**2 + beta**2
+            if mag > 9.0:
+                tau = 3.0 / np.sqrt(mag)
+                m[k] = tau * alpha * delta[k]
+                m[k + 1] = tau * beta * delta[k]
+
+    return m
+
+
+def evaluate_pchip_np(
+    x_query: np.ndarray,
+    kx: np.ndarray,
+    ky: np.ndarray,
+    slopes: np.ndarray,
+) -> np.ndarray:
+    """Evaluate the PCHIP interpolant at query points (numpy version)."""
+    x_clamped = np.clip(x_query, kx[0], kx[-1])
+    idx = np.searchsorted(kx, x_clamped, side="right") - 1
+    idx = np.clip(idx, 0, len(kx) - 2)
+
+    x0, x1 = kx[idx], kx[idx + 1]
+    y0, y1 = ky[idx], ky[idx + 1]
+    m0, m1 = slopes[idx], slopes[idx + 1]
+    h = x1 - x0
+    t = (x_clamped - x0) / h
+
+    h00 = 2 * t**3 - 3 * t**2 + 1
+    h10 = t**3 - 2 * t**2 + t
+    h01 = -2 * t**3 + 3 * t**2
+    h11 = t**3 - t**2
+
+    return h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1

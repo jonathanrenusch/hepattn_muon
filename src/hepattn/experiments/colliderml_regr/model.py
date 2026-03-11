@@ -123,9 +123,8 @@ class TrackParameterRegressor(nn.Module):
         Activation function for the input embedding network.
 
     input_fields : list[str]
-        Names of hit-level input features.
-    sort_field : str
-        Name of the field used to order hits (default ``'s'``).
+        Names of hit-level input features. Used for validation against
+        ``input_dim``.
     fourier_scales : list[int] | None
         Fourier encoding scales.
     fourier_base : int
@@ -184,7 +183,6 @@ class TrackParameterRegressor(nn.Module):
 
         self.input_dim = input_dim
         self.dim = dim
-        self.sort_field = sort_field
         self.input_fields = input_fields or []
 
         # Fourier encoding config
@@ -199,6 +197,12 @@ class TrackParameterRegressor(nn.Module):
             self.use_norm = True
         else:
             self.use_norm = False
+
+        # Validate input_fields matches input_dim if both are provided
+        if self.input_fields and len(self.input_fields) != input_dim:
+            raise ValueError(
+                f"len(input_fields)={len(self.input_fields)} != input_dim={input_dim}"
+            )
 
         # Hit embedding: fourier_dim → dim
         self.input_net = Dense(
@@ -218,17 +222,17 @@ class TrackParameterRegressor(nn.Module):
         # ---- Factored regression heads ----
         # Each direction's SSM state is projected independently before
         # being combined for the final regression output.
-        per_dir_dim = encoder.state_dim // 2
+        self.per_dir_dim = encoder.state_dim // 2
 
         self.fwd_head = Dense(
-            input_size=per_dir_dim,
+            input_size=self.per_dir_dim,
             output_size=state_head_output_dim,
             hidden_layers=state_head_hidden_layers,
             dropout=state_head_dropout,
             activation=self._resolve_activation(state_head_activation),
         )
         self.bwd_head = Dense(
-            input_size=per_dir_dim,
+            input_size=self.per_dir_dim,
             output_size=state_head_output_dim,
             hidden_layers=state_head_hidden_layers,
             dropout=state_head_dropout,
@@ -289,9 +293,8 @@ class TrackParameterRegressor(nn.Module):
         _seq_out, hidden_state = self.encoder(x, x_sort_value=s, seq_idx=seq_idx)
 
         # Split into forward / backward SSM states and project independently
-        per_dir_dim = hidden_state.shape[-1] // 2
-        h_fwd = hidden_state[:, :per_dir_dim]
-        h_bwd = hidden_state[:, per_dir_dim:]
+        h_fwd = hidden_state[:, :self.per_dir_dim]
+        h_bwd = hidden_state[:, self.per_dir_dim:]
 
         z_fwd = self.fwd_head(h_fwd)
         z_bwd = self.bwd_head(h_bwd)
@@ -351,10 +354,12 @@ class TrackRegressionWrapper(LightningModule):
         model: TrackParameterRegressor,
         lrs_config: dict[str, Any],
         optimizer: Literal["AdamW", "Lion"] = "AdamW",
+        name: str = "TrackRegression",
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
 
+        self.name = name
         self.model = model
         self.lrs_config = lrs_config
         self.opt_name = optimizer

@@ -1,0 +1,17 @@
+### Smoke-test config — 5 events, p0, writes to a throwaway dir
+data:
+  directory: "/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/CERN__ColliderML-Release-1"
+  dataset_prefix: "ttbar_pu0"
+  n_events: 5
+  random_seed: 42
+
+binning:
+  eta_range: [-3.0, 3.0]
+  n_eta_bins: 30
+
+efficiency:
+  min_hits: 7
+  min_energy: 1.0   # GeV
+
+output:
+  directory: "/shared/tracking/logs/eval_smoketest"
