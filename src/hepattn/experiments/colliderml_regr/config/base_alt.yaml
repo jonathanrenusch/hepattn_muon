@@ -1,0 +1,48 @@
+# =============================================================================
+# Alt base config — encoder settings from hit-filtering project
+# =============================================================================
+# Uses the d_state=32 / headdim=32 / dropout=0.0 encoder configuration that
+# proved successful for bidirectional Mamba on the hit-filtering task.
+# Dense regression heads are proportionally scaled for the halved state
+# dimension (8,192 per direction vs 16,384 in the default base).
+#
+# Loaded as an overlay on top of base.yaml (which is auto-loaded by train.py):
+#
+#   python train.py fit --config config/base_alt.yaml \
+#                       --config config/alt_study1_baseline_smooth_l1.yaml
+#
+# Overrides the model architecture while inheriting trainer, callbacks, data,
+# LR schedule, etc. from base.yaml.
+# =============================================================================
+
+model:
+  model:
+    init_args:
+      dim: 128
+      # Per-direction state projection heads (halved for d_state=32)
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      state_head_activation: SiLU
+      # Final output head
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      output_head_activation: SiLU
+      # Input embedding
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      input_net_activation: SiLU
+
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: LayerNorm
+          dropout: 0.0

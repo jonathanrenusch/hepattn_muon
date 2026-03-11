@@ -50,6 +50,8 @@ import numpy as np
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+from hepattn.experiments.colliderml_regr.utils.selection_utils import load_selection_defaults
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -73,19 +75,8 @@ PARTICLE_FEATURE_NAMES = [
 # Track target parameters
 TARGET_NAMES = ["d0", "z0", "phi", "theta", "qop"]
 
-# Track selection defaults
-DEFAULT_SELECTION = {
-    "min_hits": 6,
-    "primary": True,
-    "hard_scatter": True,
-    "pt_min": 0.5,
-    "eta_min": -3.0,
-    "eta_max": 3.0,
-    "d0_min": -1.0,
-    "d0_max": 1.0,
-    "z0_min": -150.0,
-    "z0_max": 150.0,
-}
+# Track selection defaults (loaded from shared selection_defaults.yaml)
+DEFAULT_SELECTION = load_selection_defaults()
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +217,8 @@ def process_shard(
 
         mask = np.ones(nparts, dtype=bool)
         mask &= nhits_per_particle >= sel["min_hits"]
+        if "max_hits" in sel:
+            mask &= nhits_per_particle <= sel["max_hits"]
         if sel["primary"]:
             mask &= is_primary
         if sel["hard_scatter"]:
@@ -248,6 +241,8 @@ def process_shard(
             track_hit_local = np.where(hit_mask)[0]
 
             if len(track_hit_local) < sel["min_hits"]:
+                continue
+            if "max_hits" in sel and len(track_hit_local) > sel["max_hits"]:
                 continue
 
             # Sort track hits by s (distance from IP)
@@ -359,15 +354,24 @@ def main():
     particles_dir = data_dir / args.particles_subdir
     hits_dir = data_dir / args.hits_subdir
 
+    # Support both flat (*.parquet) and nested HuggingFace dataset layouts
+    # (e.g. data/<name>/*.parquet)
     particle_files = sorted(particles_dir.glob("*.parquet"))
+    if not particle_files:
+        particle_files = sorted(particles_dir.rglob("*.parquet"))
     hits_files = sorted(hits_dir.glob("*.parquet"))
+    if not hits_files:
+        hits_files = sorted(hits_dir.rglob("*.parquet"))
 
     # Match by name
     pf_by_name = {f.name: f for f in particle_files}
     hf_by_name = {f.name: f for f in hits_files}
     common = sorted(set(pf_by_name) & set(hf_by_name))
     if not common:
-        raise FileNotFoundError(f"No matching shards in {particles_dir} and {hits_dir}")
+        raise FileNotFoundError(
+            f"No matching shards in {particles_dir} and {hits_dir}.\n"
+            f"  Found {len(particle_files)} particle files, {len(hits_files)} hit files."
+        )
 
     if args.num_shards > 0:
         common = common[: args.num_shards]
@@ -446,6 +450,16 @@ def main():
     print(f"  Selected hits:   {totals['n_selected_hits']:>12,}")
     print(f"  Output:          {output_dir}")
     print(f"  Manifest:        {output_dir / 'manifest.json'}")
+
+    # Auto-create split.json (90/5/5) if it doesn't already exist
+    split_path = output_dir / "split.json"
+    if not split_path.exists():
+        from hepattn.experiments.colliderml_regr.scripts.create_split import create_split
+
+        print(f"\nCreating default train/val/test split (90/5/5)...")
+        create_split(preprocessed_dir=output_dir)
+    else:
+        print(f"\nSplit file already exists: {split_path}")
 
 
 if __name__ == "__main__":

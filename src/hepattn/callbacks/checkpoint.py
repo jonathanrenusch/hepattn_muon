@@ -12,13 +12,14 @@ class Checkpoint(ModelCheckpoint):
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         super().setup(trainer=trainer, pl_module=pl_module, stage=stage)
-        self.save_last = False
         self.name = pl_module.name
         if stage == "fit":
             if trainer.fast_dev_run:
                 return
             log_dir = Path(trainer.log_dir)
             self.dirpath = str(log_dir / "ckpts")
+            print(f"[Checkpoint] Saving checkpoints to: {self.dirpath}")
+            self.save_last = True
 
     def _save_checkpoint(self, trainer: Trainer, filepath: str) -> None:
         super()._save_checkpoint(trainer, filepath)

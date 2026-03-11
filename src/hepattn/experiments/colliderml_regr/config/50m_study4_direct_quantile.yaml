@@ -1,39 +1,49 @@
 # =============================================================================
-# Mini Study 4 — Direct quantile regression (~1.4M params)
+# 50M Study 4 — Direct Quantile Regression (~49.5M parameters)
 # =============================================================================
-# Usage:  python train.py fit --config config/mini_study4_direct_quantile.yaml
+# Quantile regression directly on linearly normalised physical targets using
+# the 50M-class architecture:
+#   - dim=256, 16 bidirectional Mamba-2 layers, d_state=64
+#   - 3-layer dense heads for progressive state compression
+#   - 7 quantiles per parameter for uncertainty estimation
+#   - Total model outputs: 4×7 + 2 (circular phi) = 30
+#
+# Usage:  python train.py fit --config config/50m_study4_direct_quantile.yaml
 # (base.yaml is loaded automatically)
 # =============================================================================
 
 trainer:
-  devices: [2]
+  devices: [1]
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-Mini-Study4-Direct-Quantile
+      name: TRK-50M-Study4-Direct-Quantile
       offline_directory: logs/comet_offline
 
 model:
   model:
     init_args:
-      # --- Mini architecture overrides (from base_mini.yaml) ---
-      dim: 64
-      state_head_output_dim: 128
-      state_head_hidden_layers: [128]
+      # --- 50M architecture ---
+      dim: 256
+      state_head_output_dim: 256
+      state_head_hidden_layers: [512, 384, 256]
       state_head_dropout: 0.1
-      output_head_hidden_layers: [128]
-      output_head_dropout: 0.0
-      input_net_hidden_layers: []
+      state_head_activation: SiLU
+      output_head_hidden_layers: [256, 192, 128]
+      output_head_dropout: 0.05
+      output_head_activation: SiLU
+      input_net_hidden_layers: [192, 256]
       input_net_dropout: 0.0
+      input_net_activation: SiLU
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
         init_args:
-          num_layers: 4
-          dim: 64
-          d_state: 32
+          num_layers: 16
+          dim: 256
+          d_state: 64
           d_conv: 4
           expand: 2
-          headdim: 32
+          headdim: 64
           ngroups: 1
           chunk_size: 256
           norm: LayerNorm
@@ -49,13 +59,13 @@ model:
               weight: 1.0
               norm_min: -1.0
               norm_max: 1.0
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
               weight: 1.0
               norm_min: -150.0
               norm_max: 150.0
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
               type: circular
               weight: 1.0
@@ -65,10 +75,21 @@ model:
               weight: 1.0
               norm_min: 0.0
               norm_max: 3.141592653589793
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             qop:
               type: quantile
               weight: 1.0
               norm_min: -2.0
               norm_max: 2.0
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  # Scaled LR for 50M model
+  lrs_config:
+    initial: 5.0e-06
+    max: 2.0e-05
+    end: 5.0e-07
+    pct_start: 0.10
+    weight_decay: 2.0e-05
+    skip_scheduler: false
+
+  optimizer: Lion

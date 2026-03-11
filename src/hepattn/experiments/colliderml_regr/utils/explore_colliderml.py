@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import random
 from datetime import datetime
 from pathlib import Path
@@ -20,8 +21,11 @@ from typing import Any
 import matplotlib
 import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 import yaml
 from tqdm import tqdm
+
+from hepattn.experiments.colliderml_regr.utils.selection_utils import load_selection_defaults
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -67,12 +71,24 @@ class ColliderMLExplorer:
             self.output_dir / "hit_features",
             self.output_dir / "particle_features",
             self.output_dir / "track_features",
+            self.output_dir / "selected_track_targets",
             self.output_dir / "event_statistics",
             self.output_dir / "event_displays",
             self.output_dir / "occupancy_heatmaps",
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _find_parquets(base_dir: Path, config_name: str) -> list[str]:
+        """Find parquet files supporting nested, flat, and direct layouts."""
+        nested = sorted(glob.glob(str(base_dir / config_name / "data" / config_name / "train-*.parquet")))
+        if nested:
+            return nested
+        flat = sorted(glob.glob(str(base_dir / config_name / "train-*.parquet")))
+        if flat:
+            return flat
+        return sorted(glob.glob(str(base_dir / config_name / "*.parquet")))
 
     def load_data(self) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         """Load particles, tracker_hits, and tracks data.
@@ -82,42 +98,73 @@ class ColliderMLExplorer:
         tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]
             Particles, tracker_hits, and tracks DataFrames.
         """
-        print("Loading ColliderML data...")
+        prefix = self.config["data"].get("dataset_prefix", "ttbar_pu0")
+        print(f"Loading ColliderML data (prefix={prefix})...")
 
-        # Load parquet files
-        particles_dir = self.data_dir / "ttbar_pu0_particles"
-        hits_dir = self.data_dir / "ttbar_pu0_tracker_hits"
-        tracks_dir = self.data_dir / "ttbar_pu0_tracks"
+        # Discover parquet files
+        particle_files = self._find_parquets(self.data_dir, f"{prefix}_particles")
+        hit_files = self._find_parquets(self.data_dir, f"{prefix}_tracker_hits")
+        track_files = self._find_parquets(self.data_dir, f"{prefix}_tracks")
 
-        # Use lazy loading and scan all parquet files
-        particles = pl.scan_parquet(particles_dir / "**/*.parquet")
-        hits = pl.scan_parquet(hits_dir / "**/*.parquet")
-        tracks = pl.scan_parquet(tracks_dir / "**/*.parquet")
+        print(f"Found {len(particle_files)} particle files, {len(hit_files)} hit files, {len(track_files)} track files")
 
-        # Get unique event IDs and sample
-        print("Sampling events...")
-        all_event_ids = particles.select("event_id").unique().collect()["event_id"].to_list()
-        print(f"Total events available: {len(all_event_ids)}")
+        # Count total events via parquet metadata (fast — footer only)
+        total_events = 0
+        event_counts: list[tuple[str, int, int]] = []
+        for f in tqdm(particle_files, desc="Counting events"):
+            count = pq.read_metadata(f).num_rows
+            event_counts.append((f, total_events, total_events + count))
+            total_events += count
 
-        if self.num_events > 0 and self.num_events < len(all_event_ids):
-            sampled_ids = random.sample(all_event_ids, self.num_events)
+        print(f"Total events available: {total_events:,}")
+
+        if self.num_events > 0 and self.num_events < total_events:
+            n_events = self.num_events
         else:
-            sampled_ids = all_event_ids
-            self.num_events = len(all_event_ids)
+            n_events = total_events
+            self.num_events = total_events
 
-        print(f"Using {len(sampled_ids)} events for analysis")
+        print(f"Using {n_events} events for analysis")
 
-        # Filter to sampled events and collect
-        print("Collecting particles...")
-        particles_df = particles.filter(pl.col("event_id").is_in(sampled_ids)).collect()
+        # Random sample of event indices
+        sampled_indices = sorted(random.sample(range(total_events), n_events))
+
+        # Determine which files contain sampled events
+        files_to_load: set[str] = set()
+        for idx in sampled_indices:
+            for f, start, end in event_counts:
+                if start <= idx < end:
+                    files_to_load.add(f)
+                    break
+
+        file_indices = {f: i for i, (f, _, _) in enumerate(event_counts)}
+        indices_to_load = sorted(file_indices[f] for f in files_to_load)
+        print(f"Events are in {len(indices_to_load)} file(s)")
+
+        # Load data from selected files with progress bars
+        particles_list = []
+        hits_list = []
+        tracks_list = []
+
+        for idx in tqdm(indices_to_load, desc="Loading particles"):
+            particles_list.append(pl.read_parquet(particle_files[idx]))
+        for idx in tqdm(indices_to_load, desc="Loading hits"):
+            hits_list.append(pl.read_parquet(hit_files[idx]))
+        for idx in tqdm(indices_to_load, desc="Loading tracks"):
+            tracks_list.append(pl.read_parquet(track_files[idx]))
+
+        particles_df = pl.concat(particles_list)
+        hits_df = pl.concat(hits_list)
+        tracks_df = pl.concat(tracks_list)
+
+        # Filter to sampled events
+        unique_events = particles_df["event_id"].unique().sort()[:n_events].to_list()
+        particles_df = particles_df.filter(pl.col("event_id").is_in(unique_events))
+        hits_df = hits_df.filter(pl.col("event_id").is_in(unique_events))
+        tracks_df = tracks_df.filter(pl.col("event_id").is_in(unique_events))
+
         print(f"  Loaded {len(particles_df)} particle rows")
-
-        print("Collecting tracker hits...")
-        hits_df = hits.filter(pl.col("event_id").is_in(sampled_ids)).collect()
         print(f"  Loaded {len(hits_df)} hit rows")
-
-        print("Collecting tracks...")
-        tracks_df = tracks.filter(pl.col("event_id").is_in(sampled_ids)).collect()
         print(f"  Loaded {len(tracks_df)} track rows")
 
         return particles_df, hits_df, tracks_df
@@ -191,8 +238,8 @@ class ColliderMLExplorer:
         """Plot a single histogram and return statistics."""
         fig, ax = plt.subplots(figsize=tuple(self.config["plot"]["figsize"]))
 
-        # Filter out NaN values
-        valid_data = data[~np.isnan(data)]
+        # Filter out NaN and inf values
+        valid_data = data[np.isfinite(data)]
 
         if len(valid_data) == 0:
             ax.text(0.5, 0.5, "No valid data", ha="center", va="center", transform=ax.transAxes)
@@ -430,7 +477,7 @@ class ColliderMLExplorer:
                     -((((pl.col("px") ** 2 + pl.col("py") ** 2).sqrt() / pl.col("pz")).arctan() / 2).tan().log())
                 ).alias("eta_calc")
             )
-            exploded = exploded.with_columns((pl.col("py").arctan2(pl.col("px"))).alias("phi_calc"))
+            exploded = exploded.with_columns(pl.arctan2(pl.col("py"), pl.col("px")).alias("phi_calc"))
 
         if all(c in exploded.columns for c in ["charge", "pt"]):
             exploded = exploded.with_columns((pl.col("charge") / pl.col("pt")).alias("q_over_pt"))
@@ -702,6 +749,178 @@ class ColliderMLExplorer:
 
         stats["detector_types"] = {"pixel": int(pixel_count), "strip": int(strip_count), "other": int(other_count)}
 
+    def explore_truth_particle_hits(
+        self, particles_df: pl.DataFrame, hits_df: pl.DataFrame
+    ) -> dict:
+        """Plot number of truth hits per particle for ground truth particles.
+
+        Produces two histograms:
+        1. All particles that left at least one hit in the detector.
+        2. Only particles that pass the preprocessing selection cuts
+           from ``preprocess_colliderml.py`` (primary, hard-scatter,
+           charged, pT > 0.5 GeV, |eta| < 3, perigee in range).
+
+        This is useful for understanding whether truncation at ``max_hits``
+        discards significant information.
+        """
+        print("\n" + "=" * 60)
+        print("Exploring Truth Particle Hit Counts")
+        print("=" * 60)
+
+        stats: dict = {}
+
+        # Explode hits to individual rows
+        hit_list_cols = [
+            c for c in hits_df.columns
+            if c != "event_id" and hits_df[c].dtype == pl.List
+        ]
+        exploded_hits = hits_df.explode(hit_list_cols) if hit_list_cols else hits_df
+
+        # Explode particles to individual rows
+        part_list_cols = [
+            c for c in particles_df.columns
+            if c != "event_id" and particles_df[c].dtype == pl.List
+        ]
+        exploded_particles = (
+            particles_df.explode(part_list_cols) if part_list_cols else particles_df
+        )
+
+        # --- Count hits per particle -----------------------------------------
+        if "particle_id" not in exploded_hits.columns:
+            print("  Skipping: no particle_id column in hits")
+            return stats
+
+        hits_per_particle = (
+            exploded_hits.group_by(["event_id", "particle_id"])
+            .agg(pl.len().alias("n_hits"))
+        )
+
+        # ------------------------------------------------------------------
+        # 1) All particles that left at least one hit
+        # ------------------------------------------------------------------
+        all_with_hits = exploded_particles.join(
+            hits_per_particle,
+            on=["event_id", "particle_id"],
+            how="inner",  # only particles with >= 1 hit
+        )
+
+        all_nhits = all_with_hits["n_hits"].to_numpy()
+        print(f"  Particles with >= 1 hit: {len(all_nhits)}")
+        if len(all_nhits) > 0:
+            print(f"    min={int(all_nhits.min())}, median={int(np.median(all_nhits))}, "
+                  f"max={int(all_nhits.max())}, mean={all_nhits.mean():.1f}")
+
+        save_path = self.output_dir / "event_statistics" / "truth_hits_per_particle_all.png"
+        stats["all_particles"] = self._plot_histogram(
+            all_nhits.astype(float),
+            "truth_hits_per_particle",
+            {"bins": "integer", "label": "Number of Hits per Truth Particle"},
+            save_path,
+            title="Truth Hits per Particle (all particles with hits)",
+        )
+
+        # ------------------------------------------------------------------
+        # 2) Selected particles (selection_defaults.yaml cuts)
+        # ------------------------------------------------------------------
+        selection = load_selection_defaults()
+        sel = all_with_hits  # start from particles that have hits
+
+        # Primary
+        if selection.get("primary") and "primary" in sel.columns:
+            sel = sel.filter(pl.col("primary") == True)  # noqa: E712
+        # Hard-scatter (vertex_primary == 1)
+        if selection.get("hard_scatter") and "vertex_primary" in sel.columns:
+            sel = sel.filter(pl.col("vertex_primary") == 1)
+        # Charged
+        if selection.get("charged") and "charge" in sel.columns:
+            sel = sel.filter(pl.col("charge") != 0)
+        # Finite perigee
+        if "perigee_d0" in sel.columns:
+            sel = sel.filter(
+                pl.col("perigee_d0").is_finite()
+                & pl.col("perigee_z0").is_finite()
+            )
+        # pT
+        if all(c in sel.columns for c in ["px", "py"]):
+            sel = sel.with_columns(
+                (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt().alias("_pt")
+            ).filter(pl.col("_pt") >= selection["pt_min"])
+        # eta
+        if all(c in sel.columns for c in ["px", "py", "pz"]):
+            sel = sel.with_columns(
+                (pl.col("pz") / (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt())
+                .arcsinh()
+                .alias("_eta")
+            ).filter(
+                (pl.col("_eta") >= selection["eta_min"])
+                & (pl.col("_eta") <= selection["eta_max"])
+            )
+        # Perigee range
+        if "perigee_d0" in sel.columns:
+            sel = sel.filter(
+                (pl.col("perigee_d0") >= selection["d0_min"])
+                & (pl.col("perigee_d0") <= selection["d0_max"])
+                & (pl.col("perigee_z0") >= selection["z0_min"])
+                & (pl.col("perigee_z0") <= selection["z0_max"])
+            )
+        # min_hits / max_hits
+        sel = sel.filter(pl.col("n_hits") >= selection["min_hits"])
+        if "max_hits" in selection:
+            sel = sel.filter(pl.col("n_hits") <= selection["max_hits"])
+
+        sel_nhits = sel["n_hits"].to_numpy()
+        print(f"  Selected particles (preprocess cuts): {len(sel_nhits)}")
+        if len(sel_nhits) > 0:
+            print(f"    min={int(sel_nhits.min())}, median={int(np.median(sel_nhits))}, "
+                  f"max={int(sel_nhits.max())}, mean={sel_nhits.mean():.1f}")
+
+        save_path = self.output_dir / "event_statistics" / "truth_hits_per_particle_selected.png"
+        stats["selected_particles"] = self._plot_histogram(
+            sel_nhits.astype(float),
+            "truth_hits_per_particle",
+            {"bins": "integer", "label": "Number of Hits per Truth Particle"},
+            save_path,
+            title="Truth Hits per Particle (preprocessing selection)",
+        )
+
+        # ------------------------------------------------------------------
+        # 3) Side-by-side comparison
+        # ------------------------------------------------------------------
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        for ax, data, title, color in [
+            (ax1, all_nhits, "All particles with hits", self.config["plot"]["true_hit_color"]),
+            (ax2, sel_nhits, "After preprocessing selection", self.config["plot"]["noise_hit_color"]),
+        ]:
+            if len(data) == 0:
+                ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+                ax.set_title(title, fontsize=self.config["plot"]["title_fontsize"])
+                continue
+
+            min_val = max(0, int(np.floor(data.min())) - 1)
+            max_val = int(np.ceil(data.max())) + 1
+            bins = np.arange(min_val + 0.5, max_val + 1.5, 1)
+            ax.hist(
+                data, bins=bins, alpha=self.config["histograms"]["fill_alpha"],
+                color=color, edgecolor=self.config["histograms"]["edge_color"],
+                linewidth=self.config["histograms"]["edge_linewidth"],
+            )
+            self._add_stats_to_plot(ax, data.astype(float), self.config["plot"]["stats_position"])
+            ax.set_xlabel("Number of Hits per Particle", fontsize=self.config["plot"]["label_fontsize"])
+            ax.set_ylabel("Count", fontsize=self.config["plot"]["label_fontsize"])
+            ax.set_title(title, fontsize=self.config["plot"]["title_fontsize"])
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        fig.savefig(
+            self.output_dir / "event_statistics" / "truth_hits_per_particle_comparison.png",
+            dpi=self.config["plot"]["dpi"],
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+        return stats
+
     def create_event_displays(
         self, hits_df: pl.DataFrame, particles_df: pl.DataFrame, tracks_df: pl.DataFrame
     ) -> None:
@@ -775,8 +994,9 @@ class ColliderMLExplorer:
         else:
             valid_particle_ids = set()
 
-        # Classify hits
-        is_true_hit = np.isin(hit_particle_ids, list(valid_particle_ids))
+        # Classify hits: signal vs noise
+        is_signal = np.isin(hit_particle_ids, list(valid_particle_ids))
+        is_noise = ~is_signal
 
         # Create figure with pyramid layout
         fig = plt.figure(figsize=tuple(cfg["figsize"]))
@@ -786,42 +1006,24 @@ class ColliderMLExplorer:
         ax_zy = fig.add_subplot(gs[1, 0:2])
         ax_zx = fig.add_subplot(gs[1, 2:4])
 
-        # Plot background (noise) hits
-        bg_mask = ~is_true_hit
-        if np.sum(bg_mask) > 0:
-            ax_xy.scatter(
-                x[bg_mask],
-                y[bg_mask],
-                s=cfg["marker_size"],
-                c=self.config["plot"]["background_color"],
-                alpha=self.config["plot"]["background_alpha"],
-                label="Background",
-            )
-            ax_zy.scatter(
-                z[bg_mask],
-                y[bg_mask],
-                s=cfg["marker_size"],
-                c=self.config["plot"]["background_color"],
-                alpha=self.config["plot"]["background_alpha"],
-            )
-            ax_zx.scatter(
-                z[bg_mask],
-                x[bg_mask],
-                s=cfg["marker_size"],
-                c=self.config["plot"]["background_color"],
-                alpha=self.config["plot"]["background_alpha"],
-            )
-
-        # Plot true hits colored by particle
-        unique_particles = np.unique(hit_particle_ids[is_true_hit])
-        track_colors = self.config["plot"]["track_colors"]
-
-        for i, pid in enumerate(unique_particles):
-            mask = (hit_particle_ids == pid) & is_true_hit
-            color = track_colors[i % len(track_colors)]
-            ax_xy.scatter(x[mask], y[mask], s=cfg["marker_size"] * 2, c=color, alpha=0.8, label=f"Particle {int(pid)}")
-            ax_zy.scatter(z[mask], y[mask], s=cfg["marker_size"] * 2, c=color, alpha=0.8)
-            ax_zx.scatter(z[mask], x[mask], s=cfg["marker_size"] * 2, c=color, alpha=0.8)
+        # Plot noise hits first (grey, behind signal)
+        for ax, h_coord, v_coord in [
+            (ax_xy, x, y),
+            (ax_zy, z, y),
+            (ax_zx, z, x),
+        ]:
+            if np.sum(is_noise) > 0:
+                ax.scatter(
+                    h_coord[is_noise], v_coord[is_noise],
+                    s=cfg["marker_size"], c="grey", alpha=1.0,
+                    label="Noise", rasterized=True,
+                )
+            if np.sum(is_signal) > 0:
+                ax.scatter(
+                    h_coord[is_signal], v_coord[is_signal],
+                    s=cfg["marker_size"], c="green", alpha=1.0,
+                    label="Signal", rasterized=True,
+                )
 
         # Format axes
         ax_xy.set_xlabel("X [mm]")
@@ -840,22 +1042,16 @@ class ColliderMLExplorer:
         ax_zx.set_title(f"Z-X Plane (Event {event_id})")
         ax_zx.grid(True, alpha=0.3)
 
-        # Add legend
+        # Add legend from first axes only (avoid duplicates)
         handles, labels = ax_xy.get_legend_handles_labels()
-        if len(handles) > 0 and len(handles) <= 10:
-            fig.legend(
-                handles[:10],
-                labels[:10],
-                loc="upper right",
-                bbox_to_anchor=(0.98, 0.98),
-                fontsize=8,
-            )
+        if handles:
+            fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(0.98, 0.98), fontsize=8)
 
-        # Stats
+        n_signal = int(np.sum(is_signal))
+        n_noise = int(np.sum(is_noise))
         fig.text(
-            0.02,
-            0.02,
-            f"Total hits: {len(x)} | True: {np.sum(is_true_hit)} | Background: {np.sum(bg_mask)} | Particles: {len(unique_particles)}",
+            0.02, 0.02,
+            f"Total hits: {len(x)} | Signal: {n_signal} | Noise: {n_noise}",
             fontsize=10,
         )
 
@@ -949,6 +1145,152 @@ class ColliderMLExplorer:
 
         print(f"Created occupancy heatmaps with {len(x):,} hits")
 
+    def explore_selected_track_targets(
+        self,
+        tracks_df: pl.DataFrame,
+        particles_df: pl.DataFrame,
+        hits_df: pl.DataFrame,
+    ) -> dict:
+        """Plot truth target distributions for selected particles.
+
+        The five training targets (d0, z0, phi, theta, qop) are derived from
+        **truth particle** properties — matching the preprocessing pipeline in
+        ``preprocess_colliderml.py`` — for particles that pass the shared
+        selection cuts from ``selection_defaults.yaml``.
+        """
+        print("\n" + "=" * 60)
+        print("Exploring Selected Truth Target Distributions")
+        print("=" * 60)
+
+        stats: dict = {}
+        selection = load_selection_defaults()
+
+        # ---- Explode particles -----------------------------------------------
+        part_list_cols = [
+            c for c in particles_df.columns
+            if c != "event_id" and particles_df[c].dtype == pl.List
+        ]
+        exploded_particles = (
+            particles_df.explode(part_list_cols) if part_list_cols else particles_df
+        )
+
+        # ---- Count truth hits per particle (needed for min_hits cut) ----------
+        hit_list_cols = [
+            c for c in hits_df.columns
+            if c != "event_id" and hits_df[c].dtype == pl.List
+        ]
+        exploded_hits = hits_df.explode(hit_list_cols) if hit_list_cols else hits_df
+
+        hits_per_particle = (
+            exploded_hits.group_by(["event_id", "particle_id"])
+            .agg(pl.len().alias("n_hits"))
+        )
+        particles_with_hits = exploded_particles.join(
+            hits_per_particle, on=["event_id", "particle_id"], how="inner",
+        )
+
+        # ---- Apply selection cuts on particles --------------------------------
+        sel = particles_with_hits
+        if selection.get("primary") and "primary" in sel.columns:
+            sel = sel.filter(pl.col("primary") == True)  # noqa: E712
+        if selection.get("hard_scatter") and "vertex_primary" in sel.columns:
+            sel = sel.filter(pl.col("vertex_primary") == 1)
+        if selection.get("charged") and "charge" in sel.columns:
+            sel = sel.filter(pl.col("charge") != 0)
+        if "perigee_d0" in sel.columns:
+            sel = sel.filter(
+                pl.col("perigee_d0").is_finite() & pl.col("perigee_z0").is_finite()
+            )
+        if all(c in sel.columns for c in ["px", "py"]):
+            sel = sel.with_columns(
+                (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt().alias("_pt")
+            ).filter(pl.col("_pt") >= selection["pt_min"])
+        if all(c in sel.columns for c in ["px", "py", "pz"]):
+            sel = sel.with_columns(
+                (pl.col("pz") / (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt())
+                .arcsinh()
+                .alias("_eta")
+            ).filter(
+                (pl.col("_eta") >= selection["eta_min"])
+                & (pl.col("_eta") <= selection["eta_max"])
+            )
+        if "perigee_d0" in sel.columns:
+            sel = sel.filter(
+                (pl.col("perigee_d0") >= selection["d0_min"])
+                & (pl.col("perigee_d0") <= selection["d0_max"])
+                & (pl.col("perigee_z0") >= selection["z0_min"])
+                & (pl.col("perigee_z0") <= selection["z0_max"])
+            )
+        sel = sel.filter(pl.col("n_hits") >= selection["min_hits"])
+        if "max_hits" in selection:
+            sel = sel.filter(pl.col("n_hits") <= selection["max_hits"])
+
+        print(f"  Selected particles: {len(sel)}")
+
+        if len(sel) == 0:
+            print("  No selected particles — skipping target plots.")
+            return stats
+
+        # ---- Derive truth targets (same as preprocess_colliderml.py) ----------
+        # d0 = perigee_d0, z0 = perigee_z0
+        # phi = arctan2(py, px)
+        # theta = arccos(pz / p)
+        # qop = charge / p
+        sel = sel.with_columns(
+            pl.col("perigee_d0").alias("target_d0"),
+            pl.col("perigee_z0").alias("target_z0"),
+            pl.arctan2(pl.col("py"), pl.col("px")).alias("target_phi"),
+            (
+                (pl.col("pz") / (pl.col("px") ** 2 + pl.col("py") ** 2 + pl.col("pz") ** 2).sqrt())
+                .clip(-1.0, 1.0)
+                .arccos()
+            ).alias("target_theta"),
+            (
+                pl.col("charge")
+                / (pl.col("px") ** 2 + pl.col("py") ** 2 + pl.col("pz") ** 2).sqrt()
+            ).alias("target_qop"),
+        )
+
+        # Also derive pT and eta for extra context plots
+        sel = sel.with_columns(
+            (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt().alias("target_pt"),
+        )
+
+        # ---- Plot each target parameter --------------------------------------
+        track_config = self.config["histograms"]["track_features"]
+        target_map = {
+            "d0": "target_d0",
+            "z0": "target_z0",
+            "phi": "target_phi",
+            "theta": "target_theta",
+            "qop": "target_qop",
+        }
+
+        for param, col in tqdm(target_map.items(), desc="Plotting selected truth targets"):
+            data = sel[col].to_numpy().astype(float)
+            cfg = track_config.get(param, {"bins": 100, "label": param})
+            save_path = self.output_dir / "selected_track_targets" / f"{param}_distribution.png"
+            stats[param] = self._plot_histogram(
+                data, param, cfg, save_path,
+                title=f"Truth Target: {cfg.get('label', param)} (selected particles)",
+            )
+
+        # ---- Also plot pT and eta for context --------------------------------
+        for derived, col, cfg_key in [
+            ("pT", "target_pt", "pt"),
+            ("eta", "_eta", "eta"),
+        ]:
+            if col in sel.columns:
+                data = sel[col].to_numpy().astype(float)
+                cfg = track_config.get(cfg_key, {"bins": 100, "label": derived})
+                save_path = self.output_dir / "selected_track_targets" / f"{cfg_key}_distribution.png"
+                stats[cfg_key] = self._plot_histogram(
+                    data, cfg_key, cfg, save_path,
+                    title=f"Truth Target: {cfg.get('label', derived)} (selected particles)",
+                )
+
+        return stats
+
     def save_statistics_summary(self) -> None:
         """Save all statistics to a summary text file."""
         print("\n" + "=" * 60)
@@ -1011,6 +1353,8 @@ class ColliderMLExplorer:
         self.statistics["particle_features"] = self.explore_particle_features(particles_df)
         self.statistics["track_features"] = self.explore_track_features(tracks_df)
         self.statistics["event_statistics"] = self.explore_event_statistics(particles_df, hits_df, tracks_df)
+        self.statistics["truth_particle_hits"] = self.explore_truth_particle_hits(particles_df, hits_df)
+        self.statistics["selected_track_targets"] = self.explore_selected_track_targets(tracks_df, particles_df, hits_df)
 
         # Create visualizations
         self.create_event_displays(hits_df, particles_df, tracks_df)

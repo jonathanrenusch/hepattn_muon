@@ -1,0 +1,161 @@
+# ColliderML Data Exploration Configuration — PU200
+# ==================================================
+# This config controls the data exploration script for ttbar_pu200 dataset
+
+# Data paths
+data:
+  # Base directory containing the ColliderML dataset
+  data_dir: "/eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data"
+  # Dataset prefix (ttbar_pu0 or ttbar_pu200)
+  dataset_prefix: "ttbar_pu200"
+  # Output directory for plots and statistics
+  output_dir: "/shared/tracking/logs/colliderml_exploration_p200"
+  # Number of events to sample for analysis (set to -1 for all events)
+  num_events: 100
+  # Random seed for reproducibility
+  random_seed: 42
+
+# Plot styling
+plot:
+  # Figure DPI for saved images
+  dpi: 150
+  # Default figure size (width, height) in inches
+  figsize: [12, 8]
+  # Font sizes
+  title_fontsize: 14
+  label_fontsize: 12
+  tick_fontsize: 10
+  stats_fontsize: 10
+  # Color scheme
+  true_hit_color: "#1f77b4"  # Blue
+  noise_hit_color: "#ff7f0e"  # Orange
+  track_colors:
+    - "#e41a1c"  # Red
+    - "#377eb8"  # Blue
+    - "#4daf4a"  # Green
+    - "#984ea3"  # Purple
+    - "#ff7f00"  # Orange
+    - "#ffff33"  # Yellow
+    - "#a65628"  # Brown
+    - "#f781bf"  # Pink
+  # Background color for event displays
+  background_color: "gray"
+  background_alpha: 0.3
+  # Statistics box position: "upper left", "upper right", "lower left", "lower right"
+  stats_position: "upper right"
+
+# Histogram settings
+histograms:
+  # Default number of bins for continuous features
+  default_bins: 100
+  # Whether to use integer binning for discrete features
+  use_integer_bins_for_discrete: true
+  # Alpha for histogram fill
+  fill_alpha: 0.7
+  # Edge color
+  edge_color: "black"
+  # Edge linewidth
+  edge_linewidth: 0.5
+  
+  # Feature-specific settings
+  # Format: feature_name: {bins: int or "integer", range: [min, max] or null}
+  hit_features:
+    x: {bins: 100, range: null, label: "x [mm]"}
+    y: {bins: 100, range: null, label: "y [mm]"}
+    z: {bins: 100, range: null, label: "z [mm]"}
+    true_x: {bins: 100, range: null, label: "true_x [mm]"}
+    true_y: {bins: 100, range: null, label: "true_y [mm]"}
+    true_z: {bins: 100, range: null, label: "true_z [mm]"}
+    time: {bins: 100, range: null, label: "time [ns]"}
+    volume_id: {bins: "integer", range: null, label: "volume_id"}
+    layer_id: {bins: "integer", range: null, label: "layer_id"}
+    detector: {bins: "integer", range: null, label: "detector"}
+    
+  particle_features:
+    mass: {bins: 100, range: null, label: "mass [GeV/c²]"}
+    energy: {bins: 100, range: null, label: "energy [GeV]"}
+    px: {bins: 100, range: null, label: "px [GeV/c]"}
+    py: {bins: 100, range: null, label: "py [GeV/c]"}
+    pz: {bins: 100, range: null, label: "pz [GeV/c]"}
+    pt: {bins: 100, range: null, label: "pT [GeV/c]"}
+    eta: {bins: 100, range: [-5, 5], label: "η"}
+    phi: {bins: 100, range: [-3.15, 3.15], label: "φ [rad]"}
+    charge: {bins: "integer", range: null, label: "charge [e]"}
+    q_over_pt: {bins: 100, range: null, label: "q/pT [e·c/GeV]"}
+    vx: {bins: 100, range: null, label: "vx [mm]"}
+    vy: {bins: 100, range: null, label: "vy [mm]"}
+    vz: {bins: 100, range: null, label: "vz [mm]"}
+    perigee_d0: {bins: 100, range: null, label: "d0 [mm]"}
+    perigee_z0: {bins: 100, range: null, label: "z0 [mm]"}
+    
+  track_features:
+    d0: {bins: 100, range: null, label: "d0 [mm]"}
+    z0: {bins: 100, range: null, label: "z0 [mm]"}
+    phi: {bins: 100, range: [-3.15, 3.15], label: "φ [rad]"}
+    theta: {bins: 100, range: [0, 3.15], label: "θ [rad]"}
+    qop: {bins: 100, range: null, label: "q/p [e/GeV]"}
+    pt: {bins: 100, range: null, label: "pT [GeV/c]"}
+    eta: {bins: 100, range: [-5, 5], label: "η"}
+
+# Event display settings
+event_display:
+  # Number of event displays to generate
+  num_displays: 10
+  # Figure size for event displays
+  figsize: [16, 10]
+  # Marker size for hits
+  marker_size: 2
+  # Track linewidth
+  track_linewidth: 1.5
+  # Background hit linewidth  
+  background_linewidth: 0.5
+  # Axis limits (null for auto)
+  x_range: null  # e.g., [-1000, 1000]
+  y_range: null
+  z_range: null
+  # Whether to plot background-only version alongside
+  plot_background_only: true
+
+# Occupancy heatmap settings
+occupancy:
+  # Resolution for heatmaps
+  x_bins: 50
+  y_bins: 50
+  z_bins: 80
+  # Colormap
+  colormap: "viridis"
+  # Whether to use log scale
+  log_scale: true
+  # Figure size
+  figsize: [16, 5]
+
+# Detector subsystem codes (from ColliderML documentation)
+# These may need to be verified against actual data
+detector_codes:
+  pixel: [0, 1, 2, 3]  # Pixel detector layers
+  strip: [4, 5, 6, 7, 8, 9]  # Strip detector layers
+
+# PDG particle names for common particles
+pdg_names:
+  11: "e⁻"
+  -11: "e⁺"
+  13: "μ⁻"
+  -13: "μ⁺"
+  22: "γ"
+  111: "π⁰"
+  211: "π⁺"
+  -211: "π⁻"
+  321: "K⁺"
+  -321: "K⁻"
+  2212: "p"
+  -2212: "p̄"
+  2112: "n"
+
+# Statistics output
+statistics:
+  # Whether to save individual histograms
+  save_individual_plots: true
+  # Whether to create combined summary plots
+  create_summary_plots: true
+  # Whether to generate LaTeX-compatible output
+  latex_output: false

@@ -1,0 +1,85 @@
+# =============================================================================
+# 50M base config — ~49.5M parameter model for scaling studies
+# =============================================================================
+# Scales the bidirectional Mamba-2 encoder to ~50M total parameters by:
+#   - Doubling model dimension (128 → 256) for richer per-token representations
+#   - Doubling encoder depth (8 → 16 layers) for deeper sequence refinement
+#   - Using d_state=64 for high-capacity SSM state compression
+#   - Multi-layer dense heads (3 hidden layers) to progressively compress the
+#     32k-dim SSM hidden state into the regression targets
+#
+# Hyperparameter scaling rationale:
+#   - dim=256: 2x width increases representational capacity per token. SSM
+#     models benefit from wider representations similarly to transformers.
+#   - 16 layers: deeper SSMs allow more iterative refinement of the recurrent
+#     state.  Each layer can selectively compress/update information about the
+#     track geometry.  Mamba-2 scales well with depth due to its gated
+#     architecture preventing gradient degradation.
+#   - d_state=64: the SSM state dimension controls how much information can
+#     be stored in the recurrent hidden state.  For track regression, the
+#     SSM must compress a variable-length sequence of ~10-50 detector hits
+#     into a fixed-size summary.  d_state=64 provides 32k dims per scan
+#     direction (nheads=8 × headdim=64 × d_state=64), sufficient to encode
+#     the rich geometric information from all detector layers.
+#   - Learning rate reduced vs alt configs: larger models are more sensitive
+#     to learning rate.  Following μP-inspired scaling, the max LR is
+#     reduced from 5e-5 → 2e-5 (roughly √(128/256) ≈ 0.7× downscale).
+#     Warmup is extended (5% → 10%) for stable early training.
+#   - Dropout 0.05 in encoder: mild regularisation to prevent overfitting
+#     with 10× more parameters.  Not too aggressive to avoid under-utilising
+#     the SSM capacity.
+#   - Lion optimizer with reduced weight decay suited for this scale.
+#
+# Loaded as an overlay on top of base.yaml (which is auto-loaded by train.py):
+#
+#   python train.py fit --config config/base_50m.yaml \
+#                       --config config/50m_study1_baseline_smooth_l1.yaml
+#
+# Or used inline within the self-contained 50m_study configs.
+# =============================================================================
+
+model:
+  model:
+    init_args:
+      dim: 256
+      # Per-direction state projection heads — 3-layer progressive compression
+      # 32768 → 512 → 384 → 256 → 256 (output_dim)
+      state_head_output_dim: 256
+      state_head_hidden_layers: [512, 384, 256]
+      state_head_dropout: 0.1
+      state_head_activation: SiLU
+      # Final output head — 3-layer narrowing
+      # 512 → 256 → 192 → 128 → num_outputs
+      output_head_hidden_layers: [256, 192, 128]
+      output_head_dropout: 0.05
+      output_head_activation: SiLU
+      # Input embedding — 2-layer
+      # 168 (fourier) → 192 → 256 → 256 (dim)
+      input_net_hidden_layers: [192, 256]
+      input_net_dropout: 0.0
+      input_net_activation: SiLU
+
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 16
+          dim: 256
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 64
+          ngroups: 1
+          chunk_size: 256
+          norm: LayerNorm
+          dropout: 0.05
+
+  # Adjusted LR schedule for larger model
+  lrs_config:
+    initial: 5.0e-06
+    max: 2.0e-05
+    end: 5.0e-07
+    pct_start: 0.10
+    weight_decay: 2.0e-05
+    skip_scheduler: false
+
+  optimizer: Lion

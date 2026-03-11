@@ -41,13 +41,8 @@ trainer:
       init_args:
         monitor: val/total
         mode: min
-    - class_path: hepattn.callbacks.PredictionWriter
-      init_args:
-        write_inputs: false
-        write_outputs: true
-        write_preds: true
-        write_targets: false
-        write_losses: false
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
@@ -128,11 +123,7 @@ model:
 
 data:
   preprocessed_dir: /scratch/colliderml/p0_preprocessed
-  batch_size: 10000
+  batch_size: 2048
   num_workers: 12
   pin_memory: true
-  train_frac: 0.9
-  val_frac: 0.05
-  max_hits: 20
-  bucketed_sampling: true
-  num_shards: 10
+  num_train_shards: -1  # -1 for all train shards from split.json

@@ -1,0 +1,23 @@
+# ============================================================================
+# Shared particle selection criteria for ColliderML preprocessing & evaluation
+# ============================================================================
+#
+# This file is the single source of truth for particle selection cuts used
+# across preprocessing (preprocess_colliderml.py), data exploration
+# (explore_colliderml.py), and tracking evaluation (evaluate_acts_tracking.py).
+#
+# All scripts import these defaults via load_selection_defaults().
+
+selection:
+  min_hits: 6
+  max_hits: 20
+  primary: true
+  hard_scatter: true      # vertex_primary == 1
+  charged: true           # charge != 0
+  pt_min: 0.5             # GeV
+  eta_min: -3.0
+  eta_max: 3.0
+  d0_min: -1.0            # mm
+  d0_max: 1.0             # mm
+  z0_min: -150.0          # mm
+  z0_max: 150.0           # mm

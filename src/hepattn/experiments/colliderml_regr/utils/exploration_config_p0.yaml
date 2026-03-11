@@ -6,10 +6,12 @@
 data:
   # Base directory containing the ColliderML dataset
   data_dir: "/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/CERN__ColliderML-Release-1"
+  # Dataset prefix (ttbar_pu0 or ttbar_pu200)
+  dataset_prefix: "ttbar_pu0"
   # Output directory for plots and statistics
-  output_dir: "/shared/tracking/logs/colliderml_exploration"
+  output_dir: "/shared/tracking/logs/colliderml_exploration_p0"
   # Number of events to sample for analysis (set to -1 for all events)
-  num_events: 1000
+  num_events: 300
   # Random seed for reproducibility
   random_seed: 42
 
@@ -85,7 +87,6 @@ histograms:
     vz: {bins: 100, range: null, label: "vz [mm]"}
     perigee_d0: {bins: 100, range: null, label: "d0 [mm]"}
     perigee_z0: {bins: 100, range: null, label: "z0 [mm]"}
-    pdg_id: {bins: "integer", range: null, label: "PDG ID"}
     
   track_features:
     d0: {bins: 100, range: null, label: "d0 [mm]"}

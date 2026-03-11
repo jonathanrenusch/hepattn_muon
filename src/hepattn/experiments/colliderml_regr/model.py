@@ -10,7 +10,7 @@ This module provides:
 
 - :class:`TrackRegressionWrapper` — a ``LightningModule`` that wraps the
   regressor, configures the optimiser / scheduler, and handles the
-  train / val / test loops with resolution, precision, and pull metrics.
+  train / val / test loops with MAE and precision metrics.
 
 Data flow
 ---------
@@ -392,12 +392,20 @@ class TrackRegressionWrapper(LightningModule):
         for name, value in losses.items():
             self.log(f"{stage}/{name}", value, sync_dist=True, prog_bar=(name == "total"))
 
-        # Optionally compute and log per-parameter metrics
-        if stage == "val" or not self.training:
-            preds = self.model.predict(outputs)
-            self._log_metrics(preds, targets, valid_mask, stage)
+        # Compute and log per-parameter metrics for all stages
+        preds = self.model.predict(outputs)
+        self._log_metrics(preds, targets, valid_mask, stage)
 
         return losses["total"]
+
+    # Units and scale factors for precision logging
+    _PRECISION_UNITS: dict[str, tuple[str, float]] = {
+        "d0": ("[mm]", 1.0),
+        "z0": ("[mm]", 1.0),
+        "phi": ("[mrad]", 1000.0),
+        "theta": ("[mrad]", 1000.0),
+        "qop": ("[1/GeV]", 1.0),
+    }
 
     def _log_metrics(
         self,
@@ -406,19 +414,14 @@ class TrackRegressionWrapper(LightningModule):
         valid_mask: Tensor | None,
         stage: str,
     ) -> None:
-        """Log per-parameter metrics: MAE, resolution, precision, pull.
+        """Log per-parameter metrics: MAE and precision.
 
         Metrics
         -------
-        - MAE: mean absolute error
-        - Resolution: mean((truth - pred) / truth) — only for params safe from
-          division by zero (theta always > 0)
-        - Precision (sigma): standard deviation of (pred - truth)
-        - Pull: mean of (pred - truth) / sigma — measures bias in units of sigma
+        - ``{stage}/{name}/mae``: mean absolute error
+        - ``{stage}/{name}/precision {unit}``: std of (pred - truth) residuals,
+          scaled to physical units (mrad for angles, mm for d0/z0, 1/GeV for qop)
         """
-        # Parameters where resolution = (truth - pred)/truth is safe (truth >> 0)
-        resolution_safe = {"theta"}  # theta in [0.1, 3.04], always positive
-
         for name in self.model.loss_module.parameter_order:
             if name not in preds or name not in targets:
                 continue
@@ -431,26 +434,18 @@ class TrackRegressionWrapper(LightningModule):
                 continue
 
             residual = p - t
-            abs_err = residual.abs()
 
             # MAE
-            self.log(f"{stage}/{name}_mae", abs_err.mean(), sync_dist=True)
+            self.log(f"{stage}/{name}/mae", residual.abs().mean(), sync_dist=True)
 
-            # Precision (sigma): std of residuals
-            sigma = residual.std()
-            self.log(f"{stage}/{name}_sigma", sigma, sync_dist=True)
-
-            # Resolution: mean((truth - pred) / truth) for safe parameters
-            if name in resolution_safe:
-                rel_err = (t - p) / t
-                self.log(f"{stage}/{name}_resolution", rel_err.mean(), sync_dist=True)
-                self.log(f"{stage}/{name}_resolution_std", rel_err.std(), sync_dist=True)
-
-            # Pull: mean of (pred - truth) / sigma (batch-level)
-            if sigma > 1e-8:
-                pull = residual / sigma
-                self.log(f"{stage}/{name}_pull_mean", pull.mean(), sync_dist=True)
-                self.log(f"{stage}/{name}_pull_std", pull.std(), sync_dist=True)
+            # Precision: std of residuals in physical units
+            if residual.numel() > 1:
+                unit, scale = self._PRECISION_UNITS.get(name, ("", 1.0))
+                self.log(
+                    f"{stage}/{name}/precision {unit}",
+                    residual.std() * scale,
+                    sync_dist=True,
+                )
 
     # -- train / val / test ------------------------------------------------
 
@@ -461,7 +456,21 @@ class TrackRegressionWrapper(LightningModule):
         return {"loss": self._shared_step(batch, "val")}
 
     def test_step(self, batch, batch_idx):
-        return {"loss": self._shared_step(batch, "test")}
+        inputs, targets = batch
+        outputs = self.model(inputs)
+
+        valid_mask = targets.get("track_valid")
+        losses = self.model.compute_loss(outputs, targets, valid_mask=valid_mask)
+
+        # Log every component
+        for name, value in losses.items():
+            self.log(f"test/{name}", value, sync_dist=True, prog_bar=(name == "total"))
+
+        # Compute predictions and metrics
+        preds = self.model.predict(outputs)
+        self._log_metrics(preds, targets, valid_mask, "test")
+
+        return {"loss": losses["total"], "preds": preds, "targets": targets}
 
     # -- optimiser / scheduler ---------------------------------------------
 

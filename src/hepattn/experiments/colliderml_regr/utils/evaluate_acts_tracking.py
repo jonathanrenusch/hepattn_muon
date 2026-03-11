@@ -35,6 +35,8 @@ import pyarrow.parquet as pq
 import yaml
 from tqdm import tqdm
 
+from hepattn.experiments.colliderml_regr.utils.selection_utils import load_selection_defaults
+
 
 def load_config(config_path: str | Path) -> dict:
     """Load YAML configuration file."""
@@ -54,8 +56,12 @@ class ACTSTrackingEvaluator:
         # Create subdirectories
         for subdir in ["residuals", "pulls", "efficiency", "resolution", "precision",
                       "resolution_double_matched", "precision_double_matched",
-                      "hit_assignment"]:
+                      "hit_assignment",
+                      "resolution_selected", "precision_selected", "efficiency_selected"]:
             (self.output_dir / subdir).mkdir(exist_ok=True)
+
+        # Load shared particle selection defaults
+        self.selection = load_selection_defaults()
 
         # Set random seed for reproducibility
         random.seed(self.config["data"].get("random_seed", 42))
@@ -304,8 +310,8 @@ class ACTSTrackingEvaluator:
         self,
         tracks_df: pl.DataFrame,
         hits_df: pl.DataFrame,
-        purity_threshold: float = 0.5,
-        efficiency_threshold: float = 0.5,
+        purity_threshold: float = 0.75,
+        efficiency_threshold: float = 0.75,
     ) -> dict:
         """Compute per-track hit purity and hit efficiency for double matching.
 
@@ -601,6 +607,143 @@ class ACTSTrackingEvaluator:
         fake_data["eta_bins"] = eta_bins
 
         return {"efficiency": efficiency_data, "fake_rate": fake_data}
+
+    def _apply_selection_mask(self, particles: pl.DataFrame, hits_per_particle: pl.DataFrame) -> pl.DataFrame:
+        """Apply shared selection cuts to exploded particles with hit counts.
+
+        Returns the filtered DataFrame containing only particles that pass
+        all selection criteria from ``selection_defaults.yaml``.
+        """
+        sel = self.selection
+        df = particles.join(hits_per_particle, on=["event_id", "particle_id"], how="left")
+        df = df.with_columns(pl.col("n_hits").fill_null(0))
+
+        # min_hits / max_hits
+        df = df.filter(pl.col("n_hits") >= sel["min_hits"])
+        if "max_hits" in sel:
+            df = df.filter(pl.col("n_hits") <= sel["max_hits"])
+        # primary
+        if sel.get("primary") and "primary" in df.columns:
+            df = df.filter(pl.col("primary") == True)  # noqa: E712
+        # hard_scatter
+        if sel.get("hard_scatter") and "vertex_primary" in df.columns:
+            df = df.filter(pl.col("vertex_primary") == 1)
+        # charged
+        if sel.get("charged") and "charge" in df.columns:
+            df = df.filter(pl.col("charge") != 0)
+        # Finite perigee
+        if "perigee_d0" in df.columns:
+            df = df.filter(pl.col("perigee_d0").is_finite() & pl.col("perigee_z0").is_finite())
+        # pT
+        if all(c in df.columns for c in ["px", "py"]):
+            df = df.with_columns(
+                (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt().alias("_pt")
+            ).filter(pl.col("_pt") >= sel["pt_min"])
+        # eta
+        if all(c in df.columns for c in ["px", "py", "pz"]):
+            df = df.with_columns(
+                (pl.col("pz") / (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt()).arcsinh().alias("eta")
+            ).filter((pl.col("eta") >= sel["eta_min"]) & (pl.col("eta") <= sel["eta_max"]))
+        # d0 range
+        if "perigee_d0" in df.columns:
+            df = df.filter(
+                (pl.col("perigee_d0") >= sel["d0_min"]) & (pl.col("perigee_d0") <= sel["d0_max"])
+            )
+        # z0 range
+        if "perigee_z0" in df.columns:
+            df = df.filter(
+                (pl.col("perigee_z0") >= sel["z0_min"]) & (pl.col("perigee_z0") <= sel["z0_max"])
+            )
+        return df
+
+    def filter_matched_to_selected(
+        self, matched_tracks: pl.DataFrame, particles_df: pl.DataFrame, hits_df: pl.DataFrame
+    ) -> pl.DataFrame:
+        """Keep only matched tracks whose truth particle passes selection cuts."""
+        particles = self._explode_dataframe(particles_df)
+        hits = self._explode_dataframe(hits_df)
+        hits_per_particle = hits.group_by(["event_id", "particle_id"]).agg(pl.len().alias("n_hits"))
+        selected = self._apply_selection_mask(particles, hits_per_particle)
+
+        # Build set of (event_id, particle_id) that pass
+        sel_keys = selected.select(["event_id", "particle_id"]).unique().with_columns(
+            pl.lit(True).alias("_sel")
+        )
+
+        # Keep only matched tracks whose majority_particle_id is in the selected set
+        filtered = matched_tracks.filter(pl.col("is_matched")).join(
+            sel_keys.rename({"particle_id": "majority_particle_id"}),
+            on=["event_id", "majority_particle_id"],
+            how="inner",
+        )
+        return filtered
+
+    def compute_efficiency_vs_eta_selected(
+        self, matched_tracks: pl.DataFrame, particles_df: pl.DataFrame, hits_df: pl.DataFrame
+    ) -> dict:
+        """Efficiency and fake rate restricted to selected particles."""
+        eta_range = self.config["binning"]["eta_range"]
+        n_eta_bins = self.config["binning"]["n_eta_bins"]
+        eta_bins = np.linspace(eta_range[0], eta_range[1], n_eta_bins + 1)
+
+        particles = self._explode_dataframe(particles_df)
+        hits = self._explode_dataframe(hits_df)
+        hits_per_particle = hits.group_by(["event_id", "particle_id"]).agg(pl.len().alias("n_hits"))
+
+        reconstructible = self._apply_selection_mask(particles, hits_per_particle)
+        print(f"  Selected (reconstructible) particles: {len(reconstructible)}")
+
+        # Compute eta if not yet present
+        if "eta" not in reconstructible.columns and all(c in reconstructible.columns for c in ["px", "py", "pz"]):
+            reconstructible = reconstructible.with_columns(
+                (pl.col("pz") / (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt()).arcsinh().alias("eta")
+            )
+
+        matched_particle_ids = matched_tracks.filter(pl.col("is_matched")).select(
+            ["event_id", "majority_particle_id"]
+        ).unique().with_columns(pl.lit(True).alias("_matched"))
+
+        reconstructible_matched = reconstructible.join(
+            matched_particle_ids.rename({"majority_particle_id": "particle_id"}),
+            on=["event_id", "particle_id"],
+            how="left",
+        ).with_columns(pl.col("_matched").fill_null(False).alias("is_found"))
+
+        eta_values = reconstructible_matched["eta"].to_numpy()
+        is_found = reconstructible_matched["is_found"].to_numpy()
+
+        # Overall (no additional eta cut since selection already enforces eta range)
+        n_total_sel = len(eta_values)
+        n_found_sel = int(np.sum(is_found))
+        overall_eff = n_found_sel / n_total_sel if n_total_sel > 0 else 0.0
+        print(f"  Selected efficiency: {n_found_sel}/{n_total_sel} = {overall_eff:.1%}")
+
+        efficiency_data = {
+            "eta_bins": eta_bins,
+            "eta_centers": [],
+            "efficiency": [],
+            "efficiency_err": [],
+            "n_total": [],
+            "n_matched": [],
+            "overall_efficiency_selected": overall_eff,
+            "n_selected_total": n_total_sel,
+            "n_selected_found": n_found_sel,
+        }
+
+        for i in range(len(eta_bins) - 1):
+            eta_low, eta_high = eta_bins[i], eta_bins[i + 1]
+            mask = (eta_values >= eta_low) & (eta_values < eta_high)
+            n_t = np.sum(mask)
+            n_m = np.sum(is_found[mask])
+            eff = n_m / n_t if n_t > 0 else 0.0
+            eff_err = np.sqrt(eff * (1 - eff) / n_t) if n_t > 0 else 0.0
+            efficiency_data["eta_centers"].append((eta_low + eta_high) / 2)
+            efficiency_data["efficiency"].append(eff)
+            efficiency_data["efficiency_err"].append(eff_err)
+            efficiency_data["n_total"].append(n_t)
+            efficiency_data["n_matched"].append(n_m)
+
+        return {"efficiency": efficiency_data}
 
     def compute_resolution_vs_eta(self, residuals: dict) -> dict:
         """Compute binned resolution (mean relative residual) vs pseudorapidity.
@@ -995,14 +1138,22 @@ class ACTSTrackingEvaluator:
         )
         plt.close(fig)
 
-    def plot_efficiency_and_fake_rate(self, eff_data: dict) -> None:
+    def plot_efficiency_and_fake_rate(self, eff_data: dict,
+                                     subdir: str = "efficiency",
+                                     title_suffix: str = "") -> None:
         """Plot reconstruction efficiency and fake rate vs eta using step style."""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        has_fake = "fake_rate" in eff_data
+        ncols = 2 if has_fake else 1
+        fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 6))
+        if ncols == 1:
+            axes = [axes]
+        ax1 = axes[0]
 
         # Efficiency with step style
         eff = eff_data["efficiency"]
         eta_bins = eff.get("eta_bins", None)
-        unbinned_eff = eff.get("unweighted_efficiency_eta3", 0.0)
+        unbinned_eff = eff.get("unweighted_efficiency_eta3",
+                               eff.get("overall_efficiency_selected", 0.0))
 
         if eta_bins is not None:
             eff_vals = np.array(eff["efficiency"])
@@ -1017,37 +1168,40 @@ class ACTSTrackingEvaluator:
 
         ax1.set_xlabel(r"$\eta_{truth}$", fontsize=12)
         ax1.set_ylabel("Efficiency", fontsize=12)
-        ax1.set_title("Track Reconstruction Efficiency vs $\\eta$", fontsize=14)
+        ax1.set_title(f"Track Reconstruction Efficiency vs $\\eta${title_suffix}", fontsize=14)
         ax1.set_ylim(0, 1.1)
         ax1.grid(True, alpha=0.3)
         ax1.legend()
 
-        # Fake rate with step style
-        fake = eff_data["fake_rate"]
-        fake_eta_bins = fake.get("eta_bins", None)
+        # Fake rate with step style (if available)
+        if has_fake:
+            ax2 = axes[1]
+            fake = eff_data["fake_rate"]
+            fake_eta_bins = fake.get("eta_bins", None)
 
-        if fake_eta_bins is not None and fake["eta_centers"]:
-            fake_vals = np.array(fake["fake_rate"])
-            fake_errs = np.array(fake["fake_rate_err"])
-            unbinned_fake = float(np.mean(fake_vals)) if len(fake_vals) > 0 else 0.0
-            x2, y2 = self._build_step_arrays(fake_eta_bins, fake_vals)
-            ax2.step(x2, y2, where="post", color="red", linewidth=2.5,
-                     label=f"Fake Rate (avg: {unbinned_fake:.3f})")
-            self._step_fill_between(ax2, fake_eta_bins,
-                                    np.clip(fake_vals - fake_errs, 0, 1),
-                                    np.clip(fake_vals + fake_errs, 0, 1),
-                                    color="red", alpha=0.25, label="Binomial error")
+            if fake_eta_bins is not None and fake["eta_centers"]:
+                fake_vals = np.array(fake["fake_rate"])
+                fake_errs = np.array(fake["fake_rate_err"])
+                unbinned_fake = float(np.mean(fake_vals)) if len(fake_vals) > 0 else 0.0
+                x2, y2 = self._build_step_arrays(fake_eta_bins, fake_vals)
+                ax2.step(x2, y2, where="post", color="red", linewidth=2.5,
+                         label=f"Fake Rate (avg: {unbinned_fake:.3f})")
+                self._step_fill_between(ax2, fake_eta_bins,
+                                        np.clip(fake_vals - fake_errs, 0, 1),
+                                        np.clip(fake_vals + fake_errs, 0, 1),
+                                        color="red", alpha=0.25, label="Binomial error")
 
-        ax2.set_xlabel(r"$\eta_{reco}$", fontsize=12)
-        ax2.set_ylabel("Fake Rate", fontsize=12)
-        ax2.set_title("Track Fake Rate vs $\\eta$", fontsize=14)
-        ax2.set_ylim(0, max(0.5, max(fake["fake_rate"]) * 1.2) if fake["fake_rate"] else 0.5)
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
+            ax2.set_xlabel(r"$\eta_{reco}$", fontsize=12)
+            ax2.set_ylabel("Fake Rate", fontsize=12)
+            ax2.set_title(f"Track Fake Rate vs $\\eta${title_suffix}", fontsize=14)
+            ax2.set_ylim(0, max(0.5, max(fake["fake_rate"]) * 1.2) if fake["fake_rate"] else 0.5)
+            ax2.grid(True, alpha=0.3)
+            ax2.legend()
 
+        (self.output_dir / subdir).mkdir(exist_ok=True)
         plt.tight_layout()
         fig.savefig(
-            self.output_dir / "efficiency" / "efficiency_fake_rate_vs_eta.png",
+            self.output_dir / subdir / "efficiency_fake_rate_vs_eta.png",
             dpi=150,
             bbox_inches="tight",
         )
@@ -1619,6 +1773,57 @@ class ACTSTrackingEvaluator:
                             f.write(f"      mean relative residual: {unbinned_rel * 100:.4f}%\n")
                             f.write(f"      precision (std):        {unbinned_std * scale:.6f}{unit_str}\n\n")
 
+            # Selected-particle statistics (preprocessing selection cuts)
+            sel_eff = stats.get("selected_efficiency", {})
+            sel_res_stats = stats.get("selected_residuals", {})
+            sel_res_data = stats.get("selected_resolution_data", {})
+            if sel_eff:
+                f.write("-" * 80 + "\n")
+                f.write("SELECTED-PARTICLE STATISTICS (preprocessing selection cuts)\n")
+                f.write("-" * 80 + "\n\n")
+
+                sel_cfg = self.selection
+                f.write("  Selection criteria (from selection_defaults.yaml):\n")
+                for k, v in sel_cfg.items():
+                    f.write(f"    {k}: {v}\n")
+                f.write("\n")
+
+                n_sel_total = sel_eff.get("n_selected_total", "N/A")
+                n_sel_found = sel_eff.get("n_selected_found", "N/A")
+                sel_overall = sel_eff.get("overall_efficiency_selected", 0.0)
+                f.write(f"  Selected (reconstructible) particles: {n_sel_total}\n")
+                f.write(f"  Found by tracks: {n_sel_found}\n")
+                f.write(f"  Overall selected efficiency: {sel_overall:.3f}\n\n")
+
+                if sel_res_stats:
+                    f.write("  Selected-particle residuals:\n\n")
+                    for param in ["d0", "z0", "phi", "theta", "qop", "pt_rel", "pt_abs"]:
+                        if param in sel_res_stats:
+                            cs = sel_res_stats[param]
+                            scale = self.UNIT_SCALE.get(param, 1.0)
+                            unit = unit_labels.get(param, "")
+                            if param == "pt_abs":
+                                unit = "GeV"
+                            unit_str = f" {unit}" if unit else ""
+                            f.write(f"    {param}:\n")
+                            f.write(f"      mean: {cs['mean'] * scale:.6f}{unit_str}\n")
+                            f.write(f"      std:  {cs['std'] * scale:.6f}{unit_str}\n")
+                            f.write(f"      count: {cs['count']}\n\n")
+
+                if sel_res_data:
+                    f.write("  Selected-particle resolution (unbinned mean relative residual):\n\n")
+                    for param in ["d0", "z0", "phi", "theta", "qop", "pt_rel"]:
+                        if param in sel_res_data:
+                            data = sel_res_data[param]
+                            unbinned_rel = data.get("unbinned_rel_mean", 0.0)
+                            unbinned_std = data.get("unbinned_std", 0.0)
+                            scale = self.UNIT_SCALE.get(param, 1.0)
+                            unit = unit_labels.get(param, "")
+                            unit_str = f" {unit}" if unit else ""
+                            f.write(f"    {param}:\n")
+                            f.write(f"      mean relative residual: {unbinned_rel * 100:.4f}%\n")
+                            f.write(f"      precision (std):        {unbinned_std * scale:.6f}{unit_str}\n\n")
+
             f.write("=" * 80 + "\n")
             f.write("END OF SUMMARY\n")
             f.write("=" * 80 + "\n")
@@ -1939,7 +2144,7 @@ class ACTSTrackingEvaluator:
                                 np.clip(mean_purity - purity_err, 0, 1),
                                 np.clip(mean_purity + purity_err, 0, 1),
                                 color="steelblue", alpha=0.25, label="Std error")
-        ax1.axhline(0.5, color="red", linestyle="--", lw=1, alpha=0.6, label="50% threshold")
+        ax1.axhline(0.75, color="red", linestyle="--", lw=1, alpha=0.6, label="75% threshold")
         ax1.set_xlabel(r"$\eta$", fontsize=12)
         ax1.set_ylabel("Mean Hit Purity", fontsize=12)
         ax1.set_title("Track Hit Purity vs $\\eta$", fontsize=14)
@@ -1955,7 +2160,7 @@ class ACTSTrackingEvaluator:
                                 np.clip(mean_hiteff - hiteff_err, 0, 1),
                                 np.clip(mean_hiteff + hiteff_err, 0, 1),
                                 color="darkorange", alpha=0.25, label="Std error")
-        ax2.axhline(0.5, color="red", linestyle="--", lw=1, alpha=0.6, label="50% threshold")
+        ax2.axhline(0.75, color="red", linestyle="--", lw=1, alpha=0.6, label="75% threshold")
         ax2.set_xlabel(r"$\eta$", fontsize=12)
         ax2.set_ylabel("Mean Hit Efficiency", fontsize=12)
         ax2.set_title("Track Hit Efficiency vs $\\eta$", fontsize=14)
@@ -1993,7 +2198,7 @@ class ACTSTrackingEvaluator:
         print("=" * 80)
 
         # Step 1: Load data
-        print("\n[1/8] Loading data...")
+        print("\n[1/10] Loading data...")
         particles_df, hits_df, tracks_df = self.load_data()
 
         # Explode tracks for track-level analysis (NOT hit_ids - we want one row per track)
@@ -2021,7 +2226,7 @@ class ACTSTrackingEvaluator:
             )
 
         # Step 2: Match tracks to particles
-        print("\n[2/8] Matching tracks to particles...")
+        print("\n[2/10] Matching tracks to particles...")
         matched_tracks = self.match_tracks_to_particles(tracks_unique, particles_df, hits_df)
         n_matched = matched_tracks.filter(pl.col("is_matched")).height
         n_fake = matched_tracks.filter(~pl.col("is_matched")).height
@@ -2031,7 +2236,7 @@ class ACTSTrackingEvaluator:
         print(f"  Fake tracks: {n_fake} ({100*n_fake/n_total:.1f}%)")
 
         # Step 3: Compute residuals
-        print("\n[3/8] Computing residuals...")
+        print("\n[3/10] Computing residuals...")
         print("  pT calculation:")
         print("    pt_reco  = sin(theta) / |qop|         (from track perigee parameters)")
         print("    pt_truth = sqrt(px^2 + py^2)           (from truth particle momentum)")
@@ -2041,7 +2246,7 @@ class ACTSTrackingEvaluator:
                 print(f"  {param}: mean={np.mean(res):.6f}, std={np.std(res):.6f}")
 
         # Step 4: Compute double matching (hit purity + hit efficiency)
-        print("\n[4/8] Computing double matching (purity > 50% AND hit efficiency > 50%)...")
+        print("\n[4/10] Computing double matching (purity > 75% AND hit efficiency > 75%)...")
         dm_data = self.compute_double_matching(tracks_df, hits_df)
         mi = dm_data["_matching_info"]
         print(f"  Total tracks: {mi['n_total']}")
@@ -2074,12 +2279,12 @@ class ACTSTrackingEvaluator:
                 print(f"  {param} (double-matched): mean={np.mean(res):.6f}, std={np.std(res):.6f}")
 
         # Step 5: Compute resolution vs eta (full + double-matched)
-        print("\n[5/8] Computing resolution vs eta...")
+        print("\n[5/10] Computing resolution vs eta...")
         resolution_data = self.compute_resolution_vs_eta(residuals)
         dm_resolution_data = self.compute_resolution_vs_eta(dm_residuals)
 
         # Step 6: Compute efficiency and fake rate
-        print("\n[6/8] Computing efficiency and fake rate...")
+        print("\n[6/10] Computing efficiency and fake rate...")
         eff_data = self.compute_efficiency_vs_eta(matched_tracks, particles_df, hits_df)
 
         # Get eta bins for plotting
@@ -2088,7 +2293,7 @@ class ACTSTrackingEvaluator:
         eta_bins = np.linspace(eta_range[0], eta_range[1], n_eta_bins + 1)
 
         # Step 7: Create plots (full)
-        print("\n[7/8] Creating plots...")
+        print("\n[7/10] Creating plots...")
         self.plot_residuals(residuals)
         self.plot_resolution_vs_eta(resolution_data, eta_bins)
         self.plot_precision_vs_eta(resolution_data, eta_bins)
@@ -2102,12 +2307,33 @@ class ACTSTrackingEvaluator:
         self.plot_pulls_vs_eta(residuals, eta_bins)
 
         # Step 8: Create double-matched plots + hit assignment quality
-        print("\n[8/8] Creating double-matched and hit assignment plots...")
+        print("\n[8/10] Creating double-matched and hit assignment plots...")
         self.plot_resolution_vs_eta(dm_resolution_data, eta_bins, subdir="resolution_double_matched", title_suffix=" (Double-matched)")
         self.plot_precision_vs_eta(dm_resolution_data, eta_bins, subdir="precision_double_matched", title_suffix=" (Double-matched)")
         self.plot_pt_abs_precision_vs_eta(dm_residuals, eta_bins, subdir="precision_double_matched", title_suffix=" (Double-matched)")
         self.plot_pt_abs_precision_vs_pt(dm_residuals, subdir="precision_double_matched", title_suffix=" (Double-matched)")
         self.plot_matching_quality_vs_eta(dm_data, eta_bins, matched_tracks)
+
+        # Step 9: Selected-particle evaluation (preprocessing selection cuts)
+        print("\n[9/10] Evaluating selected particles (preprocessing selection cuts)...")
+        sel_matched = self.filter_matched_to_selected(matched_tracks, particles_df, hits_df)
+        sel_residuals = self.compute_residuals(sel_matched)
+        sel_resolution_data = self.compute_resolution_vs_eta(sel_residuals)
+        sel_eff_data = self.compute_efficiency_vs_eta_selected(matched_tracks, particles_df, hits_df)
+
+        n_sel = len(sel_matched)
+        print(f"  Tracks matched to selected particles: {n_sel}")
+        for param, res in sel_residuals.items():
+            if param != "eta" and not param.endswith("_truth") and not param.endswith("_reco"):
+                print(f"  {param} (selected): mean={np.mean(res):.6f}, std={np.std(res):.6f}")
+
+        # Step 10: Create selected-particle plots
+        print("\n[10/10] Creating selected-particle plots...")
+        self.plot_resolution_vs_eta(sel_resolution_data, eta_bins, subdir="resolution_selected", title_suffix=" (Selected)")
+        self.plot_precision_vs_eta(sel_resolution_data, eta_bins, subdir="precision_selected", title_suffix=" (Selected)")
+        self.plot_pt_abs_precision_vs_eta(sel_residuals, eta_bins, subdir="precision_selected", title_suffix=" (Selected)")
+        self.plot_pt_abs_precision_vs_pt(sel_residuals, subdir="precision_selected", title_suffix=" (Selected)")
+        self.plot_efficiency_and_fake_rate(sel_eff_data, subdir="efficiency_selected", title_suffix=" (Selected)")
 
         # Compute overall statistics
         stats = {
@@ -2137,6 +2363,13 @@ class ACTSTrackingEvaluator:
                 if param in dm_residuals and isinstance(dm_residuals[param], np.ndarray)
             },
             "dm_resolution_data": dm_resolution_data,
+            "selected_efficiency": sel_eff_data["efficiency"],
+            "selected_residuals": {
+                param: {"mean": float(np.mean(res)), "std": float(np.std(res)), "count": len(res)}
+                for param, res in sel_residuals.items()
+                if param != "eta" and not param.endswith("_truth") and not param.endswith("_reco")
+            },
+            "selected_resolution_data": sel_resolution_data,
         }
 
         self.save_statistics(stats)

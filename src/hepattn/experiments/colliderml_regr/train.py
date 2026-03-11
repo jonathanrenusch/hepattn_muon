@@ -8,7 +8,7 @@ Usage::
     # Override data dir for testing:
     python train.py fit --config config/study1_baseline_l1.yaml \\
         --data.preprocessed_dir /scratch/colliderml/p0_preprocessed_test \\
-        --data.num_shards 2 --trainer.max_epochs 2
+        --data.num_train_shards 2 --trainer.max_epochs 2
 """
 
 import os

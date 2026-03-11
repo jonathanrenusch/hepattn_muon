@@ -1,35 +1,39 @@
 # =============================================================================
-# Mini Study 4 — Direct quantile regression (~1.4M params)
+# Alt Study 1 — Baseline Smooth-L1 (hit-filtering encoder config)
 # =============================================================================
-# Usage:  python train.py fit --config config/mini_study4_direct_quantile.yaml
+# Direct regression with Smooth-L1 loss, using the d_state=32 / headdim=32 /
+# dropout=0.0 encoder that worked well on the hit-filtering task.
+# Dense heads are proportionally scaled for the halved state dimension.
+#
+# Usage:  python train.py fit --config config/alt_study1_baseline_smooth_l1.yaml
 # (base.yaml is loaded automatically)
 # =============================================================================
 
 trainer:
-  devices: [2]
+  devices: [0]
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-Mini-Study4-Direct-Quantile
+      name: TRK-Alt-Study1-Baseline-SmoothL1
       offline_directory: logs/comet_offline
 
 model:
   model:
     init_args:
-      # --- Mini architecture overrides (from base_mini.yaml) ---
-      dim: 64
+      # --- Alt architecture overrides (from hit-filtering project) ---
+      dim: 128
       state_head_output_dim: 128
-      state_head_hidden_layers: [128]
-      state_head_dropout: 0.1
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
       output_head_hidden_layers: [128]
       output_head_dropout: 0.0
-      input_net_hidden_layers: []
+      input_net_hidden_layers: [128]
       input_net_dropout: 0.0
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
         init_args:
-          num_layers: 4
-          dim: 64
+          num_layers: 8
+          dim: 128
           d_state: 32
           d_conv: 4
           expand: 2
@@ -37,7 +41,7 @@ model:
           ngroups: 1
           chunk_size: 256
           norm: LayerNorm
-          dropout: 0.05
+          dropout: 0.0
       # --- Loss ---
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
@@ -45,30 +49,30 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: quantile
+              type: smooth_l1
               weight: 1.0
               norm_min: -1.0
               norm_max: 1.0
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              beta: 0.1
             z0:
-              type: quantile
+              type: smooth_l1
               weight: 1.0
               norm_min: -150.0
               norm_max: 150.0
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              beta: 0.1
             phi:
               type: circular
               weight: 1.0
               beta: 0.01
             theta:
-              type: quantile
+              type: smooth_l1
               weight: 1.0
               norm_min: 0.0
               norm_max: 3.141592653589793
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              beta: 0.1
             qop:
-              type: quantile
+              type: smooth_l1
               weight: 1.0
               norm_min: -2.0
               norm_max: 2.0
-              quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+              beta: 0.1

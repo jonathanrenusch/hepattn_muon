@@ -3,13 +3,13 @@
 
 # Data settings
 data:
-  directory: "/scratch/p0/CERN__ColliderML-Release-1"
-  n_events: 100  # Number of events to evaluate
+  directory: "/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/CERN__ColliderML-Release-1"
+  n_events: 300  # Number of events to evaluate
   random_seed: 42
 
 # Output settings
 output:
-  directory: "/shared/tracking/logs/acts_tracking_evaluation"
+  directory: "/shared/tracking/logs/acts_tracking_evaluation_p0"
 
 # Binning configuration for eta-dependent plots
 binning:
