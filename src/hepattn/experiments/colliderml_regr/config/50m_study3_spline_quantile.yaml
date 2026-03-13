@@ -12,6 +12,8 @@
 # (base.yaml is loaded automatically)
 # =============================================================================
 
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/epoch=003-val_total=0.07232.ckpt
+
 trainer:
   devices: [1]
   logger:
@@ -89,3 +91,6 @@ model:
     skip_scheduler: false
 
   optimizer: Lion
+
+data:
+  batch_size: 4096

@@ -65,6 +65,35 @@ def _linear_denormalise(u: Tensor, norm_min: Tensor, norm_max: Tensor) -> Tensor
     return (u + 1.0) / 2.0 * (norm_max - norm_min) + norm_min
 
 
+def _validate_quantiles(quantiles: list[float]) -> None:
+    """Validate quantile levels are inside (0, 1) and strictly increasing."""
+    if len(quantiles) == 0:
+        raise ValueError("quantiles must contain at least one value")
+    if any((q <= 0.0 or q >= 1.0) for q in quantiles):
+        raise ValueError(f"quantiles must be in (0, 1), got: {quantiles}")
+    if any(q2 <= q1 for q1, q2 in zip(quantiles[:-1], quantiles[1:], strict=False)):
+        raise ValueError(f"quantiles must be strictly increasing, got: {quantiles}")
+
+
+def _raw_crossing_stats(raw: Tensor) -> dict[str, Tensor]:
+    """Compute crossing stats from raw quantile channels.
+
+    Crossing is measured on adjacent quantile channels as
+    ``max(q_i - q_{i+1}, 0)``.
+    """
+    if raw.numel() == 0 or raw.shape[-1] < 2:
+        z = raw.new_tensor(0.0)
+        return {"rate": z, "mean_gap": z, "max_gap": z}
+
+    gaps = (raw[..., :-1] - raw[..., 1:]).clamp_min(0.0)
+    crossing_any = (gaps > 0).any(dim=-1).to(dtype=raw.dtype)
+    return {
+        "rate": crossing_any.mean(),
+        "mean_gap": gaps.mean(),
+        "max_gap": gaps.max(),
+    }
+
+
 # ============================================================================
 # Per-parameter loss components
 # ============================================================================
@@ -180,11 +209,14 @@ class QuantileLoss(nn.Module):
         norm_min: float = -1.0,
         norm_max: float = 1.0,
         weight: float = 1.0,
+        monotone_eps: float = 1.0e-6,
     ):
         super().__init__()
         if quantiles is None:
             quantiles = [0.1, 0.25, 0.5, 0.75, 0.9]
+        _validate_quantiles(quantiles)
         self.weight = weight
+        self.monotone_eps = monotone_eps
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
         self.register_buffer("norm_min", torch.tensor(norm_min, dtype=torch.float32))
         self.register_buffer("norm_max", torch.tensor(norm_max, dtype=torch.float32))
@@ -193,18 +225,37 @@ class QuantileLoss(nn.Module):
     def num_outputs(self) -> int:
         return len(self.quantiles)
 
+    def _ordered_from_raw(self, raw: Tensor) -> Tensor:
+        """Map raw channels to strictly ordered quantile values."""
+        if raw.shape[-1] < 2:
+            return raw
+        base = raw[..., :1]
+        deltas = F.softplus(raw[..., 1:]) + self.monotone_eps
+        return torch.cat([base, base + torch.cumsum(deltas, dim=-1)], dim=-1)
+
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """pred: (N, num_quantiles),  target: (N,)."""
         t_norm = _linear_normalise(target, self.norm_min, self.norm_max).unsqueeze(-1)  # (N, 1)
+        p = self._ordered_from_raw(pred)
         tau = self.quantiles.unsqueeze(0)  # (1, Q)
-        diff = t_norm - pred  # (N, Q)
+        diff = t_norm - p  # (N, Q)
         loss = torch.mean(torch.max(tau * diff, (tau - 1) * diff))
         return self.weight * loss
 
     def predict(self, raw: Tensor) -> Tensor:
         """Return median quantile mapped back to physical space."""
+        ordered = self._ordered_from_raw(raw)
         median_idx = (self.quantiles - 0.5).abs().argmin()
-        return _linear_denormalise(raw[..., median_idx], self.norm_min, self.norm_max)
+        return _linear_denormalise(ordered[..., median_idx], self.norm_min, self.norm_max)
+
+    def predict_quantiles(self, raw: Tensor) -> Tensor:
+        """Return all ordered quantile predictions in physical space."""
+        ordered = self._ordered_from_raw(raw)
+        return _linear_denormalise(ordered, self.norm_min, self.norm_max)
+
+    def raw_crossing_metrics(self, raw: Tensor) -> dict[str, Tensor]:
+        """Return crossing metrics computed on the raw (unconstrained) channels."""
+        return _raw_crossing_stats(raw)
 
 
 class SplineQuantileLoss(nn.Module):
@@ -225,11 +276,14 @@ class SplineQuantileLoss(nn.Module):
         spline_config: str | dict[str, Any],
         quantiles: list[float] | None = None,
         weight: float = 1.0,
+        monotone_eps: float = 1.0e-6,
     ):
         super().__init__()
         if quantiles is None:
             quantiles = [0.1, 0.25, 0.5, 0.75, 0.9]
+        _validate_quantiles(quantiles)
         self.weight = weight
+        self.monotone_eps = monotone_eps
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
 
         if isinstance(spline_config, (str, Path)):
@@ -241,18 +295,37 @@ class SplineQuantileLoss(nn.Module):
     def num_outputs(self) -> int:
         return len(self.quantiles)
 
+    def _ordered_logits_from_raw(self, raw: Tensor) -> Tensor:
+        """Map raw channels to strictly ordered quantile logits."""
+        if raw.shape[-1] < 2:
+            return raw
+        base = raw[..., :1]
+        deltas = F.softplus(raw[..., 1:]) + self.monotone_eps
+        return torch.cat([base, base + torch.cumsum(deltas, dim=-1)], dim=-1)
+
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         u_target = self.spline.forward(target).unsqueeze(-1)  # (N, 1)
         # Model predicts in logit space; sigmoid maps to [0, 1] spline space
-        p = torch.sigmoid(pred)  # (N, Q)
+        ordered_logits = self._ordered_logits_from_raw(pred)
+        p = torch.sigmoid(ordered_logits)  # (N, Q)
         tau = self.quantiles.unsqueeze(0)  # (1, Q)
         diff = u_target - p  # (N, Q)
         loss = torch.mean(torch.max(tau * diff, (tau - 1) * diff))
         return self.weight * loss
 
     def predict(self, raw: Tensor) -> Tensor:
+        ordered_logits = self._ordered_logits_from_raw(raw)
         median_idx = (self.quantiles - 0.5).abs().argmin()
-        return self.spline.inverse(torch.sigmoid(raw[..., median_idx]))
+        return self.spline.inverse(torch.sigmoid(ordered_logits[..., median_idx]))
+
+    def predict_quantiles(self, raw: Tensor) -> Tensor:
+        """Return all ordered quantile predictions in physical space."""
+        ordered_logits = self._ordered_logits_from_raw(raw)
+        return self.spline.inverse(torch.sigmoid(ordered_logits))
+
+    def raw_crossing_metrics(self, raw: Tensor) -> dict[str, Tensor]:
+        """Return crossing metrics computed on the raw (unconstrained) channels."""
+        return _raw_crossing_stats(raw)
 
 
 class CircularPhiLoss(nn.Module):
@@ -468,11 +541,48 @@ class TrackParameterLoss(nn.Module):
             raw = pred[..., start:end]
             loss_fn = self.losses[name]
             if isinstance(loss_fn, (QuantileLoss, SplineQuantileLoss)):
-                # Return all quantile predictions in physical space
-                if isinstance(loss_fn, SplineQuantileLoss):
-                    preds[name] = loss_fn.spline.inverse(torch.sigmoid(raw))
-                else:
-                    preds[name] = _linear_denormalise(raw, loss_fn.norm_min, loss_fn.norm_max)
+                preds[name] = loss_fn.predict_quantiles(raw)
             else:
                 preds[name] = loss_fn.predict(raw)
         return preds
+
+    def quantile_crossing_metrics(
+        self,
+        pred: Tensor,
+        valid_mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """Return crossing diagnostics from raw quantile channels.
+
+        Metrics are computed before monotone reconstruction to monitor how often
+        the unconstrained model outputs violate quantile ordering.
+        """
+        metrics: dict[str, Tensor] = {}
+        rates: list[Tensor] = []
+        mean_gaps: list[Tensor] = []
+        max_gaps: list[Tensor] = []
+
+        for name in self.parameter_order:
+            loss_fn = self.losses[name]
+            if not isinstance(loss_fn, (QuantileLoss, SplineQuantileLoss)):
+                continue
+
+            start, end = self._output_slices[name]
+            raw = pred[..., start:end]
+            if valid_mask is not None:
+                raw = raw[valid_mask]
+
+            stats = loss_fn.raw_crossing_metrics(raw)
+            metrics[f"{name}/raw_crossing_rate"] = stats["rate"]
+            metrics[f"{name}/raw_crossing_mean_gap"] = stats["mean_gap"]
+            metrics[f"{name}/raw_crossing_max_gap"] = stats["max_gap"]
+
+            rates.append(stats["rate"])
+            mean_gaps.append(stats["mean_gap"])
+            max_gaps.append(stats["max_gap"])
+
+        if rates:
+            metrics["quantiles/raw_crossing_rate_mean"] = torch.stack(rates).mean()
+            metrics["quantiles/raw_crossing_mean_gap_mean"] = torch.stack(mean_gaps).mean()
+            metrics["quantiles/raw_crossing_max_gap_max"] = torch.stack(max_gaps).max()
+
+        return metrics

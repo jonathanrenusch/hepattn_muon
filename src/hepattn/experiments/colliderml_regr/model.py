@@ -387,10 +387,15 @@ class TrackRegressionWrapper(LightningModule):
 
         valid_mask = targets.get("track_valid")
         losses = self.model.compute_loss(outputs, targets, valid_mask=valid_mask)
+        crossing_metrics = self.model.loss_module.quantile_crossing_metrics(outputs["pred"], valid_mask=valid_mask)
 
         # Log every component
         for name, value in losses.items():
             self.log(f"{stage}/{name}", value, sync_dist=True, prog_bar=(name == "total"))
+
+        # Monitor quantile crossings on raw (unconstrained) quantile channels
+        for name, value in crossing_metrics.items():
+            self.log(f"{stage}/{name}", value, sync_dist=True)
 
         # Compute and log per-parameter metrics for all stages
         preds = self.model.predict(outputs)
@@ -435,6 +440,11 @@ class TrackRegressionWrapper(LightningModule):
 
             residual = p - t
 
+            # Match evaluation script behavior: wrap phi residuals to [-pi, pi].
+            if name == "phi":
+                residual = torch.where(residual > math.pi, residual - 2.0 * math.pi, residual)
+                residual = torch.where(residual < -math.pi, residual + 2.0 * math.pi, residual)
+
             # MAE
             self.log(f"{stage}/{name}/mae", residual.abs().mean(), sync_dist=True)
 
@@ -461,10 +471,15 @@ class TrackRegressionWrapper(LightningModule):
 
         valid_mask = targets.get("track_valid")
         losses = self.model.compute_loss(outputs, targets, valid_mask=valid_mask)
+        crossing_metrics = self.model.loss_module.quantile_crossing_metrics(outputs["pred"], valid_mask=valid_mask)
 
         # Log every component
         for name, value in losses.items():
             self.log(f"test/{name}", value, sync_dist=True, prog_bar=(name == "total"))
+
+        # Monitor quantile crossings on raw (unconstrained) quantile channels
+        for name, value in crossing_metrics.items():
+            self.log(f"test/{name}", value, sync_dist=True)
 
         # Compute predictions and metrics
         preds = self.model.predict(outputs)

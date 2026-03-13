@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 import h5py
 import numpy as np
 from lightning import Callback, LightningModule, Trainer
+import torch
 from torch import Tensor
 
 
@@ -80,3 +82,86 @@ class RegressionPredictionWriter(Callback):
             print("-" * 80)
             print(f"Predictions written to {self._output_path}")
             print("-" * 80)
+
+
+class MinimalGpuMonitor(Callback):
+    """Log only coarse GPU utilization and memory utilization metrics.
+
+    Metrics are designed to mirror a compact subset of ``nvidia-smi``:
+    - ``gpu/utilization_pct``
+    - ``gpu/memory_utilization_pct``
+    """
+
+    def __init__(self, log_every_n_steps: int = 50) -> None:
+        super().__init__()
+        self.log_every_n_steps = log_every_n_steps
+        self._sync_dist = False
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        if trainer.fast_dev_run or stage != "fit":
+            return
+        self._sync_dist = len(trainer.device_ids) > 1
+
+    @staticmethod
+    def _query_nvidia_smi(device_idx: int) -> tuple[float, float] | None:
+        """Return ``(gpu_util_pct, mem_util_pct)`` from nvidia-smi if available."""
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                    "-i",
+                    str(device_idx),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=2,
+            )
+            line = result.stdout.strip().splitlines()[0]
+            gpu_util_str, mem_used_str, mem_total_str = [x.strip() for x in line.split(",")]
+            gpu_util = float(gpu_util_str)
+            mem_used = float(mem_used_str)
+            mem_total = float(mem_total_str)
+            mem_util = 100.0 * mem_used / max(mem_total, 1.0)
+            return gpu_util, mem_util
+        except (IndexError, ValueError, subprocess.SubprocessError):
+            return None
+
+    @staticmethod
+    def _torch_memory_util(device_idx: int) -> float:
+        free_b, total_b = torch.cuda.mem_get_info(device_idx)
+        used_b = total_b - free_b
+        return 100.0 * float(used_b) / max(float(total_b), 1.0)
+
+    def on_train_batch_end(self, trainer: Trainer, pl_module: LightningModule, outputs, batch, batch_idx) -> None:
+        if not torch.cuda.is_available() or self.log_every_n_steps <= 0:
+            return
+        if trainer.global_step % self.log_every_n_steps != 0:
+            return
+
+        device_idx = torch.cuda.current_device()
+        stats = self._query_nvidia_smi(device_idx)
+
+        if stats is not None:
+            gpu_util, mem_util = stats
+            pl_module.log(
+                "gpu/utilization_pct",
+                gpu_util,
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                sync_dist=self._sync_dist,
+            )
+        else:
+            mem_util = self._torch_memory_util(device_idx)
+
+        pl_module.log(
+            "gpu/memory_utilization_pct",
+            mem_util,
+            on_step=True,
+            on_epoch=False,
+            logger=True,
+            sync_dist=self._sync_dist,
+        )

@@ -6,7 +6,7 @@
 # =============================================================================
 
 trainer:
-  devices: [2]
+  devices: [0]
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:

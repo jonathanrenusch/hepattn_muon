@@ -84,3 +84,6 @@ model:
     skip_scheduler: false
 
   optimizer: Lion
+
+data:
+  batch_size: 4096
