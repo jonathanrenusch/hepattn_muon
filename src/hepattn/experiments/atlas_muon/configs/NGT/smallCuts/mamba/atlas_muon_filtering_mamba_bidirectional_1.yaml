@@ -1,5 +1,5 @@
 seed_everything: 42
-name: ATLAS-Muon-VisionMamba-Bidirectional
+name: ATLAS-Muon-VisionMamba-Bidirectional_layers6
 # ckpt: /scratch/epoch=012-val_loss=0.03428.ckpt
 
 # Bidirectional Mamba SSM (Vision Mamba style) for hit filtering
@@ -12,7 +12,7 @@ data:
   test_dir: /scratch/ml_test_data_156000_hdf5
 
   # so make sure to increase this number more for multi GPU but keep lscpu in mind (for 1 gpu 48 is good)
-  num_workers: 80  
+  num_workers: 48  
   # the variables below are set to -1 to use all available data
   num_train: -1 
   num_val: -1 
@@ -55,7 +55,7 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: -1
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -162,7 +162,7 @@ model:
         # Processes sequence in both directions and combines via gating
         class_path: hepattn.models.BidirectionalMambaEncoder
         init_args:
-          num_layers: 8  # Same depth as transformer baseline
+          num_layers: 6  # Same depth as transformer baseline
           dim: *dim
           d_state: 32     # Changed from 64 for testing # SSM state expansion factor (64 for Mamba-2)
           d_conv: 4      # Local convolution width

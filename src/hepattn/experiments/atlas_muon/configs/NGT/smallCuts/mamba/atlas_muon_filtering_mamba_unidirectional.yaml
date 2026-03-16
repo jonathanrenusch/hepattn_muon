@@ -1,12 +1,13 @@
 seed_everything: 42
 name: ATLAS-Muon-Mamba-Unidirectional
-ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-Mamba-Unidirectional_20251216-T204850/ckpts/epoch=006-val_loss=0.10869.ckpt
+#ckpt_path: /shared/tracking/hepattn_muon/src/logs/ATLAS-Muon-Mamba-Unidirectional_20251216-T204850/ckpts/epoch=006-val_loss=0.10869.ckpt
 # Unidirectional Mamba SSM baseline for hit filtering
 # Uses simple Mamba blocks processing hits sorted by phi angle
 
 data: 
   train_dir: /scratch/ml_training_data_2694000_hdf5
   val_dir: /scratch/ml_validation_data_144000_hdf5
+  test_dir: /scratch/ml_test_data_156000_hdf5
 
   num_workers: 8
   num_train: -1
@@ -50,7 +51,7 @@ trainer:
   max_epochs: 50
   num_sanity_val_steps: 1
   accelerator: gpu
-  devices: [0,1]
+  devices: [0]
   precision: bf16-mixed
   log_every_n_steps: 50
   default_root_dir: logs
@@ -163,7 +164,7 @@ model:
           expand: 2      # Block expansion factor
           use_mamba2: true  # Use Mamba-2 architecture (default)
           headdim: 32    # Head dimension (32 for dim=128, 64 for dim>=256)
-          norm: LayerNorm
+          norm: RMSNorm
           dropout: 0.0
 
       tasks:
