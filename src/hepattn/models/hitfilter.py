@@ -46,7 +46,11 @@ class HitFilter(nn.Module):
 
         # Pass merged input hits through the encoder
         if self.encoder is not None:
-            x["key_embed"] = self.encoder(x["key_embed"], x.get(f"key_{self.input_sort_field}"))
+            x["key_embed"] = self.encoder(
+                x["key_embed"],
+                x.get(f"key_{self.input_sort_field}"),
+                pad_mask=x["key_valid"],
+            )
 
         # Unmerge the updated features back into the separate input types
         for input_name in input_names:
