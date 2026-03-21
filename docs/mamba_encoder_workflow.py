@@ -156,7 +156,7 @@ def draw_workflow():
     # ── 3. InputNet: Dense MLP ────────────────────────────────────────────────
     rounded_box(ax, (cx, y_dense), bw, bh,
                 "InputNet – Dense MLP  (Linear → SwiGLU → Linear)",
-                "18 → 256 (gated) → 128   |   output: (B, N, D=128)",
+                "18 → (gated 72 → SwiGLU → 36) → 128   |   output: (B, N, D=128)",
                 color=C["embed"])
 
     arrow(ax, cx, y_dense - bh/2, cx, y_posenc + bh/2)

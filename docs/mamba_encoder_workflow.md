@@ -45,10 +45,12 @@ x = LayerNorm(x)   # norm_input=True in Dense
 
 ### Step 3 — InputNet: Dense MLP
 
-A two-layer MLP with **SwiGLU** activation embeds each hit into a `D=128` dimensional space:
+A two-layer MLP with **SwiGLU** activation embeds each hit into a `D=128` dimensional space.
+`Dense` uses `hidden_dim_scale=2` (default), so the hidden layer is `18 × 2 = 36` units.
+Because SwiGLU is a *gated* activation the inner linear is doubled before the gate split:
 
 ```
-x = Linear(18 → 256)  →  SwiGLU  →  Linear(128 → 128)
+Linear(18 → 72)  →  SwiGLU (splits 72 → 2×36, gate→ 36)  →  Linear(36 → 128)
 ```
 
 Output shape: `(B, N_max, 128)`.
