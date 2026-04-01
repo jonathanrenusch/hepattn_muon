@@ -537,7 +537,7 @@ class BidirectionalMambaEncoder(nn.Module):
         # Final layer with state extraction
         x, hidden_state = self.final_layer(x, seq_idx=seq_idx, return_state=True)
 
-        # Post-norm
+        # Post-norm on sequence output (kept for API compatibility)
         x = self.final_norm(x)
 
         # Un-sort back to original order
@@ -546,4 +546,10 @@ class BidirectionalMambaEncoder(nn.Module):
             x = torch.gather(x, -2, x_unsort_idx.unsqueeze(-1).expand_as(x))
 
         assert hidden_state is not None, "Final layer should always return hidden state"
+
+        # Tie sequence output into hidden_state graph so all parameters
+        # participate in the backward pass (avoids DDP unused-parameter errors).
+        # The 0-valued addition is a no-op numerically.
+        hidden_state = hidden_state + 0.0 * x.sum()
+
         return x, hidden_state

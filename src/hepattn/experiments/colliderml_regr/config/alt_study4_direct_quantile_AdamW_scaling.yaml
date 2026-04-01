@@ -1,0 +1,100 @@
+# =============================================================================
+# Alt Study 4 — Direct Quantile Regression (hit-filtering encoder config)
+# =============================================================================
+# Quantile regression directly on linearly normalised physical targets, using
+# the d_state=32 / headdim=32 / dropout=0.0 encoder from the hit-filtering
+# project.  Dense heads are proportionally scaled for the halved state dim.
+#
+# Usage:  python train.py fit --config config/alt_study4_direct_quantile.yaml
+# (base.yaml is loaded automatically)
+# =============================================================================
+
+# WARNING: This config is designed for aggressive training (large batch size, strong optimizer, short schedule) to quickly test the direct quantile regression approach. 
+trainer:
+  max_epochs: 100
+  devices: -1
+  precision: bf16-mixed
+  strategy: ddp
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-Alt-Study4-Direct-Quantile-AdamW-Scaling-d32-4GPU
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      # --- Alt architecture overrides (from hit-filtering project) ---
+      dim: 128
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: LayerNorm
+          dropout: 0.0
+
+      # --- Loss ---
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -1.0
+              norm_max: 1.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -150.0
+              norm_max: 150.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile
+              weight: 10.0
+              norm_min: 0.0
+              norm_max: 3.141592653589793
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  lrs_config:
+    initial: 1.0e-05   # Higher starting point
+    max: 1.0e-03       # ~9x jump from your old peak
+    end: 1.0e-06       # Much lower floor to fix the "Quantile jitter"
+    pct_start: 0.15    # Slightly longer warmup
+    weight_decay: 1.0e-02 # Lowered; let the model fit the physics
+    skip_scheduler: false
+    betas: [0.8, 0.95]
+    eps: 1.0e-08
+
+  optimizer: AdamW
+
+# the following is desinged for training on H100 GPUs with the max batch size
+data: 
+  batch_size: 30000
+  num_workers: 12

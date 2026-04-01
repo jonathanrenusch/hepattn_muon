@@ -13,17 +13,23 @@
 #   p0 preprocessed: 1000 shards × ~231 MB         = ~224 GB
 #   p0 raw:          particles_recorded_only         =  12 GB
 #                    tracker_hits                     = 121 GB
-#                                              Total = 133 GB
+#                    tracks (ACTS reco)               =   3 GB
+#                                              Total = 136 GB
 #
 #   p200:            particles_recorded_only          =   9 GB
 #                    tracker_hits                     = 660 GB
-#                                              Total = 669 GB
+#                    tracks (ACTS reco)               =  14 GB
+#                                              Total = 683 GB
+#
+#   p200_compact:    preprocessed compact shards       = TBD (est. ~200-400 GB)
+#                    (no background hits, ACTS augmented)
 #
 # Usage:
 #   ./parallel_copy_to_scratch.sh p0              # copy p0 preprocessed (default)
 #   ./parallel_copy_to_scratch.sh p0 --raw        # copy p0 raw parquets instead
-#   ./parallel_copy_to_scratch.sh p200            # copy p200 only
-#   ./parallel_copy_to_scratch.sh all             # copy both (p0 preprocessed + p200)
+#   ./parallel_copy_to_scratch.sh p200            # copy p200 raw parquets
+#   ./parallel_copy_to_scratch.sh p200_compact    # copy p200 compact preprocessed
+#   ./parallel_copy_to_scratch.sh all             # copy p0 preprocessed + p200 raw + p200 compact
 #   ./parallel_copy_to_scratch.sh p0 --jobs 30    # use 30 parallel jobs
 #   ./parallel_copy_to_scratch.sh p0 --dry-run    # show what would be copied
 #
@@ -43,11 +49,13 @@ SCRATCH="/scratch"
 P0_PREPROCESSED_SRC="/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/p0_preprocessed"
 P0_RAW_SRC="/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/CERN__ColliderML-Release-1"
 P200_SRC="/eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data"
+P200_COMPACT_SRC="/eos/project/e/end-to-end-colliderml/data/p200_preprocessed_plus_qcd"
 
 # ── Target layout ──
 P0_PREPROCESSED_DST="${SCRATCH}/colliderml/p0/p0_preprocessed"
 P0_RAW_DST="${SCRATCH}/colliderml/p0"
 P200_DST="${SCRATCH}/colliderml/p200"
+P200_COMPACT_DST="${SCRATCH}/colliderml/p200_preprocessed_plus_qcd"
 
 # ── Parse arguments ──
 DATASET="${1:-}"
@@ -62,13 +70,14 @@ while [[ $# -gt 0 ]]; do
                     P0_PREPROCESSED_DST="${SCRATCH}/colliderml/p0/p0_preprocessed"
                     P0_RAW_DST="${SCRATCH}/colliderml/p0"
                     P200_DST="${SCRATCH}/colliderml/p200"
+                    P200_COMPACT_DST="${SCRATCH}/colliderml/p200_preprocessed_plus_qcd"
                     shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [[ -z "$DATASET" ]] || [[ ! "$DATASET" =~ ^(p0|p200|all)$ ]]; then
-    echo "Usage: $0 {p0|p200|all} [--jobs N] [--dry-run] [--raw] [--scratch /path]"
+if [[ -z "$DATASET" ]] || [[ ! "$DATASET" =~ ^(p0|p200|p200_compact|all)$ ]]; then
+    echo "Usage: $0 {p0|p200|p200_compact|all} [--jobs N] [--dry-run] [--raw] [--scratch /path]"
     exit 1
 fi
 
@@ -172,6 +181,11 @@ copy_shards_parallel() {
     # Copy the manifest if it exists
     if [[ -f "${src_dir}/manifest.json" ]]; then
         cp -n "${src_dir}/manifest.json" "${dst_dir}/manifest.json" 2>/dev/null || true
+    fi
+
+    # Copy the split file if it exists (created by create_split.py)
+    if [[ -f "${src_dir}/split.json" ]]; then
+        cp -n "${src_dir}/split.json" "${dst_dir}/split.json" 2>/dev/null || true
     fi
 
     # Build list of files to copy (all files in all shard_* dirs)
@@ -307,12 +321,23 @@ if [[ "$DATASET" == "p0" || "$DATASET" == "all" ]]; then
             "${P0_RAW_SRC}/ttbar_pu0_tracker_hits/data/ttbar_pu0_tracker_hits" \
             "${P0_RAW_DST}/ttbar_pu0_tracker_hits" \
             "tracker_hits (raw)"
+
+        copy_dir_parallel \
+            "${P0_RAW_SRC}/ttbar_pu0_tracks/data/ttbar_pu0_tracks" \
+            "${P0_RAW_DST}/ttbar_pu0_tracks" \
+            "tracks / ACTS reco (raw)"
     else
         # p0 preprocessed: shard directories with .npy files (default)
         copy_shards_parallel \
             "${P0_PREPROCESSED_SRC}" \
             "${P0_PREPROCESSED_DST}" \
             "preprocessed shards"
+
+        # Also copy ACTS reco tracks (needed for augmentation / evaluation)
+        copy_dir_parallel \
+            "${P0_RAW_SRC}/ttbar_pu0_tracks/data/ttbar_pu0_tracks" \
+            "${P0_RAW_DST}/ttbar_pu0_tracks" \
+            "tracks / ACTS reco"
     fi
     echo ""
 fi
@@ -329,6 +354,20 @@ if [[ "$DATASET" == "p200" || "$DATASET" == "all" ]]; then
         "${P200_SRC}/ttbar_pu200_tracker_hits" \
         "${P200_DST}/ttbar_pu200_tracker_hits" \
         "tracker_hits"
+
+    copy_dir_parallel \
+        "${P200_SRC}/ttbar_pu200_tracks" \
+        "${P200_DST}/ttbar_pu200_tracks" \
+        "tracks / ACTS reco"
+    echo ""
+fi
+
+if [[ "$DATASET" == "p200_compact" || "$DATASET" == "all" ]]; then
+    echo "── P200 Compact (preprocessed) ──────────────────────────────────────"
+    copy_shards_parallel \
+        "${P200_COMPACT_SRC}" \
+        "${P200_COMPACT_DST}" \
+        "p200 compact preprocessed shards"
     echo ""
 fi
 

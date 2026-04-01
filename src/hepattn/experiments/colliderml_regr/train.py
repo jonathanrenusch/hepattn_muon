@@ -12,10 +12,18 @@ Usage::
 """
 
 import os
+import warnings
 
 # Redirect Triton cache to /tmp to avoid AFS quota issues.
 # Must be set before any torch/triton import.
 os.environ.setdefault("TRITON_CACHE_DIR", "/tmp/triton_cache")
+
+# Suppress noisy PyTorch DDP barrier warning (harmless, no explicit device_id)
+warnings.filterwarnings("ignore", message=".*barrier.*device under current context.*")
+
+import torch
+
+torch.set_float32_matmul_precision("high")
 
 from pathlib import Path
 

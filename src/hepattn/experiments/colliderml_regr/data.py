@@ -14,14 +14,16 @@ preprocessed shards passes selection and loads them unconditionally.
 
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from lightning import LightningDataModule
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 
 # ============================================================================
@@ -52,9 +54,11 @@ class ColliderMLTrackDataset(Dataset):
         self,
         preprocessed_dir: str | Path,
         shard_indices: list[int],
+        load_acts: bool = False,
     ):
         super().__init__()
         self.preprocessed_dir = Path(preprocessed_dir)
+        self.load_acts = load_acts
 
         # Build global index: list of (shard_idx, local_track_idx)
         # and cache memmap references per shard
@@ -66,20 +70,10 @@ class ColliderMLTrackDataset(Dataset):
             if not shard_dir.exists():
                 continue
 
-            sel_dir = shard_dir / "selected_tracks"
-            targets = np.load(sel_dir / "track_targets.npy", mmap_mode="r")
-            offsets = np.load(sel_dir / "track_hit_offsets.npy", mmap_mode="r")
-            hit_indices = np.load(sel_dir / "track_hit_indices.npy", mmap_mode="r")
-            hits = np.load(shard_dir / "hits.npy", mmap_mode="r")
+            shard_entry = _open_shard(self.preprocessed_dir, si, load_acts)
+            self._shard_data[si] = shard_entry
 
-            n_tracks = len(targets)
-            self._shard_data[si] = {
-                "hits": hits,
-                "targets": targets,
-                "offsets": offsets,
-                "hit_indices": hit_indices,
-            }
-
+            n_tracks = len(shard_entry["targets"])
             for t in range(n_tracks):
                 self._global_index.append((si, t))
 
@@ -88,34 +82,265 @@ class ColliderMLTrackDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         shard_idx, local_idx = self._global_index[idx]
-        data = self._shard_data[shard_idx]
+        return _load_track(self._shard_data[shard_idx], local_idx)
 
-        offsets = data["offsets"]
-        start = int(offsets[local_idx])
-        end = int(offsets[local_idx + 1])
-        hit_idx = np.array(data["hit_indices"][start:end])
 
-        # Gather hit features
-        # Preprocessed format: [x, y, z, r, phi_hit, theta_hit, s, volume_id, layer_id, surface_id, detector]
-        hit_feats = np.array(data["hits"][hit_idx])  # (L, 11)
+# ============================================================================
+# Shared track-loading helper
+# ============================================================================
 
-        # Compute derived eta from theta_hit (col 5)
-        theta_hit = hit_feats[:, 5].copy()
-        eta_hit = -np.log(np.tan(theta_hit / 2.0 + 1e-12))
-        eta_hit = np.clip(eta_hit, -10.0, 10.0)
 
-        # Append eta as an extra feature -> (L, 12)
-        hit_feats = np.concatenate([hit_feats, eta_hit[:, None]], axis=1).astype(np.float32)
+def _load_track(data: dict[str, np.ndarray], local_idx: int) -> dict[str, np.ndarray]:
+    """Load a single track from mmap'd shard arrays.
 
-        hit_s = hit_feats[:, 6].copy()  # s column
-        targets = np.array(data["targets"][local_idx])  # (5,)
+    Used by both :class:`ColliderMLTrackDataset` (map-style) and
+    :class:`ColliderMLStreamingDataset` (iterable) to ensure identical output.
+    """
+    offsets = data["offsets"]
+    start = int(offsets[local_idx])
+    end = int(offsets[local_idx + 1])
+    hit_idx = np.array(data["hit_indices"][start:end])
 
-        return {
-            "hit_features": hit_feats,
-            "hit_s": hit_s,
-            "targets": targets,
-            "length": len(hit_idx),
-        }
+    # Gather hit features
+    # Preprocessed: [x, y, z, r, phi_hit, theta_hit, s, volume_id, layer_id, surface_id, detector]
+    hit_feats = np.array(data["hits"][hit_idx])  # (L, 11)
+
+    # Compute derived eta from theta_hit (col 5)
+    theta_hit = hit_feats[:, 5].copy()
+    eta_hit = -np.log(np.tan(np.clip(theta_hit, 1e-8, np.pi - 1e-8) / 2.0))
+    eta_hit = np.clip(eta_hit, -10.0, 10.0)
+
+    # Append eta as an extra feature -> (L, 12)
+    hit_feats = np.concatenate([hit_feats, eta_hit[:, None]], axis=1).astype(np.float32)
+
+    hit_s = hit_feats[:, 6].copy()  # s column
+    targets = np.array(data["targets"][local_idx])  # (5,)
+
+    result: dict[str, np.ndarray] = {
+        "hit_features": hit_feats,
+        "hit_s": hit_s,
+        "targets": targets,
+        "length": len(hit_idx),
+    }
+
+    # ACTS reco data (when available)
+    if "acts_reco" in data:
+        result["acts_reco"] = np.array(data["acts_reco"][local_idx])  # (5,)
+        result["acts_dm"] = bool(data["acts_dm_mask"][local_idx])
+
+    # Track metadata (pt, vertex_primary) for tight selection filtering
+    if "track_meta" in data:
+        meta = np.array(data["track_meta"][local_idx])  # (2,): [pt, vertex_primary]
+        result["track_pt"] = float(meta[0])
+        result["track_vertex_primary"] = float(meta[1])
+
+    return result
+
+
+def _open_shard(preprocessed_dir: Path, si: int, load_acts: bool) -> dict[str, np.ndarray]:
+    """Open mmap handles for a single shard."""
+    shard_dir = preprocessed_dir / f"shard_{si:04d}"
+    sel_dir = shard_dir / "selected_tracks"
+    entry: dict[str, np.ndarray] = {
+        "hits": np.load(shard_dir / "hits.npy", mmap_mode="r"),
+        "targets": np.load(sel_dir / "track_targets.npy", mmap_mode="r"),
+        "offsets": np.load(sel_dir / "track_hit_offsets.npy", mmap_mode="r"),
+        "hit_indices": np.load(sel_dir / "track_hit_indices.npy", mmap_mode="r"),
+    }
+    if load_acts:
+        acts_reco_path = sel_dir / "acts_reco.npy"
+        acts_dm_path = sel_dir / "acts_dm_mask.npy"
+        if acts_reco_path.exists() and acts_dm_path.exists():
+            entry["acts_reco"] = np.load(acts_reco_path, mmap_mode="r")
+            entry["acts_dm_mask"] = np.load(acts_dm_path, mmap_mode="r")
+        meta_path = sel_dir / "track_meta.npy"
+        if meta_path.exists():
+            entry["track_meta"] = np.load(meta_path, mmap_mode="r")
+    return entry
+
+
+# ============================================================================
+# Streaming (shard-shuffled) dataset for large-scale training
+# ============================================================================
+
+
+class ColliderMLStreamingDataset(IterableDataset):
+    """Shard-shuffled streaming dataset that keeps only a small window of
+    shards in memory at a time.
+
+    Each epoch: shuffle shard order → iterate in chunks of
+    ``shard_buffer_size`` → within each chunk, shuffle tracks locally →
+    yield one track at a time → release chunk mmaps before loading next.
+
+    DDP + multi-worker partitioning is handled internally: each
+    (rank, worker) pair gets a disjoint subset of shards.
+
+    Parameters
+    ----------
+    preprocessed_dir : str | Path
+        Root directory with ``shard_XXXX/`` subdirectories.
+    shard_indices : list[int]
+        Which shards to include (from split.json).
+    load_acts : bool
+        Whether to load ACTS reco data per track.
+    shard_buffer_size : int
+        Number of shards to hold in memory simultaneously (default 8).
+    seed : int
+        Base seed for deterministic shard shuffling.
+    """
+
+    def __init__(
+        self,
+        preprocessed_dir: str | Path,
+        shard_indices: list[int],
+        load_acts: bool = False,
+        shard_buffer_size: int = 8,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.preprocessed_dir = Path(preprocessed_dir)
+        self.shard_indices = list(shard_indices)
+        self.load_acts = load_acts
+        self.shard_buffer_size = shard_buffer_size
+        self.seed = seed
+        self._epoch = 0
+
+        # Pre-scan track counts per shard so we know total length for logging
+        self._tracks_per_shard: dict[int, int] = {}
+        for si in self.shard_indices:
+            targets_path = (
+                self.preprocessed_dir / f"shard_{si:04d}" / "selected_tracks" / "track_targets.npy"
+            )
+            if targets_path.exists():
+                # Read just the shape from the npy header — no data loaded
+                self._tracks_per_shard[si] = np.load(targets_path, mmap_mode="r").shape[0]
+
+    def set_epoch(self, epoch: int) -> None:
+        """Update epoch for deterministic shard shuffling."""
+        self._epoch = epoch
+
+    def __len__(self) -> int:
+        """Track count for this dataset, DDP-corrected when called in a distributed context.
+
+        Returns the per-rank track count when DDP is active so that Lightning's
+        step estimates (and LR scheduler total_steps) are correct.
+        """
+        total = sum(self._tracks_per_shard.values())
+        if dist.is_available() and dist.is_initialized():
+            return total // dist.get_world_size()
+        return total
+
+    def _min_tracks_across_ranks(self, shuffled_shards: np.ndarray, world_size: int) -> int:
+        """Compute the minimum per-rank track count for this epoch's shard shuffle.
+
+        All ranks independently run the same deterministic computation, so no
+        inter-rank communication is required.  The minimum is used to cap each
+        rank's yield so that all ranks produce exactly the same number of tracks,
+        preventing NCCL all-reduce deadlocks at epoch boundaries.
+        """
+        rank_totals = [
+            sum(self._tracks_per_shard.get(int(s), 0) for s in shuffled_shards[r::world_size])
+            for r in range(world_size)
+        ]
+        return min(rank_totals)
+
+    def __iter__(self):
+        # ---- Determine this worker's shard subset ----
+        # DDP rank partitioning
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+        else:
+            rank, world_size = 0, 1
+
+        # DataLoader worker partitioning
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            num_workers = worker_info.num_workers
+            worker_id = worker_info.id
+        else:
+            num_workers, worker_id = 1, 0
+
+        # Deterministic shard shuffle for this epoch
+        rng = np.random.RandomState(self.seed + self._epoch)
+        shards = np.array(self.shard_indices)
+        rng.shuffle(shards)
+
+        # Partition: first by rank, then by worker (round-robin)
+        shards_for_rank = shards[rank::world_size]
+        shards_for_worker = shards_for_rank[worker_id::num_workers]
+
+        # ---- Compute per-worker yield cap to balance batches across DDP ranks ----
+        # Shards have varying track counts, so ranks end up with different totals.
+        # The rank that finishes first causes an NCCL all-reduce deadlock because
+        # the other ranks are still in training_step waiting for a gradient sync.
+        # Fix: cap every rank to the same track count (the minimum across ranks),
+        # distributed exactly across this rank's workers with remainder handling.
+        if world_size > 1:
+            min_rank_total = self._min_tracks_across_ranks(shards, world_size)
+            this_rank_total = sum(self._tracks_per_shard.get(int(s), 0) for s in shards_for_rank)
+            if this_rank_total > 0:
+                # Compute caps for ALL workers on this rank deterministically.
+                # Each worker independently runs this same computation, then picks
+                # its own cap.  This avoids int() truncation rounding errors that
+                # caused different ranks to yield different totals.
+                all_worker_totals = [
+                    sum(self._tracks_per_shard.get(int(s), 0)
+                        for s in shards_for_rank[w::num_workers])
+                    for w in range(num_workers)
+                ]
+                all_worker_caps = [
+                    min_rank_total * wt // this_rank_total
+                    for wt in all_worker_totals
+                ]
+                # Distribute remainder so sum(caps) == min_rank_total exactly
+                shortfall = min_rank_total - sum(all_worker_caps)
+                for i in range(shortfall):
+                    all_worker_caps[i] += 1
+                worker_max = all_worker_caps[worker_id]
+            else:
+                worker_max = 0
+        else:
+            worker_max = None  # no cap needed for single-GPU
+
+        # ---- Stream through shard chunks ----
+        buf_size = self.shard_buffer_size
+        yielded = 0
+        for chunk_start in range(0, len(shards_for_worker), buf_size):
+            if worker_max is not None and yielded >= worker_max:
+                break
+
+            chunk_shard_ids = shards_for_worker[chunk_start : chunk_start + buf_size]
+
+            # Open mmaps for this chunk
+            shard_data = {}
+            track_index = []  # (shard_id, local_idx)
+            for si in chunk_shard_ids:
+                si = int(si)
+                shard_dir = self.preprocessed_dir / f"shard_{si:04d}"
+                if not shard_dir.exists():
+                    continue
+                data = _open_shard(self.preprocessed_dir, si, self.load_acts)
+                shard_data[si] = data
+                n_tracks = len(data["targets"])
+                for t in range(n_tracks):
+                    track_index.append((si, t))
+
+            # Shuffle tracks within this chunk
+            chunk_rng = np.random.RandomState(self.seed + self._epoch * 10000 + chunk_start)
+            chunk_rng.shuffle(track_index)
+
+            # Yield tracks (respecting the per-worker cap)
+            for si, local_idx in track_index:
+                if worker_max is not None and yielded >= worker_max:
+                    break
+                yield _load_track(shard_data[si], local_idx)
+                yielded += 1
+
+            # Release mmaps for this chunk
+            del shard_data, track_index
+            gc.collect()
+
 
 
 # ============================================================================
@@ -169,6 +394,31 @@ def collate_tracks(batch: list[dict[str, np.ndarray]]) -> tuple[dict[str, Tensor
         "qop": all_targets[:, 4],
         "track_valid": torch.ones(batch_size, dtype=torch.bool),
     }
+
+    # Pass through ACTS reco data when available
+    if all("acts_reco" in item for item in batch):
+        acts_reco = torch.as_tensor(
+            np.stack([item["acts_reco"] for item in batch]),
+            dtype=torch.float32,
+        )  # (B, 5)
+        target_dict["acts_reco_d0"] = acts_reco[:, 0]
+        target_dict["acts_reco_z0"] = acts_reco[:, 1]
+        target_dict["acts_reco_phi"] = acts_reco[:, 2]
+        target_dict["acts_reco_theta"] = acts_reco[:, 3]
+        target_dict["acts_reco_qop"] = acts_reco[:, 4]
+        target_dict["acts_dm_mask"] = torch.tensor(
+            [item["acts_dm"] for item in batch], dtype=torch.bool,
+        )
+
+    # Pass through track metadata for tight selection filtering
+    if all("track_pt" in item for item in batch):
+        target_dict["track_pt"] = torch.tensor(
+            [item["track_pt"] for item in batch], dtype=torch.float32,
+        )
+        target_dict["track_vertex_primary"] = torch.tensor(
+            [item["track_vertex_primary"] for item in batch], dtype=torch.float32,
+        )
+
     return inputs, target_dict
 
 
@@ -211,6 +461,9 @@ class ColliderMLRegrDataModule(LightningDataModule):
         num_workers: int = 8,
         pin_memory: bool = True,
         num_train_shards: int = -1,
+        load_acts: bool = False,
+        streaming: bool = False,
+        shard_buffer_size: int = 8,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -220,8 +473,11 @@ class ColliderMLRegrDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.num_train_shards_limit = num_train_shards
+        self.load_acts = load_acts
+        self.streaming = streaming
+        self.shard_buffer_size = shard_buffer_size
 
-        self._train_ds: ColliderMLTrackDataset | None = None
+        self._train_ds: ColliderMLTrackDataset | ColliderMLStreamingDataset | None = None
         self._val_ds: ColliderMLTrackDataset | None = None
         self._test_ds: ColliderMLTrackDataset | None = None
 
@@ -254,23 +510,74 @@ class ColliderMLRegrDataModule(LightningDataModule):
             train_shards = train_shards[: self.num_train_shards_limit]
 
         if stage in (None, "fit"):
-            self._train_ds = ColliderMLTrackDataset(
-                self.preprocessed_dir, train_shards,
-            )
+            # Training never uses ACTS data (metrics are precomputed/constant),
+            # so skip loading it to reduce I/O and memory overhead.
+            if self.streaming:
+                self._train_ds = ColliderMLStreamingDataset(
+                    self.preprocessed_dir,
+                    train_shards,
+                    load_acts=False,
+                    shard_buffer_size=self.shard_buffer_size,
+                )
+            else:
+                self._train_ds = ColliderMLTrackDataset(
+                    self.preprocessed_dir, train_shards, load_acts=False,
+                )
             self._val_ds = ColliderMLTrackDataset(
-                self.preprocessed_dir, val_shards,
+                self.preprocessed_dir, val_shards, load_acts=self.load_acts,
             )
         if stage in (None, "test"):
             self._test_ds = ColliderMLTrackDataset(
-                self.preprocessed_dir, test_shards,
+                self.preprocessed_dir, test_shards, load_acts=self.load_acts,
             )
         if stage == "predict":
             self._test_ds = ColliderMLTrackDataset(
-                self.preprocessed_dir, test_shards,
+                self.preprocessed_dir, test_shards, load_acts=self.load_acts,
             )
 
     def train_dataloader(self) -> DataLoader:
         assert self._train_ds is not None
+
+        if self.streaming:
+            # Streaming dataset handles shuffling and DDP partitioning internally.
+            # Update epoch so shard order is re-shuffled each epoch.
+            # NOTE: set_epoch must be called here (before fork) rather than in
+            # on_train_epoch_start because forked worker processes hold their own
+            # copy of the dataset — updates after fork do not propagate.
+            # reload_dataloaders_every_n_epochs=1 in the trainer config ensures
+            # this method is called at the start of every epoch.
+            if isinstance(self._train_ds, ColliderMLStreamingDataset):
+                self._train_ds.set_epoch(self.trainer.current_epoch)
+
+                # ---- DDP batch-count equalisation ----
+                # Even with the per-worker yield cap, DataLoader batching with
+                # drop_last=True can still produce different batch counts across
+                # ranks.  Force all ranks to the same number of training steps
+                # by setting Lightning's limit_train_batches to the minimum
+                # possible batch count.
+                if dist.is_available() and dist.is_initialized():
+                    world_size = dist.get_world_size()
+                    rng = np.random.RandomState(self._train_ds.seed + self.trainer.current_epoch)
+                    shards = np.array(self._train_ds.shard_indices)
+                    rng.shuffle(shards)
+                    min_rank_total = self._train_ds._min_tracks_across_ranks(shards, world_size)
+                    safe_batches = min_rank_total // self.batch_size
+                    self.trainer.limit_train_batches = safe_batches
+
+            return DataLoader(
+                self._train_ds,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+                collate_fn=collate_tracks,
+                drop_last=True,
+                # persistent_workers=False for streaming: reload_dataloaders_every_n_epochs=1
+                # creates a new DataLoader each epoch anyway, so persistence adds no
+                # benefit and risks stale worker state from the previous epoch.
+                persistent_workers=False,
+            )
+
         return DataLoader(
             self._train_ds,
             batch_size=self.batch_size,
@@ -291,7 +598,10 @@ class ColliderMLRegrDataModule(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_tracks,
-            persistent_workers=self.num_workers > 0,
+            # persistent_workers=False: avoids the Lightning warning about
+            # pin_memory=True + persistent_workers=True + reload_dataloaders_every_n_epochs > 0
+            # (pytorch/pytorch#91252 — potential deadlock on DataLoader recreation).
+            persistent_workers=False,
         )
 
     def test_dataloader(self) -> DataLoader:

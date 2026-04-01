@@ -31,6 +31,7 @@ import math
 from typing import Any, Literal
 
 import torch
+import torch.distributed as dist
 from lion_pytorch import Lion
 from lightning import LightningModule
 from torch import Tensor, nn
@@ -355,6 +356,7 @@ class TrackRegressionWrapper(LightningModule):
         lrs_config: dict[str, Any],
         optimizer: Literal["AdamW", "Lion"] = "AdamW",
         name: str = "TrackRegression",
+        pretrained_ckpt_path: str | None = None,
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -363,6 +365,20 @@ class TrackRegressionWrapper(LightningModule):
         self.model = model
         self.lrs_config = lrs_config
         self.opt_name = optimizer
+        self.opt_betas = tuple(lrs_config.get("betas", [0.9, 0.999]))
+
+        # Load model weights only (no optimizer/scheduler state) for fine-tuning.
+        # Use this instead of --ckpt_path when you want a fresh optimizer and LR schedule.
+        if pretrained_ckpt_path is not None:
+            ckpt = torch.load(pretrained_ckpt_path, map_location="cpu", weights_only=False)
+            # Lightning checkpoints prefix all keys with "model." (from self.model = model)
+            state = {k[len("model."):]: v for k, v in ckpt["state_dict"].items() if k.startswith("model.")}
+            missing, unexpected = self.model.load_state_dict(state, strict=True)
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"Checkpoint weight mismatch.\nMissing: {missing}\nUnexpected: {unexpected}"
+                )
+            print(f"[fine-tune] Loaded model weights from {pretrained_ckpt_path}")
 
     # -- forward / predict --------------------------------------------------
 
@@ -388,14 +404,24 @@ class TrackRegressionWrapper(LightningModule):
         valid_mask = targets.get("track_valid")
         losses = self.model.compute_loss(outputs, targets, valid_mask=valid_mask)
         crossing_metrics = self.model.loss_module.quantile_crossing_metrics(outputs["pred"], valid_mask=valid_mask)
+        calibration_metrics = self.model.loss_module.quantile_calibration_metrics(outputs["pred"], targets, valid_mask=valid_mask)
+
+        # Only use sync_dist for val/test — training metrics are local per-rank
+        # averages.  Using sync_dist=True during training adds many NCCL
+        # allreduces per step which can cause DDP synchronisation issues.
+        do_sync = stage != "train"
 
         # Log every component
         for name, value in losses.items():
-            self.log(f"{stage}/{name}", value, sync_dist=True, prog_bar=(name == "total"))
+            self.log(f"{stage}/{name}", value, sync_dist=do_sync, prog_bar=(name == "total"))
 
         # Monitor quantile crossings on raw (unconstrained) quantile channels
         for name, value in crossing_metrics.items():
-            self.log(f"{stage}/{name}", value, sync_dist=True)
+            self.log(f"{stage}/{name}", value, sync_dist=do_sync)
+
+        # Monitor quantile calibration (empirical coverage vs nominal levels)
+        for name, value in calibration_metrics.items():
+            self.log(f"{stage}/{name}", value, sync_dist=do_sync)
 
         # Compute and log per-parameter metrics for all stages
         preds = self.model.predict(outputs)
@@ -419,14 +445,20 @@ class TrackRegressionWrapper(LightningModule):
         valid_mask: Tensor | None,
         stage: str,
     ) -> None:
-        """Log per-parameter metrics: MAE and precision.
+        """Log per-parameter metrics: MAE, precision, and SSM precision on tight DM subset.
 
         Metrics
         -------
-        - ``{stage}/{name}/mae``: mean absolute error
+        - ``{stage}/{name}/mae``: mean absolute error (all stages)
         - ``{stage}/{name}/precision {unit}``: std of (pred - truth) residuals,
-          scaled to physical units (mrad for angles, mm for d0/z0, 1/GeV for qop)
+          scaled to physical units (all stages)
+        - ``{stage}/{name}/ssm_precision_dm {unit}``: SSM precision on tight
+          double-matched subset — val/test only (needs ACTS DM data)
+
+        ACTS precision is never logged (precomputed / static).
         """
+        do_sync = stage != "train"
+
         for name in self.model.loss_module.parameter_order:
             if name not in preds or name not in targets:
                 continue
@@ -446,7 +478,7 @@ class TrackRegressionWrapper(LightningModule):
                 residual = torch.where(residual < -math.pi, residual + 2.0 * math.pi, residual)
 
             # MAE
-            self.log(f"{stage}/{name}/mae", residual.abs().mean(), sync_dist=True)
+            self.log(f"{stage}/{name}/mae", residual.abs().mean(), sync_dist=do_sync)
 
             # Precision: std of residuals in physical units
             if residual.numel() > 1:
@@ -454,8 +486,47 @@ class TrackRegressionWrapper(LightningModule):
                 self.log(
                     f"{stage}/{name}/precision {unit}",
                     residual.std() * scale,
-                    sync_dist=True,
+                    sync_dist=do_sync,
                 )
+
+            # SSM precision on tight DM subset — val/test only (train has no ACTS data)
+            if stage in ("val", "test"):
+                acts_key = f"acts_reco_{name}"
+                if acts_key in targets and "acts_dm_mask" in targets:
+                    dm_mask = targets["acts_dm_mask"]
+                    if valid_mask is not None:
+                        dm_mask = dm_mask[valid_mask]
+
+                    # Apply tight kinematic cuts (matching selection_defaults.yaml)
+                    t_d0_all = targets["d0"]
+                    t_z0_all = targets["z0"]
+                    if valid_mask is not None:
+                        t_d0_all = t_d0_all[valid_mask]
+                        t_z0_all = t_z0_all[valid_mask]
+                    tight_mask = dm_mask & (t_d0_all.abs() <= 1.0) & (t_z0_all.abs() <= 150.0)
+
+                    if "track_pt" in targets and "track_vertex_primary" in targets:
+                        t_pt = targets["track_pt"]
+                        t_vp = targets["track_vertex_primary"]
+                        if valid_mask is not None:
+                            t_pt = t_pt[valid_mask]
+                            t_vp = t_vp[valid_mask]
+                        tight_mask = tight_mask & (t_pt >= 0.5) & (t_vp == 1)
+
+                    if tight_mask.any():
+                        p_dm = p[tight_mask]
+                        t_dm = t[tight_mask]
+                        ssm_residual_dm = p_dm - t_dm
+                        if name == "phi":
+                            ssm_residual_dm = torch.where(ssm_residual_dm > math.pi, ssm_residual_dm - 2.0 * math.pi, ssm_residual_dm)
+                            ssm_residual_dm = torch.where(ssm_residual_dm < -math.pi, ssm_residual_dm + 2.0 * math.pi, ssm_residual_dm)
+                        if ssm_residual_dm.numel() > 1:
+                            unit, scale = self._PRECISION_UNITS.get(name, ("", 1.0))
+                            self.log(
+                                f"{stage}/{name}/ssm_precision_dm {unit}",
+                                ssm_residual_dm.std() * scale,
+                                sync_dist=True,
+                            )
 
     # -- train / val / test ------------------------------------------------
 
@@ -472,6 +543,7 @@ class TrackRegressionWrapper(LightningModule):
         valid_mask = targets.get("track_valid")
         losses = self.model.compute_loss(outputs, targets, valid_mask=valid_mask)
         crossing_metrics = self.model.loss_module.quantile_crossing_metrics(outputs["pred"], valid_mask=valid_mask)
+        calibration_metrics = self.model.loss_module.quantile_calibration_metrics(outputs["pred"], targets, valid_mask=valid_mask)
 
         # Log every component
         for name, value in losses.items():
@@ -479,6 +551,10 @@ class TrackRegressionWrapper(LightningModule):
 
         # Monitor quantile crossings on raw (unconstrained) quantile channels
         for name, value in crossing_metrics.items():
+            self.log(f"test/{name}", value, sync_dist=True)
+
+        # Monitor quantile calibration
+        for name, value in calibration_metrics.items():
             self.log(f"test/{name}", value, sync_dist=True)
 
         # Compute predictions and metrics
@@ -497,21 +573,54 @@ class TrackRegressionWrapper(LightningModule):
         else:
             raise ValueError(f"Unknown optimizer: {self.opt_name}")
 
-        opt = opt_cls(
-            self.model.parameters(),
+        opt_kwargs: dict[str, Any] = dict(
             lr=self.lrs_config["initial"],
             weight_decay=self.lrs_config["weight_decay"],
         )
+        # AdamW supports betas; Lion does not use the same interface
+        if self.opt_name.lower() == "adamw":
+            opt_kwargs["betas"] = self.opt_betas
+
+        opt = opt_cls(self.model.parameters(), **opt_kwargs)
 
         if not self.lrs_config.get("skip_scheduler"):
-            sch = torch.optim.lr_scheduler.OneCycleLR(
-                opt,
-                max_lr=self.lrs_config["max"],
-                total_steps=self.trainer.estimated_stepping_batches,
-                div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
-                final_div_factor=self.lrs_config["initial"] / self.lrs_config["end"],
-                pct_start=float(self.lrs_config["pct_start"]),
-            )
+            schedule = self.lrs_config.get("schedule", "onecycle")
+            total_steps = self.trainer.estimated_stepping_batches
+
+            if schedule == "cosine":
+                # Linear warmup + cosine annealing
+                # Set optimizer LR to max BEFORE creating schedulers so that
+                # base_lrs is captured correctly.  LinearLR's start_factor then
+                # scales it down to `initial` at step 0, ramping up to `max`.
+                for pg in opt.param_groups:
+                    pg["lr"] = self.lrs_config["max"]
+                warmup_steps = int(float(self.lrs_config["pct_start"]) * total_steps)
+                warmup_sch = torch.optim.lr_scheduler.LinearLR(
+                    opt,
+                    start_factor=self.lrs_config["initial"] / self.lrs_config["max"],
+                    end_factor=1.0,
+                    total_iters=warmup_steps,
+                )
+                cosine_sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    opt,
+                    T_max=total_steps - warmup_steps,
+                    eta_min=self.lrs_config["end"],
+                )
+                sch = torch.optim.lr_scheduler.SequentialLR(
+                    opt,
+                    schedulers=[warmup_sch, cosine_sch],
+                    milestones=[warmup_steps],
+                )
+            else:
+                sch = torch.optim.lr_scheduler.OneCycleLR(
+                    opt,
+                    max_lr=self.lrs_config["max"],
+                    total_steps=total_steps,
+                    div_factor=self.lrs_config["max"] / self.lrs_config["initial"],
+                    final_div_factor=self.lrs_config["initial"] / self.lrs_config["end"],
+                    pct_start=float(self.lrs_config["pct_start"]),
+                )
+
             return [opt], [{"scheduler": sch, "interval": "step"}]
 
         return opt

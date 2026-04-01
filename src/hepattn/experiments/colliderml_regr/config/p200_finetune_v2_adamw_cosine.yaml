@@ -1,0 +1,140 @@
+# =============================================================================
+# Fine-tune v2 — AdamW cosine annealing from epoch-49 d32 checkpoint
+# =============================================================================
+# Switches from Lion to AdamW for fine-tuning.  AdamW maintains per-parameter
+# adaptive second-moment estimates which are beneficial when fine-tuning a
+# partially converged model — the effective step sizes self-regulate even on
+# parameters with very different residual scales.
+#
+# Key differences vs finetune_v1_lion_warm.yaml:
+#   - AdamW with betas=(0.9, 0.95) and cosine schedule (transformer-style fine-tune)
+#   - Lower max LR (8e-5) but better adaptive scaling via second moments
+#   - Stronger theta (×3) / qop (×2) reweighting, d0 halved
+#   - Same batch=8000, 100 epochs
+#
+# Usage:
+#   python train.py fit --config config/finetune_v2_adamw_cosine.yaml
+#
+# NOTE: Do NOT pass --ckpt_path; weights are loaded via pretrained_ckpt_path.
+# =============================================================================
+
+trainer:
+  devices: -1 
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-FT-v2-AdamWCosine-p200
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  # Load weights only — optimizer and LR schedule start fresh
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/epoch=049-val_total=0.00744.ckpt
+  optimizer: AdamW
+  lrs_config:
+    initial: 1.0e-05     # linear warmup start
+    max: 1.0e-3         # AdamW aggressive fine-tune peak (above from-scratch 3e-4 for warm restart)
+    end: 1.0e-06         # very low final LR — squeeze out the last bits
+    pct_start: 0.10     # 5-epoch warmup
+    weight_decay: 0.01   # AdamW-style: moderate WD with adaptive LR
+    betas: [0.9, 0.95]   # reduced beta2 for faster gradient variance adaptation
+    skip_scheduler: false
+    schedule: cosine
+
+  model:
+    init_args:
+      # Architecture must be identical to the checkpoint (d_state=32, headdim=32)
+      dim: 128
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: LayerNorm
+          dropout: 0.05
+      # Loss: strong focus on theta + qop, d0 halved (well below baseline already)
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5   # up-weight high-|qop| tracks; 0 = off (default in base configs)
+          qop_scale: 2.0         # matches qop norm_max
+          config:
+            d0:
+              type: quantile
+              weight: 0.5         # halved — 0.049 mm already beats 0.13 mm baseline
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile
+              weight: 10.0         # 3× — most room for improvement (4.83 vs 2.2 mrad)
+              norm_min: 0.0
+              norm_max: 3.141592653589793
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0         # 2× — 0.0096 vs 0.0057 1/GeV target
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_preprocessed_plus_qcd
+  load_acts: true
+  batch_size: 30000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

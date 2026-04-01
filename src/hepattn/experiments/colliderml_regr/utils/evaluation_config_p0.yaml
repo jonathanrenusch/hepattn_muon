@@ -4,8 +4,17 @@
 # Data settings
 data:
   directory: "/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/CERN__ColliderML-Release-1"
-  n_events: 300  # Number of events to evaluate
+  # Evaluate on the held-out test split (shards 950–999, 50 shards × 1000 events = 50k events).
+  # When shard_indices is present it takes precedence over n_events + sampling.
+  shard_indices: [950, 951, 952, 953, 954, 955, 956, 957, 958, 959,
+                  960, 961, 962, 963, 964, 965, 966, 967, 968, 969,
+                  970, 971, 972, 973, 974, 975, 976, 977, 978, 979,
+                  980, 981, 982, 983, 984, 985, 986, 987, 988, 989,
+                  990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
+  # n_events/sampling ignored when shard_indices is set (kept for fallback use)
+  n_events: 50000
   random_seed: 42
+  sampling: sequential
 
 # Output settings
 output:
@@ -24,10 +33,10 @@ binning:
 # Efficiency calculation settings
 efficiency:
   # Minimum number of hits for a particle to be considered reconstructible
-  min_hits: 7
+  min_hits: 6
   
   # Minimum energy for reconstructible particles [GeV]
-  min_energy: 1.0
+  min_energy: 0.5
 
 # Matching settings
 matching:

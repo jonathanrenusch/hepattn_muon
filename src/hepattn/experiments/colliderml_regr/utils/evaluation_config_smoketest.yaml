@@ -4,6 +4,7 @@ data:
   dataset_prefix: "ttbar_pu0"
   n_events: 5
   random_seed: 42
+  sampling: sequential  # "sequential" (default, fast) or "random" (cross-shard sampling)
 
 binning:
   eta_range: [-3.0, 3.0]

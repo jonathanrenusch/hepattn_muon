@@ -5,8 +5,9 @@
 data:
   directory: "/eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data"
   dataset_prefix: "ttbar_pu200"
-  n_events: 100
+  n_events: 1000
   random_seed: 42
+  sampling: sequential  # "sequential" (default, fast) or "random" (cross-shard sampling)
 
 # Output settings
 output:
@@ -21,8 +22,8 @@ binning:
 
 # Efficiency calculation settings
 efficiency:
-  min_hits: 7
-  min_energy: 1.0  # GeV
+  min_hits: 6
+  min_energy: 0.5  # GeV
 
 # Matching settings
 matching:

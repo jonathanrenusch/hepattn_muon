@@ -10,11 +10,7 @@ Metrics computed:
    - pT resolution (recovered from qop and theta)
    - Binned standard deviation (precision)
 
-2. Pull distributions:
-   - Pseudo-pulls normalized by residual std dev
-   - Should be approximately N(0,1) shaped
-
-3. Reconstruction Efficiency and Fake Rate (vs η):
+2. Reconstruction Efficiency and Fake Rate (vs η):
    - Efficiency = matched tracks / reconstructible particles
    - Fake rate = fake tracks / total tracks
    - Unweighted efficiency within |η| < 3
@@ -54,10 +50,11 @@ class ACTSTrackingEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Create subdirectories
-        for subdir in ["residuals", "pulls", "efficiency", "resolution", "precision",
+        for subdir in ["residuals", "efficiency", "resolution", "precision",
                       "resolution_double_matched", "precision_double_matched",
                       "hit_assignment",
-                      "resolution_selected", "precision_selected", "efficiency_selected"]:
+                      "resolution_selected", "precision_selected", "efficiency_selected",
+                      "precision_selected_dm"]:
             (self.output_dir / subdir).mkdir(exist_ok=True)
 
         # Load shared particle selection defaults
@@ -88,82 +85,116 @@ class ACTSTrackingEvaluator:
         return any_pq
 
     def load_data(self) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        """Load particle, hit, and track data from ColliderML parquet files."""
+        """Load particle, hit, and track data from ColliderML parquet files.
+
+        Two sampling modes (controlled by ``data.sampling`` in config):
+
+        ``sequential`` (default)
+            Loads shards front-to-back and stops as soon as ``n_events`` rows
+            have been accumulated.  Never reads beyond the first shard(s) that
+            contain enough events — much faster than scanning the full dataset.
+
+        ``random``
+            Legacy behaviour: scans metadata of all shards, draws a random
+            sample of event indices across the whole dataset, then loads every
+            shard that contains a sampled event.
+        """
         data_dir = Path(self.config["data"]["directory"])
         n_events = self.config["data"]["n_events"]
-        prefix = self.config["data"].get("dataset_prefix", "ttbar_pu0")
+        prefix   = self.config["data"].get("dataset_prefix", "ttbar_pu0")
+        sampling = self.config["data"].get("sampling", "sequential")
 
-        # Find all parquet files (supports both flat and nested layouts)
         particle_files = self._find_parquets(data_dir, f"{prefix}_particles")
-        hit_files = self._find_parquets(data_dir, f"{prefix}_tracker_hits")
-        track_files = self._find_parquets(data_dir, f"{prefix}_tracks")
+        hit_files      = self._find_parquets(data_dir, f"{prefix}_tracker_hits")
+        track_files    = self._find_parquets(data_dir, f"{prefix}_tracks")
 
-        print(f"Found {len(particle_files)} particle files, {len(hit_files)} hit files, {len(track_files)} track files")
+        print(f"Found {len(particle_files)} particle files, "
+              f"{len(hit_files)} hit files, {len(track_files)} track files")
+        print(f"Sampling mode: {sampling}")
 
-        # Count total events and sample (fast - only reads parquet footer metadata)
-        total_events = 0
-        event_counts = []
-        for f in tqdm(particle_files, desc="Counting events"):
-            # Use pyarrow to read only metadata (extremely fast)
-            count = pq.read_metadata(f).num_rows
-            event_counts.append((f, total_events, total_events + count))
-            total_events += count
-
-        print(f"Total events available: {total_events:,}")
-        n_events = min(n_events, total_events)
-        print(f"Using {n_events} events for evaluation")
-
-        # Random sample of event indices
-        sampled_indices = sorted(random.sample(range(total_events), n_events))
-
-        # Determine which files contain sampled events
-        files_to_load = set()
-        for idx in sampled_indices:
-            for f, start, end in event_counts:
-                if start <= idx < end:
-                    files_to_load.add(f)
+        if "shard_indices" in self.config["data"]:
+            shard_indices = self.config["data"]["shard_indices"]
+            print(f"  Loading {len(shard_indices)} specific shards: {shard_indices[:5]}{'...' if len(shard_indices) > 5 else ''}")
+            particles_list, hits_list, tracks_list = [], [], []
+            for idx in shard_indices:
+                if idx >= len(particle_files):
+                    print(f"  Warning: shard index {idx} out of range ({len(particle_files)} files), skipping")
+                    continue
+                pf, hf, tf = particle_files[idx], hit_files[idx], track_files[idx]
+                print(f"  Loading shard {idx}: {Path(pf).name}")
+                particles_list.append(pl.read_parquet(pf))
+                hits_list.append(pl.read_parquet(hf))
+                tracks_list.append(pl.read_parquet(tf))
+            particles_df = pl.concat(particles_list)
+            hits_df      = pl.concat(hits_list)
+            tracks_df    = pl.concat(tracks_list)
+            n_events_loaded = particles_df["event_id"].n_unique()
+            print(f"Using {n_events_loaded} events from {len(shard_indices)} shards")
+            return particles_df, hits_df, tracks_df
+        elif sampling == "sequential":
+            particles_list, hits_list, tracks_list = [], [], []
+            n_loaded = 0
+            for i, (pf, hf, tf) in enumerate(zip(particle_files, hit_files, track_files)):
+                print(f"  Loading shard {i + 1}/{len(particle_files)}: {Path(pf).name}")
+                p = pl.read_parquet(pf)
+                h = pl.read_parquet(hf)
+                t = pl.read_parquet(tf)
+                particles_list.append(p)
+                hits_list.append(h)
+                tracks_list.append(t)
+                n_loaded += len(p)
+                if n_loaded >= n_events:
+                    print(f"  Reached {n_loaded} events after {i + 1} shard(s) — stopping early")
                     break
 
-        # Get file index mapping
-        file_indices = {f: i for i, (f, _, _) in enumerate(event_counts)}
-        indices_to_load = sorted([file_indices[f] for f in files_to_load])
+            particles_df = pl.concat(particles_list)
+            hits_df      = pl.concat(hits_list)
+            tracks_df    = pl.concat(tracks_list)
 
-        print(f"Events are in {len(indices_to_load)} file(s)")
+        else:  # "random" — original behaviour
+            total_events = 0
+            event_counts = []
+            for f in tqdm(particle_files, desc="Counting events"):
+                count = pq.read_metadata(f).num_rows
+                event_counts.append((f, total_events, total_events + count))
+                total_events += count
 
-        # Load data from selected files
-        particles_list = []
-        hits_list = []
-        tracks_list = []
+            print(f"Total events available: {total_events:,}")
+            n_events = min(n_events, total_events)
 
-        for idx in tqdm(indices_to_load, desc="Loading particles"):
-            particles_list.append(pl.read_parquet(particle_files[idx]))
-        for idx in tqdm(indices_to_load, desc="Loading hits"):
-            hits_list.append(pl.read_parquet(hit_files[idx]))
-        for idx in tqdm(indices_to_load, desc="Loading tracks"):
-            tracks_list.append(pl.read_parquet(track_files[idx]))
+            sampled_indices = sorted(random.sample(range(total_events), n_events))
 
-        particles_df = pl.concat(particles_list)
-        hits_df = pl.concat(hits_list)
-        tracks_df = pl.concat(tracks_list)
-
-        # Filter to sampled events
-        local_indices = []
-        event_id = 0
-        for f, start, end in event_counts:
-            if f in files_to_load:
-                for idx in sampled_indices:
+            files_to_load = set()
+            for idx in sampled_indices:
+                for f, start, end in event_counts:
                     if start <= idx < end:
-                        local_indices.append(event_id + (idx - start))
-                event_id += end - start
-            else:
-                pass
+                        files_to_load.add(f)
+                        break
 
-        # Use first n_events from loaded data
+            file_indices    = {f: i for i, (f, _, _) in enumerate(event_counts)}
+            indices_to_load = sorted([file_indices[f] for f in files_to_load])
+            print(f"Events are in {len(indices_to_load)} file(s)")
+
+            particles_list, hits_list, tracks_list = [], [], []
+            for idx in tqdm(indices_to_load, desc="Loading particles"):
+                particles_list.append(pl.read_parquet(particle_files[idx]))
+            for idx in tqdm(indices_to_load, desc="Loading hits"):
+                hits_list.append(pl.read_parquet(hit_files[idx]))
+            for idx in tqdm(indices_to_load, desc="Loading tracks"):
+                tracks_list.append(pl.read_parquet(track_files[idx]))
+
+            particles_df = pl.concat(particles_list)
+            hits_df      = pl.concat(hits_list)
+            tracks_df    = pl.concat(tracks_list)
+
+        # Trim to exactly n_events distinct event IDs (consistent for both modes)
         unique_events = particles_df["event_id"].unique().sort()[:n_events].to_list()
-        particles_df = particles_df.filter(pl.col("event_id").is_in(unique_events))
-        hits_df = hits_df.filter(pl.col("event_id").is_in(unique_events))
-        tracks_df = tracks_df.filter(pl.col("event_id").is_in(unique_events))
+        particles_df  = particles_df.filter(pl.col("event_id").is_in(unique_events))
+        hits_df       = hits_df.filter(pl.col("event_id").is_in(unique_events))
+        tracks_df     = tracks_df.filter(pl.col("event_id").is_in(unique_events))
 
+        n_events_loaded = particles_df["event_id"].n_unique()
+        print(f"Using {n_events_loaded} events for evaluation")
         print(f"  Loaded {len(particles_df)} event rows for particles")
         print(f"  Loaded {len(hits_df)} event rows for hits")
         print(f"  Loaded {len(tracks_df)} event rows for tracks")
@@ -439,28 +470,6 @@ class ACTSTrackingEvaluator:
         }
         return dm_residuals
 
-    def compute_pulls(self, matched_tracks: pl.DataFrame) -> dict:
-        """Compute pull distributions.
-
-        Pull = residual / uncertainty
-        For well-calibrated uncertainties, pulls should be N(0, 1).
-
-        Note: ColliderML may not have per-track uncertainties.
-        In that case, we estimate from residual distributions.
-        """
-        pulls = {}
-
-        # Filter matched tracks
-        matched = matched_tracks.filter(pl.col("is_matched"))
-
-        # Check if we have uncertainty columns (typically named like d0_cov, etc.)
-        # ColliderML tracks may not have these, so we'll use residual-based estimates
-
-        # For now, return residuals - pulls require covariance information
-        # which we need to check in the data
-
-        return pulls
-
     def compute_efficiency_vs_eta(
         self, matched_tracks: pl.DataFrame, particles_df: pl.DataFrame, hits_df: pl.DataFrame
     ) -> dict:
@@ -656,6 +665,181 @@ class ACTSTrackingEvaluator:
             )
         return df
 
+    def compute_selection_cutflow(
+        self, particles_df: pl.DataFrame, hits_df: pl.DataFrame
+    ) -> dict:
+        """Compute a sequential cut-flow for the particle selection cuts.
+
+        Starts from all particles in the dataset, applies each selection cut
+        in order, and records how many particles are rejected at each step.
+
+        Returns a dict with:
+            steps   — list of per-cut dicts (name, n_before, n_after,
+                       n_rejected, pct_of_step, pct_of_start)
+            n_start — total particles before any cut
+            n_final — particles surviving all cuts
+        """
+        sel = self.selection
+
+        particles = self._explode_dataframe(particles_df)
+        hits = self._explode_dataframe(hits_df)
+        hits_per_particle = (
+            hits.group_by(["event_id", "particle_id"])
+            .agg(pl.len().alias("n_hits"))
+        )
+        df = particles.join(hits_per_particle, on=["event_id", "particle_id"], how="left")
+        df = df.with_columns(pl.col("n_hits").fill_null(0))
+
+        # Pre-compute derived columns used by cuts
+        if all(c in df.columns for c in ["px", "py"]):
+            df = df.with_columns(
+                (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt().alias("_pt")
+            )
+        if all(c in df.columns for c in ["px", "py", "pz"]):
+            df = df.with_columns(
+                (pl.col("pz") / (pl.col("px") ** 2 + pl.col("py") ** 2).sqrt())
+                .arcsinh().alias("_eta")
+            )
+
+        # Baseline: only particles that left at least one hit in the detector.
+        # All percentages in the cut-flow are relative to this number.
+        df = df.filter(pl.col("n_hits") > 0)
+        n_start = len(df)
+        steps = []
+
+        def _cut(df_in: pl.DataFrame, label: str, expr) -> pl.DataFrame:
+            n_before = len(df_in)
+            df_out = df_in.filter(expr)
+            n_after = len(df_out)
+            n_rej = n_before - n_after
+            steps.append({
+                "name": label,
+                "n_before": n_before,
+                "n_after": n_after,
+                "n_rejected": n_rej,
+                "pct_of_step":  100.0 * n_rej / n_before  if n_before  > 0 else 0.0,
+                "pct_of_start": 100.0 * n_rej / n_start   if n_start   > 0 else 0.0,
+            })
+            return df_out
+
+        if sel.get("primary") and "primary" in df.columns:
+            df = _cut(df, "primary == True", pl.col("primary") == True)  # noqa: E712
+
+        if sel.get("charged") and "charge" in df.columns:
+            df = _cut(df, "charged  (charge != 0)", pl.col("charge") != 0)
+
+        if sel.get("hard_scatter") and "vertex_primary" in df.columns:
+            df = _cut(df, "hard_scatter  (vertex_primary == 1)", pl.col("vertex_primary") == 1)
+
+        if "perigee_d0" in df.columns and "perigee_z0" in df.columns:
+            df = _cut(df, "finite perigee  (d0 and z0 are finite)",
+                      pl.col("perigee_d0").is_finite() & pl.col("perigee_z0").is_finite())
+
+        df = _cut(df, f"min_hits  (n_hits >= {sel['min_hits']})",
+                  pl.col("n_hits") >= sel["min_hits"])
+
+        if "max_hits" in sel:
+            df = _cut(df, f"max_hits  (n_hits <= {sel['max_hits']})",
+                      pl.col("n_hits") <= sel["max_hits"])
+
+        if "_pt" in df.columns:
+            df = _cut(df, f"pT >= {sel['pt_min']} GeV", pl.col("_pt") >= sel["pt_min"])
+
+        if "_eta" in df.columns:
+            df = _cut(df, f"|η| in [{sel['eta_min']}, {sel['eta_max']}]",
+                      (pl.col("_eta") >= sel["eta_min"]) & (pl.col("_eta") <= sel["eta_max"]))
+
+        if "perigee_d0" in df.columns:
+            df = _cut(df, f"d0 in [{sel['d0_min']}, {sel['d0_max']}] mm",
+                      (pl.col("perigee_d0") >= sel["d0_min"]) &
+                      (pl.col("perigee_d0") <= sel["d0_max"]))
+
+        if "perigee_z0" in df.columns:
+            df = _cut(df, f"z0 in [{sel['z0_min']}, {sel['z0_max']}] mm",
+                      (pl.col("perigee_z0") >= sel["z0_min"]) &
+                      (pl.col("perigee_z0") <= sel["z0_max"]))
+
+        return {
+            "steps": steps,
+            "n_start": n_start,
+            "n_final": len(df),
+        }
+
+    def compute_hit_snr(
+        self, particles_df: pl.DataFrame, hits_df: pl.DataFrame
+    ) -> dict:
+        """Compute tracker-hit signal-to-noise ratio.
+
+        Signal = hits whose particle_id belongs to a particle passing all
+                 selection cuts.
+        Noise  = all other hits, split into:
+            hard_scatter_noise  — hits from primary particles that fail selection
+            soft_pileup_noise   — hits from non-primary (pileup) particles
+            unassociated        — hits whose particle_id is not in the
+                                  particles table at all (e.g. delta rays,
+                                  electronic noise)
+        """
+        particles = self._explode_dataframe(particles_df)
+        hits = self._explode_dataframe(hits_df)
+        hits_per_particle = (
+            hits.group_by(["event_id", "particle_id"])
+            .agg(pl.len().alias("n_hits"))
+        )
+
+        # Selected particles (signal)
+        selected = self._apply_selection_mask(particles, hits_per_particle)
+        sel_keys = selected.select(["event_id", "particle_id"]).unique()
+
+        # Primary (hard-scatter) particles — superset of selected
+        if "primary" in particles.columns:
+            primary_keys = (
+                particles.filter(pl.col("primary") == True)  # noqa: E712
+                .select(["event_id", "particle_id"]).unique()
+            )
+        else:
+            primary_keys = particles.select(["event_id", "particle_id"]).unique()
+
+        # Tag every hit
+        hits_tagged = (
+            hits
+            .join(
+                sel_keys.with_columns(pl.lit(True).alias("_sig")),
+                on=["event_id", "particle_id"], how="left",
+            )
+            .with_columns(pl.col("_sig").fill_null(False))
+            .join(
+                primary_keys.with_columns(pl.lit(True).alias("_primary")),
+                on=["event_id", "particle_id"], how="left",
+            )
+            .with_columns(pl.col("_primary").fill_null(False))
+        )
+
+        n_total    = len(hits_tagged)
+        n_signal   = int(hits_tagged.filter(pl.col("_sig")).height)
+        n_noise    = n_total - n_signal
+        n_hs_noise = int(hits_tagged.filter(~pl.col("_sig") &  pl.col("_primary")).height)
+        n_sp_noise = int(hits_tagged.filter(~pl.col("_sig") & ~pl.col("_primary")).height)
+        # Hits whose particle_id exists nowhere in the particles table
+        all_particle_ids = particles.select(["event_id", "particle_id"]).unique()
+        hits_unassoc = (
+            hits_tagged.join(
+                all_particle_ids.with_columns(pl.lit(True).alias("_known")),
+                on=["event_id", "particle_id"], how="left",
+            ).filter(pl.col("_known").is_null())
+        )
+        n_unassoc = len(hits_unassoc)
+
+        return {
+            "n_total_hits":         n_total,
+            "n_signal_hits":        n_signal,
+            "n_noise_hits":         n_noise,
+            "n_hard_scatter_noise": n_hs_noise,
+            "n_soft_pileup_noise":  n_sp_noise,
+            "n_unassociated":       n_unassoc,
+            "signal_fraction":      n_signal / n_total if n_total > 0 else 0.0,
+            "snr":                  n_signal / n_noise if n_noise > 0 else float("inf"),
+        }
+
     def filter_matched_to_selected(
         self, matched_tracks: pl.DataFrame, particles_df: pl.DataFrame, hits_df: pl.DataFrame
     ) -> pl.DataFrame:
@@ -743,7 +927,49 @@ class ACTSTrackingEvaluator:
             efficiency_data["n_total"].append(n_t)
             efficiency_data["n_matched"].append(n_m)
 
-        return {"efficiency": efficiency_data}
+        # Compute fake rate for the selected regime:
+        # A track is "fake" here if its majority_particle_id is NOT in the selected particle set.
+        sel_keys_set = set(
+            zip(reconstructible["event_id"].to_list(), reconstructible["particle_id"].to_list())
+        )
+        mt_event_ids = matched_tracks["event_id"].to_numpy()
+        if "majority_particle_id" in matched_tracks.columns:
+            mt_maj_pids = matched_tracks["majority_particle_id"].to_numpy()
+            is_matched_to_selected = np.array(
+                [(int(e), int(p)) in sel_keys_set for e, p in zip(mt_event_ids, mt_maj_pids)],
+                dtype=bool,
+            )
+        else:
+            is_matched_to_selected = np.zeros(len(matched_tracks), dtype=bool)
+        is_fake_sel = ~is_matched_to_selected
+
+        track_eta = matched_tracks["eta"].to_numpy() if "eta" in matched_tracks.columns else None
+        if track_eta is None and "theta" in matched_tracks.columns:
+            theta = matched_tracks["theta"].to_numpy()
+            track_eta = -np.log(np.tan(theta / 2))
+
+        fake_data: dict = {
+            "eta_centers": [], "fake_rate": [], "fake_rate_err": [],
+            "n_total": [], "n_fake": [], "eta_bins": eta_bins,
+        }
+        if track_eta is not None:
+            for i in range(len(eta_bins) - 1):
+                eta_low, eta_high = eta_bins[i], eta_bins[i + 1]
+                mask = (track_eta >= eta_low) & (track_eta < eta_high)
+                n_total_t = int(np.sum(mask))
+                n_fake_t = int(np.sum(is_fake_sel[mask]))
+                rate = n_fake_t / n_total_t if n_total_t > 0 else 0.0
+                rate_err = np.sqrt(rate * (1 - rate) / n_total_t) if n_total_t > 0 else 0.0
+                fake_data["eta_centers"].append((eta_low + eta_high) / 2)
+                fake_data["fake_rate"].append(rate)
+                fake_data["fake_rate_err"].append(rate_err)
+                fake_data["n_total"].append(n_total_t)
+                fake_data["n_fake"].append(n_fake_t)
+
+        overall_fake_sel = float(np.mean(is_fake_sel))
+        print(f"  Overall fake rate (selected regime): {overall_fake_sel:.3f}")
+
+        return {"efficiency": efficiency_data, "fake_rate": fake_data}
 
     def compute_resolution_vs_eta(self, residuals: dict) -> dict:
         """Compute binned resolution (mean relative residual) vs pseudorapidity.
@@ -1330,333 +1556,43 @@ class ACTSTrackingEvaluator:
         )
         plt.close(fig)
 
-    def plot_pulls(self, residuals: dict, eta_bins: np.ndarray) -> None:
-        """Plot pull distributions using step histogram style.
-        
-        Since ColliderML tracks don't have per-track covariance, we compute
-        'pseudo-pulls' by normalizing residuals by the overall std dev.
-        This shows the normalized residual distribution shape.
+    def export_precision_npz(
+        self,
+        resolution_data: dict,
+        eta_bins: np.ndarray,
+        label: str = "ACTS (Selected, DM)",
+        filename: str = "acts_precision_vs_eta.npz",
+    ) -> None:
+        """Export binned precision-vs-η to NPZ for comparison with evaluate_predictions.py.
+
+        The NPZ contains, for each parameter p in {d0, z0, phi, theta, qop}:
+            {p}_eta_centers  — (n_bins,) float64 bin centres
+            {p}_std          — (n_bins,) float64 σ(residual) per bin
+            {p}_std_err      — (n_bins,) float64 uncertainty on σ
+            {p}_count        — (n_bins,) float64 track count per bin
+            {p}_unbinned_std — scalar float64 global σ(residual)
+
+        Plus:
+            eta_bins — (n_bins+1,) full bin edges
+            label    — string identifier stored as a 0-d object array
         """
-        param_labels = {
-            "d0": r"$d_0$ pull",
-            "z0": r"$z_0$ pull",
-            "phi": r"$\phi$ pull",
-            "theta": r"$\theta$ pull",
-            "qop": r"$q/p$ pull",
-            "pt_rel": r"$p_T$ relative pull",
-        }
-        
-        params_to_plot = ["d0", "z0", "phi", "theta", "qop", "pt_rel"]
-        params_available = [p for p in params_to_plot if p in residuals]
-        
-        if not params_available:
-            print("No parameters available for pull plots")
-            return
-        
-        for param_name in params_available:
-            res_values = residuals[param_name]
-            
-            if len(res_values) == 0:
+        arrays: dict = {"eta_bins": eta_bins}
+        for name in ["d0", "z0", "phi", "theta", "qop"]:
+            if name not in resolution_data:
                 continue
-            
-            # Compute pseudo-pulls: residual / std(residuals)
-            # This normalizes to unit variance
-            std_dev = np.std(res_values)
-            if std_dev == 0:
-                continue
-            pulls = res_values / std_dev
-            
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # Calculate mean and std for display
-            mean_pull = np.mean(pulls)
-            std_pull = np.std(pulls)
-            
-            # Define range as mean ± 4*sigma for pulls (should be ~N(0,1))
-            lower_bound = -4.0
-            upper_bound = 4.0
-            
-            # Create bins
-            n_bins = 50
-            bins = np.linspace(lower_bound, upper_bound, n_bins + 1)
-            
-            # Clip outliers into edge bins
-            clipped_pulls = np.clip(pulls, lower_bound, upper_bound)
-            
-            # Calculate histogram
-            counts, bin_edges = np.histogram(clipped_pulls, bins=bins, density=False)
-            
-            # Create step histogram 
-            x_step = np.concatenate([bin_edges[:-1], [bin_edges[-1]]])
-            y_step = np.concatenate([counts, [counts[-1] if len(counts) > 0 else 0]])
-            
-            ax.step(x_step, y_step, where="post", linewidth=1.5, color="blue", 
-                   label=f"{param_name.capitalize()} Pull (pseudo)")
-            
-            # Add vertical lines for statistics
-            ax.axvline(mean_pull, color="red", linestyle="--", linewidth=2, 
-                      label=f"Mean: {mean_pull:.3f}")
-            ax.axvline(0, color="black", linestyle="-", alpha=0.7, linewidth=1, 
-                      label="Expected (0)")
-            ax.axvline(-1, color="orange", linestyle=":", alpha=0.7, 
-                      label=f"±1σ (std={std_pull:.3f})")
-            ax.axvline(1, color="orange", linestyle=":", alpha=0.7)
-            ax.axvline(-2, color="yellow", linestyle=":", alpha=0.5)
-            ax.axvline(2, color="yellow", linestyle=":", alpha=0.5, label="±2σ")
-            
-            ax.set_xlabel(param_labels.get(param_name, f"{param_name} pull"), fontsize=12)
-            ax.set_ylabel("Count", fontsize=12)
-            ax.set_title(f"{param_name.upper()} Pull Distribution\n(Pseudo-pull: residual / σ(residuals))", fontsize=14)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=10)
-            
-            # Add text box with statistics
-            n_total = len(pulls)
-            n_clipped = np.sum((pulls < lower_bound) | (pulls > upper_bound))
-            clipped_pct = 100 * n_clipped / n_total if n_total > 0 else 0
-            
-            stats_text = f"Mean: {mean_pull:.4f}\nSTD: {std_pull:.4f}\nN: {n_total}\nClipped: {n_clipped} ({clipped_pct:.1f}%)"
-            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, verticalalignment="top",
-                   bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.8}, fontsize=10)
-            
-            plt.tight_layout()
-            fig.savefig(
-                self.output_dir / "pulls" / f"{param_name}_pull.png",
-                dpi=150,
-                bbox_inches="tight",
-            )
-            plt.close(fig)
-        
-        # Summary pull plot
-        self.plot_summary_pulls(residuals)
-    
-    def plot_summary_pulls(self, residuals: dict) -> None:
-        """Create summary plot with all pull distributions."""
-        params_to_plot = ["d0", "z0", "phi", "theta", "qop", "pt_rel"]
-        params_available = [p for p in params_to_plot if p in residuals]
-        
-        n_params = len(params_available)
-        if n_params == 0:
-            return
-        
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.flatten()
-        
-        param_labels = {
-            "d0": r"$d_0$ pull",
-            "z0": r"$z_0$ pull",
-            "phi": r"$\phi$ pull",
-            "theta": r"$\theta$ pull",
-            "qop": r"$q/p$ pull",
-            "pt_rel": r"$\Delta p_T / p_T$ pull",
-        }
-        
-        for i, param in enumerate(params_available):
-            ax = axes[i]
-            res = residuals[param]
-            
-            if len(res) == 0:
-                continue
-            
-            # Compute pseudo-pulls
-            std_dev = np.std(res)
-            if std_dev == 0:
-                continue
-            pulls = res / std_dev
-            
-            # Use ±4σ range
-            lower_bound, upper_bound = -4.0, 4.0
-            n_bins = 40
-            bins = np.linspace(lower_bound, upper_bound, n_bins + 1)
-            
-            clipped_pulls = np.clip(pulls, lower_bound, upper_bound)
-            counts, bin_edges = np.histogram(clipped_pulls, bins=bins, density=False)
-            
-            x_step = np.concatenate([bin_edges[:-1], [bin_edges[-1]]])
-            y_step = np.concatenate([counts, [counts[-1] if len(counts) > 0 else 0]])
-            
-            ax.step(x_step, y_step, where="post", linewidth=1.5, color="steelblue")
-            
-            mean_pull = np.mean(pulls)
-            std_pull = np.std(pulls)
-            ax.axvline(mean_pull, color="red", linestyle="--", lw=1.5, label=f"μ={mean_pull:.3f}")
-            ax.axvline(0, color="black", linestyle="-", alpha=0.5, lw=1)
-            
-            ax.set_xlabel(param_labels.get(param, param), fontsize=11)
-            ax.set_ylabel("Count", fontsize=11)
-            ax.set_title(f"{param.upper()}: σ={std_pull:.3f}", fontsize=12)
-            ax.legend(fontsize=9)
-            ax.grid(True, alpha=0.3)
-        
-        # Hide unused axes
-        for j in range(n_params, len(axes)):
-            axes[j].set_visible(False)
-        
-        fig.suptitle("Track Parameter Pull Distributions (Pseudo-pulls)", fontsize=14, y=1.02)
-        plt.tight_layout()
-        fig.savefig(
-            self.output_dir / "pulls" / "summary_pulls.png",
-            dpi=150,
-            bbox_inches="tight",
-        )
-        plt.close(fig)
+            data = resolution_data[name]
+            arrays[f"{name}_eta_centers"] = data["eta_centers"]
+            arrays[f"{name}_std"]         = data["std"]
+            arrays[f"{name}_std_err"]     = data["std_err"]
+            arrays[f"{name}_count"]       = data["count"]
+            arrays[f"{name}_unbinned_std"] = np.array(data["unbinned_std"])
 
-    def plot_pulls_vs_eta(self, residuals: dict, eta_bins: np.ndarray) -> None:
-        """Plot pull mean and width as a function of pseudorapidity.
-
-        For each parameter, computes pseudo-pulls (residual / overall σ)
-        then bins by η to show:
-          - Top panel: mean of pull per η bin (bias; ideal = 0)
-          - Bottom panel: std of pull per η bin (width; ideal = 1)
-        """
-        params_to_plot = ["d0", "z0", "phi", "theta", "qop", "pt_rel"]
-        params_available = [p for p in params_to_plot if p in residuals]
-
-        if not params_available or "eta" not in residuals:
-            return
-
-        eta = residuals["eta"]
-
-        param_labels = {
-            "d0": r"$d_0$",
-            "z0": r"$z_0$",
-            "phi": r"$\phi$",
-            "theta": r"$\theta$",
-            "qop": r"$q/p$",
-            "pt_rel": r"$p_T$",
-        }
-
-        for param_name in params_available:
-            res_values = residuals[param_name]
-            if len(res_values) == 0:
-                continue
-
-            std_dev = np.std(res_values)
-            if std_dev == 0:
-                continue
-
-            pulls = res_values / std_dev
-            min_len = min(len(pulls), len(eta))
-            pulls, param_eta = pulls[:min_len], eta[:min_len]
-
-            centers, means, stds, counts = [], [], [], []
-            for i in range(len(eta_bins) - 1):
-                mask = (param_eta >= eta_bins[i]) & (param_eta < eta_bins[i + 1])
-                if np.sum(mask) > 2:
-                    bin_pulls = pulls[mask]
-                    centers.append((eta_bins[i] + eta_bins[i + 1]) / 2)
-                    means.append(np.mean(bin_pulls))
-                    stds.append(np.std(bin_pulls))
-                    counts.append(np.sum(mask))
-
-            if not centers:
-                continue
-
-            centers = np.array(centers)
-            means_arr = np.array(means)
-            stds_arr = np.array(stds)
-            counts_arr = np.array(counts, dtype=float)
-            mean_err = stds_arr / np.sqrt(counts_arr)
-            std_err = stds_arr / np.sqrt(2 * counts_arr)
-
-            edges = self._get_bin_edges_for_centers(centers, eta_bins)
-
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True,
-                                           gridspec_kw={"height_ratios": [1, 1]})
-
-            # Top: mean pull vs eta
-            x1, y1 = self._build_step_arrays(edges, means_arr)
-            ax1.step(x1, y1, where="post", color="steelblue", linewidth=2.5,
-                     label=f"Mean pull (avg: {np.mean(pulls):.3f})")
-            self._step_fill_between(ax1, edges, means_arr - mean_err,
-                                    means_arr + mean_err, color="steelblue",
-                                    alpha=0.25, label="SEM")
-            ax1.axhline(0, color="gray", linestyle="--", alpha=0.7, label="Ideal (0)")
-            ax1.set_ylabel("Mean (pull)", fontsize=12)
-            ax1.set_title(f"{param_name.upper()} Pull vs $\\eta$", fontsize=14)
-            ax1.grid(True, alpha=0.3)
-            ax1.legend(fontsize=9)
-
-            # Bottom: std pull vs eta
-            x2, y2 = self._build_step_arrays(edges, stds_arr)
-            ax2.step(x2, y2, where="post", color="darkorange", linewidth=2.5,
-                     label=f"Pull width (avg: {np.std(pulls):.3f})")
-            self._step_fill_between(ax2, edges, stds_arr - std_err,
-                                    stds_arr + std_err, color="darkorange",
-                                    alpha=0.25, label="Uncertainty")
-            ax2.axhline(1, color="gray", linestyle="--", alpha=0.7, label="Ideal (1)")
-            ax2.set_xlabel(r"$\eta_{truth}$", fontsize=12)
-            ax2.set_ylabel("Std (pull)", fontsize=12)
-            ax2.set_ylim(bottom=0)
-            ax2.grid(True, alpha=0.3)
-            ax2.legend(fontsize=9)
-
-            plt.tight_layout()
-            fig.savefig(
-                self.output_dir / "pulls" / f"{param_name}_pull_vs_eta.png",
-                dpi=150,
-                bbox_inches="tight",
-            )
-            plt.close(fig)
-
-        # Summary: all params on one figure
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.flatten()
-
-        for i, param_name in enumerate(params_available):
-            ax = axes[i]
-            res_values = residuals[param_name]
-            std_dev = np.std(res_values)
-            if std_dev == 0 or len(res_values) == 0:
-                continue
-
-            pulls = res_values / std_dev
-            min_len = min(len(pulls), len(eta))
-            pulls_b, eta_b = pulls[:min_len], eta[:min_len]
-
-            centers, stds_b, counts_b = [], [], []
-            for j in range(len(eta_bins) - 1):
-                mask = (eta_b >= eta_bins[j]) & (eta_b < eta_bins[j + 1])
-                if np.sum(mask) > 2:
-                    centers.append((eta_bins[j] + eta_bins[j + 1]) / 2)
-                    stds_b.append(np.std(pulls_b[mask]))
-                    counts_b.append(np.sum(mask))
-
-            if not centers:
-                continue
-
-            centers_arr = np.array(centers)
-            stds_b_arr = np.array(stds_b)
-            counts_b_arr = np.array(counts_b, dtype=float)
-            std_err_b = stds_b_arr / np.sqrt(2 * counts_b_arr)
-
-            edges = self._get_bin_edges_for_centers(centers_arr, eta_bins)
-            x, y = self._build_step_arrays(edges, stds_b_arr)
-            ax.step(x, y, where="post", color="darkorange", linewidth=2,
-                    label=f"Width (avg: {np.std(pulls):.3f})")
-            self._step_fill_between(ax, edges, stds_b_arr - std_err_b,
-                                    stds_b_arr + std_err_b, color="darkorange",
-                                    alpha=0.25)
-            ax.axhline(1, color="gray", linestyle="--", alpha=0.7)
-            ax.set_xlabel(r"$\eta$", fontsize=11)
-            ax.set_ylabel("Pull width", fontsize=11)
-            label = param_labels.get(param_name, param_name)
-            ax.set_title(f"{label} pull width vs $\\eta$", fontsize=12)
-            ax.set_ylim(bottom=0)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=9)
-
-        for j in range(len(params_available), len(axes)):
-            axes[j].set_visible(False)
-
-        fig.suptitle("Pull Width vs $\\eta$", fontsize=14, y=1.02)
-        plt.tight_layout()
-        fig.savefig(
-            self.output_dir / "pulls" / "summary_pull_vs_eta.png",
-            dpi=150,
-            bbox_inches="tight",
-        )
-        plt.close(fig)
+        out_path = self.output_dir / filename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(out_path, **arrays)
+        # Store label separately as a plain text file (npz can't store variable-length strings portably)
+        (out_path.parent / (filename.replace(".npz", "_label.txt"))).write_text(label)
+        print(f"  Precision NPZ saved to: {out_path}")
 
     def save_statistics(self, stats: dict) -> None:
         """Save statistics summary to text file."""
@@ -1669,20 +1605,6 @@ class ACTSTrackingEvaluator:
 
             f.write(f"Data directory: {self.config['data']['directory']}\n")
             f.write(f"Number of events: {stats.get('n_events', 'N/A')}\n\n")
-
-            f.write("-" * 80 + "\n")
-            f.write("OVERALL STATISTICS\n")
-            f.write("-" * 80 + "\n\n")
-
-            f.write(f"  Total tracks: {stats.get('n_tracks', 'N/A')}\n")
-            f.write(f"  Matched tracks: {stats.get('n_matched', 'N/A')}\n")
-            f.write(f"  Fake tracks: {stats.get('n_fake', 'N/A')}\n")
-            f.write(f"  Primary particles with hits: {stats.get('n_primary_particles_with_hits', 'N/A')}\n")
-            f.write(f"  Reconstructible particles: {stats.get('n_reconstructible', 'N/A')}\n")
-            f.write(f"  Overall efficiency: {stats.get('unweighted_efficiency_eta3', 'N/A'):.3f} (unweighted, |eta| < 3)\n")
-            f.write(f"  Reconstructible particles (|eta| < 3): {stats.get('n_reconstructible_eta3', 'N/A')}\n")
-            f.write(f"  Found particles (|eta| < 3): {stats.get('n_found_eta3', 'N/A')}\n")
-            f.write(f"  Overall fake rate: {stats.get('overall_fake_rate', 'N/A'):.3f}\n\n")
 
             f.write("-" * 80 + "\n")
             f.write("RESIDUAL STATISTICS\n")
@@ -1773,6 +1695,73 @@ class ACTSTrackingEvaluator:
                             f.write(f"      mean relative residual: {unbinned_rel * 100:.4f}%\n")
                             f.write(f"      precision (std):        {unbinned_std * scale:.6f}{unit_str}\n\n")
 
+            # Selection cut-flow
+            cutflow = stats.get("selection_cutflow", {})
+            if cutflow:
+                f.write("-" * 80 + "\n")
+                f.write("SELECTION CUT-FLOW\n")
+                f.write("-" * 80 + "\n\n")
+                f.write("  Baseline: truth particles that left ≥1 hit in the detector.\n")
+                f.write("  All percentages are relative to this baseline.\n")
+                f.write("  Each row shows particles rejected by that cut alone,\n")
+                f.write("  after all preceding cuts have already been applied.\n\n")
+
+                n_start = cutflow["n_start"]
+                n_final = cutflow["n_final"]
+                col_w = max(len(s["name"]) for s in cutflow["steps"]) + 2
+
+                # Header
+                f.write(f"  {'Cut':<{col_w}}  {'Before':>9}  {'After':>9}  "
+                        f"{'Rejected':>9}  {'% of step':>10}  {'% of start':>11}\n")
+                f.write(f"  {'-' * col_w}  {'-' * 9}  {'-' * 9}  "
+                        f"{'-' * 9}  {'-' * 10}  {'-' * 11}\n")
+
+                for step in cutflow["steps"]:
+                    f.write(
+                        f"  {step['name']:<{col_w}}  "
+                        f"{step['n_before']:>9,}  "
+                        f"{step['n_after']:>9,}  "
+                        f"{step['n_rejected']:>9,}  "
+                        f"{step['pct_of_step']:>9.2f}%  "
+                        f"{step['pct_of_start']:>10.2f}%\n"
+                    )
+
+                f.write(f"\n  Start (truth particles with ≥1 detector hit):  {n_start:,}\n")
+                f.write(f"  Final (surviving all cuts):                {n_final:,}"
+                        f"  ({100.0 * n_final / n_start:.2f}% of start)\n\n")
+
+            # Hit signal-to-noise ratio
+            snr_data = stats.get("hit_snr", {})
+            if snr_data:
+                f.write("-" * 80 + "\n")
+                f.write("HIT SIGNAL-TO-NOISE RATIO\n")
+                f.write("-" * 80 + "\n\n")
+                f.write("  Definition:\n")
+                f.write("    Signal              = tracker hits from particles passing all selection cuts\n")
+                f.write("    Hard-scatter noise  = hits from primary particles that fail selection\n")
+                f.write("    Soft / pileup noise = hits from non-primary (pileup) particles\n")
+                f.write("    Unassociated        = hits with no matching particle in the truth table\n\n")
+
+                n_tot = snr_data["n_total_hits"]
+                n_sig = snr_data["n_signal_hits"]
+                n_noi = snr_data["n_noise_hits"]
+                n_hs  = snr_data["n_hard_scatter_noise"]
+                n_sp  = snr_data["n_soft_pileup_noise"]
+                n_un  = snr_data["n_unassociated"]
+
+                def _hp(num, den):
+                    return f"{100.0 * num / den:.2f}%" if den > 0 else "N/A"
+
+                f.write(f"  Total tracker hits:                {n_tot:>12,}\n\n")
+                f.write(f"  Signal hits:                       {n_sig:>12,}  ({_hp(n_sig, n_tot)} of total)\n")
+                f.write(f"  Noise hits (total):                {n_noi:>12,}  ({_hp(n_noi, n_tot)} of total)\n")
+                f.write(f"    of which hard-scatter noise:     {n_hs:>12,}  ({_hp(n_hs, n_noi)} of noise)\n")
+                f.write(f"    of which soft / pileup noise:    {n_sp:>12,}  ({_hp(n_sp, n_noi)} of noise)\n")
+                if n_un > 0:
+                    f.write(f"    of which unassociated:           {n_un:>12,}  ({_hp(n_un, n_noi)} of noise)\n")
+                f.write(f"\n  Signal-to-Noise Ratio  (S/N):      {snr_data['snr']:>12.4f}\n")
+                f.write(f"  Signal fraction:                   {snr_data['signal_fraction'] * 100:>11.2f}%\n\n")
+
             # Selected-particle statistics (preprocessing selection cuts)
             sel_eff = stats.get("selected_efficiency", {})
             sel_res_stats = stats.get("selected_residuals", {})
@@ -1823,6 +1812,122 @@ class ACTSTrackingEvaluator:
                             f.write(f"    {param}:\n")
                             f.write(f"      mean relative residual: {unbinned_rel * 100:.4f}%\n")
                             f.write(f"      precision (std):        {unbinned_std * scale:.6f}{unit_str}\n\n")
+
+            # Selected + double-matched statistics
+            sel_dm_res_stats = stats.get("sel_dm_residuals", {})
+            sel_dm_res_data  = stats.get("sel_dm_resolution_data", {})
+            n_sel            = stats.get("n_sel", None)
+            n_sel_dm         = stats.get("n_sel_dm", None)
+            if sel_dm_res_stats:
+                f.write("-" * 80 + "\n")
+                f.write("SELECTED + DOUBLE-MATCHED STATISTICS\n")
+                f.write("-" * 80 + "\n\n")
+
+                if n_sel is not None and n_sel_dm is not None:
+                    n_total_t = stats.get("n_tracks", 1)
+                    pct_sel_dm_of_total = 100 * n_sel_dm / n_total_t if n_total_t > 0 else 0.0
+                    pct_sel_dm_of_sel   = 100 * n_sel_dm / n_sel if n_sel > 0 else 0.0
+                    f.write(f"  Tracks matched to selected particles:               {n_sel}\n")
+                    f.write(f"  Tracks matched to selected + double-matched:        {n_sel_dm}"
+                            f"  ({pct_sel_dm_of_sel:.1f}% of selected, {pct_sel_dm_of_total:.1f}% of total)\n\n")
+
+                f.write("  Residuals:\n\n")
+                for param in ["d0", "z0", "phi", "theta", "qop", "pt_rel", "pt_abs"]:
+                    if param in sel_dm_res_stats:
+                        cs = sel_dm_res_stats[param]
+                        scale = self.UNIT_SCALE.get(param, 1.0)
+                        unit = unit_labels.get(param, "")
+                        if param == "pt_abs":
+                            unit = "GeV"
+                        unit_str = f" {unit}" if unit else ""
+                        f.write(f"    {param}:\n")
+                        f.write(f"      mean: {cs['mean'] * scale:.6f}{unit_str}\n")
+                        f.write(f"      std:  {cs['std'] * scale:.6f}{unit_str}\n")
+                        f.write(f"      count: {cs['count']}\n\n")
+
+                if sel_dm_res_data:
+                    f.write("  Resolution (unbinned mean relative residual):\n\n")
+                    for param in ["d0", "z0", "phi", "theta", "qop", "pt_rel"]:
+                        if param in sel_dm_res_data:
+                            data = sel_dm_res_data[param]
+                            unbinned_rel = data.get("unbinned_rel_mean", 0.0)
+                            unbinned_std = data.get("unbinned_std", 0.0)
+                            scale = self.UNIT_SCALE.get(param, 1.0)
+                            unit = unit_labels.get(param, "")
+                            unit_str = f" {unit}" if unit else ""
+                            f.write(f"    {param}:\n")
+                            f.write(f"      mean relative residual: {unbinned_rel * 100:.4f}%\n")
+                            f.write(f"      precision (std):        {unbinned_std * scale:.6f}{unit_str}\n\n")
+
+            # Track category breakdown
+            n_total_trk   = stats.get("n_tracks", 0)
+            n_matched_trk = stats.get("n_matched", 0)
+            n_fake_trk    = stats.get("n_fake", 0)
+            mi            = stats.get("matching_info", {})
+            dmi           = stats.get("dm_matched_info", {})
+            n_dm_all      = mi.get("n_double_matched", 0)       # DM among ALL tracks
+            n_dm_matched  = dmi.get("n_double_matched", 0)      # DM among matched tracks
+            n_sel_trk     = stats.get("n_sel", 0)
+            n_sel_dm_trk  = stats.get("n_sel_dm", 0)
+            sel_eff_t     = stats.get("selected_efficiency", {})
+            n_sel_reconstructible = sel_eff_t.get("n_selected_total", 0)
+            n_sel_found   = sel_eff_t.get("n_selected_found", 0)
+            n_primary_with_hits = stats.get("n_primary_particles_with_hits", 0)
+            n_reconstructible   = stats.get("n_reconstructible", 0)
+            n_reconstructible_eta3 = stats.get("n_reconstructible_eta3", 0)
+            n_found_eta3        = stats.get("n_found_eta3", 0)
+            eff_eta3      = stats.get("unweighted_efficiency_eta3", 0.0)
+            fake_rate     = stats.get("overall_fake_rate", 0.0)
+
+            def _pct(num, den):
+                return f"{100 * num / den:.1f}%" if den > 0 else "N/A"
+
+            f.write("-" * 80 + "\n")
+            f.write("TRACK CATEGORY BREAKDOWN\n")
+            f.write("-" * 80 + "\n\n")
+
+            f.write("  Nomenclature:\n")
+            f.write("    Reconstructed track   — any track output by ACTS, regardless of truth match\n")
+            f.write("    Matched               — reconstructed track whose majority_particle_id points\n")
+            f.write("                            to a truth primary particle (≥1 true hit on track)\n")
+            f.write("    Fake                  — reconstructed track with no valid truth match\n")
+            f.write("    Double-matched        — matched track with hit purity > 75% AND\n")
+            f.write("                            hit efficiency > 75% (reliable truth assignment)\n")
+            f.write("    Selected              — truth particle passing the preprocessing selection:\n")
+            f.write("                            primary, charged, pT > 0.5 GeV, |η| < 3,\n")
+            f.write("                            6 ≤ hits ≤ 20, |d0| < 1 mm, |z0| < 150 mm\n")
+            f.write("    Reconstructible       — primary truth particle with ≥ min_hits tracker hits\n")
+            f.write("                            (looser than selected; used for broad efficiency)\n\n")
+
+            f.write("  Truth particle counts:\n")
+            f.write(f"    Primary particles with ≥1 tracker hit:          {n_primary_with_hits:>8}\n")
+            f.write(f"    Reconstructible particles (≥min_hits):           {n_reconstructible:>8}\n")
+            f.write(f"    Reconstructible particles (|η| < 3):             {n_reconstructible_eta3:>8}\n")
+            f.write(f"    Selected (reconstructible) particles:            {n_sel_reconstructible:>8}\n\n")
+
+            f.write("  Reconstructed track counts:\n")
+            f.write(f"    Total reconstructed tracks:                      {n_total_trk:>8}  (100%)\n")
+            f.write(f"    Matched (≥1 true hit, any primary particle):     {n_matched_trk:>8}"
+                    f"  ({_pct(n_matched_trk, n_total_trk)} of total)\n")
+            f.write(f"    Fake (no valid truth match):                     {n_fake_trk:>8}"
+                    f"  ({_pct(n_fake_trk, n_total_trk)} of total)\n")
+            f.write(f"    Double-matched (among all reconstructed):        {n_dm_all:>8}"
+                    f"  ({_pct(n_dm_all, n_total_trk)} of total)\n")
+            f.write(f"    Double-matched (among matched only):             {n_dm_matched:>8}"
+                    f"  ({_pct(n_dm_matched, n_matched_trk)} of matched,"
+                    f" {_pct(n_dm_matched, n_total_trk)} of total)\n")
+            f.write(f"    Matched to a selected particle:                  {n_sel_trk:>8}"
+                    f"  ({_pct(n_sel_trk, n_total_trk)} of total)\n")
+            f.write(f"    Selected + double-matched:                       {n_sel_dm_trk:>8}"
+                    f"  ({_pct(n_sel_dm_trk, n_sel_trk)} of matched-selected,"
+                    f" {_pct(n_sel_dm_trk, n_total_trk)} of total)\n\n")
+
+            f.write("  Efficiency / fake-rate summary:\n")
+            f.write(f"    Reconstruction efficiency (|η| < 3, unweighted): {eff_eta3:.3f}"
+                    f"  ({n_found_eta3} / {n_reconstructible_eta3} reconstructible found)\n")
+            f.write(f"    Selected-particle efficiency:                    {sel_eff_t.get('overall_efficiency_selected', 0.0):.3f}"
+                    f"  ({n_sel_found} / {n_sel_reconstructible} selected found)\n")
+            f.write(f"    Overall fake rate (mean over η bins):            {fake_rate:.3f}\n\n")
 
             f.write("=" * 80 + "\n")
             f.write("END OF SUMMARY\n")
@@ -2303,8 +2408,6 @@ class ACTSTrackingEvaluator:
         self.plot_pt_resolution_vs_pt(residuals)
         self.plot_pt_abs_precision_vs_eta(residuals, eta_bins)
         self.plot_pt_abs_precision_vs_pt(residuals)
-        self.plot_pulls(residuals, eta_bins)
-        self.plot_pulls_vs_eta(residuals, eta_bins)
 
         # Step 8: Create double-matched plots + hit assignment quality
         print("\n[8/10] Creating double-matched and hit assignment plots...")
@@ -2316,6 +2419,13 @@ class ACTSTrackingEvaluator:
 
         # Step 9: Selected-particle evaluation (preprocessing selection cuts)
         print("\n[9/10] Evaluating selected particles (preprocessing selection cuts)...")
+        print("  Computing selection cut-flow...")
+        cutflow = self.compute_selection_cutflow(particles_df, hits_df)
+        print(f"  Cut-flow: {cutflow['n_start']} → {cutflow['n_final']} particles")
+        print("  Computing hit signal-to-noise ratio...")
+        hit_snr = self.compute_hit_snr(particles_df, hits_df)
+        print(f"  Hit SNR: signal={hit_snr['n_signal_hits']:,}  noise={hit_snr['n_noise_hits']:,}"
+              f"  S/N={hit_snr['snr']:.4f}")
         sel_matched = self.filter_matched_to_selected(matched_tracks, particles_df, hits_df)
         sel_residuals = self.compute_residuals(sel_matched)
         sel_resolution_data = self.compute_resolution_vs_eta(sel_residuals)
@@ -2327,6 +2437,16 @@ class ACTSTrackingEvaluator:
             if param != "eta" and not param.endswith("_truth") and not param.endswith("_reco"):
                 print(f"  {param} (selected): mean={np.mean(res):.6f}, std={np.std(res):.6f}")
 
+        # Double-matching within selected tracks (reuse dm_lookup built in Step 4)
+        sel_dm_mask = np.array([
+            dm_lookup.get((int(row["event_id"]), int(row["track_id"])), False)
+            for row in sel_matched.select(["event_id", "track_id"]).iter_rows(named=True)
+        ], dtype=bool)
+        sel_dm_residuals = self.apply_double_matching(sel_residuals, sel_dm_mask)
+        sel_dm_resolution_data = self.compute_resolution_vs_eta(sel_dm_residuals)
+        n_sel_dm = int(np.sum(sel_dm_mask))
+        print(f"  Double-matched selected tracks: {n_sel_dm} / {len(sel_dm_mask)}")
+
         # Step 10: Create selected-particle plots
         print("\n[10/10] Creating selected-particle plots...")
         self.plot_resolution_vs_eta(sel_resolution_data, eta_bins, subdir="resolution_selected", title_suffix=" (Selected)")
@@ -2334,10 +2454,31 @@ class ACTSTrackingEvaluator:
         self.plot_pt_abs_precision_vs_eta(sel_residuals, eta_bins, subdir="precision_selected", title_suffix=" (Selected)")
         self.plot_pt_abs_precision_vs_pt(sel_residuals, subdir="precision_selected", title_suffix=" (Selected)")
         self.plot_efficiency_and_fake_rate(sel_eff_data, subdir="efficiency_selected", title_suffix=" (Selected)")
+        self.plot_precision_vs_eta(
+            sel_dm_resolution_data, eta_bins,
+            subdir="precision_selected_dm",
+            title_suffix=" (Selected, Double-matched)",
+        )
+        self.plot_pt_abs_precision_vs_eta(
+            sel_dm_residuals, eta_bins,
+            subdir="precision_selected_dm",
+            title_suffix=" (Selected, Double-matched)",
+        )
+        self.plot_pt_abs_precision_vs_pt(
+            sel_dm_residuals,
+            subdir="precision_selected_dm",
+            title_suffix=" (Selected, Double-matched)",
+        )
+
+        # Export precision NPZ for comparison with evaluate_predictions.py
+        print("\nExporting precision NPZ for comparison with ML model evaluation...")
+        self.export_precision_npz(sel_dm_resolution_data, eta_bins)
 
         # Compute overall statistics
         stats = {
-            "n_events": self.config["data"]["n_events"],
+            "n_events": len(self.config["data"].get("shard_indices", [])) * 1000
+                        if "shard_indices" in self.config["data"]
+                        else self.config["data"].get("n_events", 0),
             "n_tracks": len(matched_tracks),
             "n_matched": n_matched,
             "n_fake": n_fake,
@@ -2363,13 +2504,26 @@ class ACTSTrackingEvaluator:
                 if param in dm_residuals and isinstance(dm_residuals[param], np.ndarray)
             },
             "dm_resolution_data": dm_resolution_data,
+            "dm_matched_info": dm_residuals.get("_dm_info", {}),
             "selected_efficiency": sel_eff_data["efficiency"],
+            "n_sel": n_sel,
+            "n_sel_dm": n_sel_dm,
             "selected_residuals": {
                 param: {"mean": float(np.mean(res)), "std": float(np.std(res)), "count": len(res)}
                 for param, res in sel_residuals.items()
                 if param != "eta" and not param.endswith("_truth") and not param.endswith("_reco")
             },
             "selected_resolution_data": sel_resolution_data,
+            "sel_dm_residuals": {
+                param: {"mean": float(np.mean(sel_dm_residuals[param])),
+                        "std": float(np.std(sel_dm_residuals[param])),
+                        "count": len(sel_dm_residuals[param])}
+                for param in ["d0", "z0", "phi", "theta", "qop", "pt_rel", "pt_abs"]
+                if param in sel_dm_residuals and isinstance(sel_dm_residuals[param], np.ndarray)
+            },
+            "sel_dm_resolution_data": sel_dm_resolution_data,
+            "selection_cutflow": cutflow,
+            "hit_snr": hit_snr,
         }
 
         self.save_statistics(stats)

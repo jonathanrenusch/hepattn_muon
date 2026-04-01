@@ -1,51 +1,43 @@
 #!/usr/bin/env python3
 # ruff: noqa: TID252, PLR0915, C901
-"""Preprocess ColliderML Release-1 parquet shards into fast memmap format.
+"""Compact preprocessing of ColliderML Release-1 parquet shards for track regression.
 
-This script converts the raw parquet-based ColliderML dataset into a flat,
-memory-mapped numpy format that is optimised for both:
+This is a *compact* variant of ``preprocess_colliderml.py``.  It stores **only**
+the hits belonging to selected tracks (not the full event), which typically
+reduces per-shard size from ~1.3 GB to ~5–40 MB — a 30–250× reduction.
 
-1. **Track parameter regression** — per-selected-track random access with
-   pre-sorted hits and pre-computed targets.
-2. **Future hit-to-track assignment** — full event-level access to all hits
-   and particles with preserved structure.
+The output format is fully compatible with ``ColliderMLTrackDataset`` in
+``data.py``; the CSR indices simply point into the compact hits array instead
+of a full-event hits array.
 
 Output structure (per shard)::
 
     <output_dir>/shard_XXXX/
-        hits.npy               — (total_hits, N_HIT_FEATURES) float32 memmap
-        particles.npy          — (total_particles, N_PARTICLE_FEATURES) float32 memmap
-        event_hit_offsets.npy  — (n_events + 1,) int64
-        event_particle_offsets.npy — (n_events + 1,) int64
+        hits.npy                   — (compact_total_hits, N_HIT_FEATURES) float32
         selected_tracks/
             track_targets.npy       — (N_selected, 5) float32  [d0, z0, phi, theta, qop]
-            track_hit_indices.npy   — (total_selected_hits,) int32  CSR values
+            track_hit_indices.npy   — (compact_total_hits,) int32  CSR values
             track_hit_offsets.npy   — (N_selected + 1,) int32  CSR offsets
             track_event_idx.npy     — (N_selected,) int32  event index within shard
-            track_particle_ids.npy  — (N_selected,) int64  truth particle_id per selected track
-            acts_reco.npy           — (N_selected, 5) float32  ACTS reco params [d0, z0, phi, theta, qop]
-                                      (only written when --augment-acts is used; NaN if no ACTS match)
-            acts_dm_mask.npy        — (N_selected,) bool  True if double-matched (purity>75%, eff>75%)
-                                      (only written when --augment-acts is used)
+            track_particle_ids.npy  — (N_selected,) int64  truth particle_id per track
+            acts_reco.npy           — (N_selected, 5) float32  ACTS reco params
+                                      (only when --augment-acts; NaN if no ACTS match)
+            acts_dm_mask.npy        — (N_selected,) bool  double-matched mask
+                                      (only when --augment-acts)
 
 Usage::
 
-    python preprocess_colliderml.py --data-dir /scratch/colliderml/p0 \\
-        --output-dir /scratch/colliderml/p0_preprocessed \\
-        --num-shards -1 --num-workers 8
-
-With ACTS augmentation::
-
-    python preprocess_colliderml.py --data-dir /scratch/colliderml/p0 \\
-        --output-dir /scratch/colliderml/p0_preprocessed \\
-        --num-shards -1 --num-workers 8 --augment-acts \\
-        --tracks-subdir ttbar_pu0_tracks
+    python preprocess_colliderml_compact.py \\
+        --data-dir /eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data \\
+        --output-dir /eos/project/e/end-to-end-colliderml/data/p200_preprocessed_plus_qcd \\
+        --num-shards -1 --num-workers 8 --augment-acts
 
 Quick test (2 shards)::
 
-    python preprocess_colliderml.py --data-dir /scratch/colliderml/p0 \\
-        --output-dir /scratch/colliderml/p0_preprocessed_test \\
-        --num-shards 2
+    python preprocess_colliderml_compact.py \\
+        --data-dir /eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data \\
+        --output-dir /tmp/p200_compact_test \\
+        --num-shards 2 --augment-acts
 """
 
 from __future__ import annotations
@@ -76,19 +68,19 @@ HIT_FEATURE_NAMES = [
     "volume_id", "layer_id", "surface_id", "detector",
 ]
 
-# Particle features: particle_id, pdg_id, charge, px, py, pz, perigee_d0, perigee_z0,
-#                     phi, theta, qop, primary
-N_PARTICLE_FEATURES = 12
-PARTICLE_FEATURE_NAMES = [
-    "particle_id", "pdg_id", "charge", "px", "py", "pz",
-    "perigee_d0", "perigee_z0", "phi", "theta", "qop", "primary",
-]
-
 # Track target parameters
 TARGET_NAMES = ["d0", "z0", "phi", "theta", "qop"]
 
-# Track selection defaults (loaded from shared selection_defaults.yaml)
-DEFAULT_SELECTION = load_selection_defaults()
+# Detector type sets (ODD geometry)
+PIXEL_DETECTORS = np.array([0, 1, 2, 3], dtype=np.int32)
+STRIP_DETECTORS = np.array([4, 5, 6, 7, 8], dtype=np.int32)
+
+# Default selection file
+_SELECTION_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "utils"
+    / "selection_defaults_P200_softscatter_training.yaml"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +95,7 @@ def process_shard(
     selection: dict,
     tracks_file: Path | None = None,
 ) -> dict:
-    """Process a single shard pair → write memmap files.
+    """Process a single shard pair → write compact memmap files.
 
     Parameters
     ----------
@@ -114,21 +106,9 @@ def process_shard(
     output_dir:
         Directory where the output numpy files will be written.
     selection:
-        Dict of track selection cuts (min_hits, pt_min, etc.).
+        Dict of track selection cuts.
     tracks_file:
-        Optional path to the ACTS reconstructed tracks parquet file for this
-        shard.  When provided the function also writes ``acts_reco.npy`` and
-        ``acts_dm_mask.npy`` under ``selected_tracks/``.
-
-    Output files written under ``selected_tracks/``::
-
-        track_targets.npy       — (N_selected, 5) float32  [d0, z0, phi, theta, qop]
-        track_hit_indices.npy   — (total_selected_hits,) int32  CSR values
-        track_hit_offsets.npy   — (N_selected + 1,) int32  CSR offsets
-        track_event_idx.npy     — (N_selected,) int32  event index within shard
-        track_particle_ids.npy  — (N_selected,) int64  truth particle_id per selected track
-        acts_reco.npy           — (N_selected, 5) float32  ACTS reco params (if tracks_file given)
-        acts_dm_mask.npy        — (N_selected,) bool  double-match mask (if tracks_file given)
+        Optional path to ACTS reconstructed tracks parquet file.
 
     Returns a summary dict with counts.
     """
@@ -161,27 +141,27 @@ def process_shard(
             columns=["event_id", "d0", "z0", "phi", "theta", "qop",
                      "majority_particle_id", "hit_ids"],
         )
-        # Build event_id → row index map (handles missing events gracefully)
         for row_idx in range(ttable.num_rows):
             ttable_eid_to_row[ttable.column("event_id")[row_idx].as_py()] = row_idx
 
     n_events = ptable.num_rows
 
-    # Accumulators
-    all_hit_feats = []       # list of (nhits_event, N_HIT_FEATURES)
-    all_part_feats = []      # list of (nparts_event, N_PARTICLE_FEATURES)
-    event_hit_counts = []
-    event_part_counts = []
+    # Detector-specific hit requirement config
+    require_pixel_strip = sel.get("require_pixel_strip", False)
+    min_pixel_hits = sel.get("min_pixel_hits", 0)
+    min_strip_hits = sel.get("min_strip_hits", 0)
 
-    all_track_targets = []   # list of (n_sel, 5)
-    all_track_hit_idx = []   # list of 1-D arrays of global hit indices
-    all_track_lengths = []   # list of ints
-    all_track_event_idx = [] # list of ints
-    all_track_acts_reco = []   # list of (5,) float32 arrays — NaN if no ACTS match
-    all_track_acts_dm = []     # list of bool — True if double-matched (purity>75%, eff>75%)
-    all_track_particle_ids = []  # list of int — truth particle_id for each selected track
+    # Accumulators — compact format: only selected track hits
+    all_compact_hits = []        # list of (L_i, N_HIT_FEATURES) arrays
+    all_track_targets = []       # list of (5,) arrays
+    all_track_lengths = []       # list of ints
+    all_track_event_idx = []     # list of ints
+    all_track_acts_reco = []     # list of (5,) float32 arrays
+    all_track_acts_dm = []       # list of bool
+    all_track_particle_ids = []  # list of int
+    all_track_meta = []          # list of (2,) arrays: [pt, vertex_primary]
 
-    global_hit_offset = 0
+    compact_hit_offset = 0
 
     for ev in range(n_events):
         # ---- Particles ------------------------------------------------
@@ -206,23 +186,6 @@ def process_shard(
 
         nparts = len(pid)
 
-        # Particle feature matrix
-        part_feats = np.zeros((nparts, N_PARTICLE_FEATURES), dtype=np.float32)
-        part_feats[:, 0] = pid.astype(np.float32)
-        part_feats[:, 1] = pdg.astype(np.float32)
-        part_feats[:, 2] = charge
-        part_feats[:, 3] = px.astype(np.float32)
-        part_feats[:, 4] = py.astype(np.float32)
-        part_feats[:, 5] = pz.astype(np.float32)
-        part_feats[:, 6] = d0.astype(np.float32)
-        part_feats[:, 7] = z0.astype(np.float32)
-        part_feats[:, 8] = phi.astype(np.float32)
-        part_feats[:, 9] = theta.astype(np.float32)
-        part_feats[:, 10] = qop.astype(np.float32)
-        part_feats[:, 11] = is_primary.astype(np.float32)
-        all_part_feats.append(part_feats)
-        event_part_counts.append(nparts)
-
         # ---- Hits -----------------------------------------------------
         hx = np.array(htable.column("x")[ev].as_py(), dtype=np.float64)
         hy = np.array(htable.column("y")[ev].as_py(), dtype=np.float64)
@@ -241,6 +204,7 @@ def process_shard(
         theta_hit = np.arccos(np.clip(hz / (np.sqrt(hx**2 + hy**2 + hz**2) + 1e-12), -1.0, 1.0))
         s = np.sqrt(hx**2 + hy**2 + hz**2)  # distance from IP
 
+        # Build full hit feature matrix for this event (used for gathering)
         hit_feats = np.zeros((nhits, N_HIT_FEATURES), dtype=np.float32)
         hit_feats[:, 0] = hx.astype(np.float32)
         hit_feats[:, 1] = hy.astype(np.float32)
@@ -253,8 +217,6 @@ def process_shard(
         hit_feats[:, 8] = h_lay.astype(np.float32)
         hit_feats[:, 9] = h_surf.astype(np.float32)
         hit_feats[:, 10] = h_det.astype(np.float32)
-        all_hit_feats.append(hit_feats)
-        event_hit_counts.append(nhits)
 
         # ---- Track selection ------------------------------------------
         # Count hits per particle
@@ -265,7 +227,7 @@ def process_shard(
             pid_to_nhits = {}
 
         nhits_per_particle = np.array(
-            [pid_to_nhits.get(int(p), 0) for p in pid],
+            [pid_to_nhits.get(int(pp), 0) for pp in pid],
             dtype=np.int32,
         )
 
@@ -282,13 +244,13 @@ def process_shard(
         mask &= charge != 0  # charged particles only
         # Filter out particles with NaN perigee parameters
         mask &= np.isfinite(d0) & np.isfinite(z0)
-        # Perigee range cuts (remove extreme outliers)
+        # Perigee range cuts
         mask &= (d0 >= sel["d0_min"]) & (d0 <= sel["d0_max"])
         mask &= (z0 >= sel["z0_min"]) & (z0 <= sel["z0_max"])
 
         sel_indices = np.where(mask)[0]
 
-        # Pre-compute ACTS reco lookup for this event (keyed by majority_particle_id)
+        # Pre-compute ACTS reco lookup for this event
         pid_to_acts_track: dict = {}
         if ttable is not None:
             ev_event_id = int(ptable.column("event_id")[ev].as_py())
@@ -314,15 +276,28 @@ def process_shard(
             hit_mask = h_pid == sel_pid
             track_hit_local = np.where(hit_mask)[0]
 
-            if len(track_hit_local) < sel["min_hits"]:
+            n_track_hits = len(track_hit_local)
+            if n_track_hits < sel["min_hits"]:
                 continue
-            if "max_hits" in sel and len(track_hit_local) > sel["max_hits"]:
+            if "max_hits" in sel and n_track_hits > sel["max_hits"]:
                 continue
+
+            # Detector-specific hit requirement
+            if require_pixel_strip:
+                track_det = h_det[track_hit_local]
+                n_pixel = np.isin(track_det, PIXEL_DETECTORS).sum()
+                n_strip = np.isin(track_det, STRIP_DETECTORS).sum()
+                if n_pixel < min_pixel_hits or n_strip < min_strip_hits:
+                    continue
 
             # Sort track hits by s (distance from IP)
             track_s = s[track_hit_local]
             sort_order = np.argsort(track_s)
             track_hit_local = track_hit_local[sort_order]
+
+            # Gather hit features for this track (compact storage)
+            track_hit_feats = hit_feats[track_hit_local]  # (L, 11)
+            all_compact_hits.append(track_hit_feats)
 
             # ACTS augmentation per selected track
             all_track_particle_ids.append(sel_pid)
@@ -342,50 +317,35 @@ def process_shard(
                     all_track_acts_reco.append(np.full(5, np.nan, dtype=np.float32))
                     all_track_acts_dm.append(False)
 
-            # Global indices
-            track_hit_global = track_hit_local + global_hit_offset
-
             # Targets
             targets = np.array([
                 d0[si], z0[si], phi[si], theta[si], qop[si],
             ], dtype=np.float32)
 
             all_track_targets.append(targets)
-            all_track_hit_idx.append(track_hit_global.astype(np.int32))
-            all_track_lengths.append(len(track_hit_global))
+            all_track_lengths.append(n_track_hits)
             all_track_event_idx.append(ev)
-
-        global_hit_offset += nhits
+            all_track_meta.append(np.array([pt[si], float(vertex_primary[si])], dtype=np.float32))
 
     # ---- Write output -------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
     sel_dir = output_dir / "selected_tracks"
     sel_dir.mkdir(exist_ok=True)
 
-    # Concatenate
-    if all_hit_feats:
-        hits_arr = np.concatenate(all_hit_feats, axis=0)
-    else:
-        hits_arr = np.zeros((0, N_HIT_FEATURES), dtype=np.float32)
-
-    if all_part_feats:
-        parts_arr = np.concatenate(all_part_feats, axis=0)
-    else:
-        parts_arr = np.zeros((0, N_PARTICLE_FEATURES), dtype=np.float32)
-
-    # Event offsets (CSR-style cumsum)
-    event_hit_offsets = np.zeros(n_events + 1, dtype=np.int64)
-    np.cumsum(event_hit_counts, out=event_hit_offsets[1:])
-    event_part_offsets = np.zeros(n_events + 1, dtype=np.int64)
-    np.cumsum(event_part_counts, out=event_part_offsets[1:])
-
-    # Selected tracks
+    # Compact hits array
     n_selected = len(all_track_targets)
+    if all_compact_hits:
+        compact_hits = np.concatenate(all_compact_hits, axis=0)  # (total_compact_hits, 11)
+    else:
+        compact_hits = np.zeros((0, N_HIT_FEATURES), dtype=np.float32)
+
+    # Build sequential CSR indices into compact array
     if n_selected > 0:
         track_targets = np.stack(all_track_targets, axis=0)  # (N, 5)
-        track_hit_indices = np.concatenate(all_track_hit_idx)  # flat CSR values
         track_hit_offsets = np.zeros(n_selected + 1, dtype=np.int32)
         np.cumsum(all_track_lengths, out=track_hit_offsets[1:])
+        # CSR values are just sequential indices into compact_hits
+        track_hit_indices = np.arange(len(compact_hits), dtype=np.int32)
         track_event_idx = np.array(all_track_event_idx, dtype=np.int32)
     else:
         track_targets = np.zeros((0, 5), dtype=np.float32)
@@ -393,11 +353,10 @@ def process_shard(
         track_hit_offsets = np.zeros(1, dtype=np.int32)
         track_event_idx = np.zeros(0, dtype=np.int32)
 
-    # Save
-    np.save(output_dir / "hits.npy", hits_arr)
-    np.save(output_dir / "particles.npy", parts_arr)
-    np.save(output_dir / "event_hit_offsets.npy", event_hit_offsets)
-    np.save(output_dir / "event_particle_offsets.npy", event_part_offsets)
+    # Save compact hits at shard level
+    np.save(output_dir / "hits.npy", compact_hits)
+
+    # Save selected tracks
     np.save(sel_dir / "track_targets.npy", track_targets)
     np.save(sel_dir / "track_hit_indices.npy", track_hit_indices)
     np.save(sel_dir / "track_hit_offsets.npy", track_hit_offsets)
@@ -414,12 +373,20 @@ def process_shard(
         np.save(sel_dir / "acts_reco.npy", acts_reco_arr)
         np.save(sel_dir / "acts_dm_mask.npy", acts_dm_arr)
 
+    # Save track metadata (pt, vertex_primary) for tight selection filtering
+    if all_track_meta:
+        track_meta = np.stack(all_track_meta, axis=0)  # (N, 2): [pt, vertex_primary]
+    else:
+        track_meta = np.zeros((0, 2), dtype=np.float32)
+    np.save(sel_dir / "track_meta.npy", track_meta)
+
+    total_compact_hits = len(compact_hits)
+
     return {
         "n_events": n_events,
-        "n_hits": len(hits_arr),
-        "n_particles": len(parts_arr),
         "n_selected_tracks": n_selected,
-        "n_selected_hits": len(track_hit_indices),
+        "n_selected_hits": total_compact_hits,
+        "n_acts_double_matched": sum(all_track_acts_dm) if all_track_acts_dm else 0,
     }
 
 
@@ -429,33 +396,42 @@ def process_shard(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Preprocess ColliderML to memmap format")
-    parser.add_argument("--data-dir", type=str, default="/scratch/colliderml/p0",
+    parser = argparse.ArgumentParser(
+        description="Compact preprocess ColliderML to memmap format (selected track hits only)"
+    )
+    parser.add_argument("--data-dir", type=str,
+                        default="/eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data",
                         help="Root directory containing parquet subdirectories")
-    parser.add_argument("--output-dir", type=str, default="/scratch/colliderml/p0_preprocessed",
+    parser.add_argument("--output-dir", type=str,
+                        default="/eos/project/e/end-to-end-colliderml/data/p200_preprocessed_plus_qcd",
                         help="Output directory for preprocessed shards")
     parser.add_argument("--num-shards", type=int, default=-1,
                         help="Number of shards to process (-1 for all)")
+    parser.add_argument("--selection-file", type=str, default=None,
+                        help="Path to selection defaults YAML (default: P200 soft-scatter)")
     parser.add_argument("--selection", type=str, default=None,
                         help="JSON string of selection overrides")
     parser.add_argument("--particles-subdir", type=str,
-                        default="ttbar_pu0_particles_recorded_only")
+                        default="ttbar_pu200_particles_recorded_only")
     parser.add_argument("--hits-subdir", type=str,
-                        default="ttbar_pu0_tracker_hits")
+                        default="ttbar_pu200_tracker_hits")
     parser.add_argument("--num-workers", type=int, default=1,
                         help="Number of parallel workers (default: 1 = sequential)")
     parser.add_argument("--tracks-subdir", type=str,
-                        default="ttbar_pu0_tracks",
+                        default="ttbar_pu200_tracks",
                         help="Subdirectory name for ACTS reconstructed tracks parquet files")
-    parser.add_argument("--augment-acts", action="store_true",
-                        help="Load ACTS reconstructed tracks and store per-selected-track reco params and DM mask")
+    parser.add_argument("--no-acts", action="store_true",
+                        help="Disable ACTS augmentation (enabled by default)")
     args = parser.parse_args()
+    augment_acts = not args.no_acts
 
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    selection = dict(DEFAULT_SELECTION)
+    # Load selection defaults
+    sel_file = Path(args.selection_file) if args.selection_file else _SELECTION_FILE
+    selection = dict(load_selection_defaults(sel_file))
     if args.selection:
         selection.update(json.loads(args.selection))
 
@@ -463,7 +439,6 @@ def main():
     hits_dir = data_dir / args.hits_subdir
 
     # Support both flat (*.parquet) and nested HuggingFace dataset layouts
-    # (e.g. data/<name>/*.parquet)
     particle_files = sorted(particles_dir.glob("*.parquet"))
     if not particle_files:
         particle_files = sorted(particles_dir.rglob("*.parquet"))
@@ -476,7 +451,7 @@ def main():
     hf_by_name = {f.name: f for f in hits_files}
 
     tf_by_name: dict[str, Path] = {}
-    if args.augment_acts:
+    if augment_acts:
         tracks_dir = data_dir / args.tracks_subdir
         tracks_files_list = sorted(tracks_dir.glob("*.parquet"))
         if not tracks_files_list:
@@ -485,7 +460,7 @@ def main():
         if not tf_by_name:
             raise FileNotFoundError(
                 f"No tracks parquet files found under {tracks_dir}. "
-                "Check --tracks-subdir (e.g. 'ttbar_pu0_tracks')."
+                "Check --tracks-subdir (e.g. 'ttbar_pu200_tracks')."
             )
         print(f"Found {len(tf_by_name)} tracks parquet files for ACTS augmentation")
 
@@ -499,17 +474,16 @@ def main():
     if args.num_shards > 0:
         common = common[: args.num_shards]
 
-    print(f"Processing {len(common)} shards")
+    print(f"Processing {len(common)} shards (compact mode — selected track hits only)")
     print(f"Selection: {selection}")
     print(f"Output: {output_dir}")
     print(f"Workers: {args.num_workers}")
 
     totals = {
         "n_events": 0,
-        "n_hits": 0,
-        "n_particles": 0,
         "n_selected_tracks": 0,
         "n_selected_hits": 0,
+        "n_acts_double_matched": 0,
     }
 
     # Build job list, skipping already-completed shards
@@ -522,7 +496,7 @@ def main():
         if (shard_out / "selected_tracks" / "track_targets.npy").exists():
             n_skipped += 1
             continue
-        tracks_f = tf_by_name.get(shard_name) if args.augment_acts else None
+        tracks_f = tf_by_name.get(shard_name) if augment_acts else None
         jobs.append((pf_by_name[shard_name], hf_by_name[shard_name], shard_out, selection, tracks_f))
 
     if n_skipped:
@@ -531,13 +505,11 @@ def main():
     t0 = time.time()
 
     if args.num_workers <= 1:
-        # Sequential (original behaviour)
         for i, (pf, hf, shard_out, sel_cfg, tf) in enumerate(tqdm(jobs, desc="Processing shards")):
             stats = process_shard(pf, hf, shard_out, sel_cfg, tf)
             for k in totals:
                 totals[k] += stats[k]
     else:
-        # Parallel via ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=args.num_workers) as pool:
             futures = {
                 pool.submit(process_shard, pf, hf, shard_out, sel_cfg, tf): i
@@ -555,10 +527,11 @@ def main():
     # Write manifest
     manifest = {
         "num_shards": len(common),
+        "format": "compact",
         "selection": selection,
         "hit_feature_names": HIT_FEATURE_NAMES,
-        "particle_feature_names": PARTICLE_FEATURE_NAMES,
         "target_names": TARGET_NAMES,
+        "total_tracks": totals["n_selected_tracks"],
         "totals": totals,
         "processing_time_s": elapsed,
     }
@@ -566,14 +539,13 @@ def main():
         json.dump(manifest, f, indent=2)
 
     print(f"\n{'='*60}")
-    print(f"Preprocessing complete in {elapsed:.1f}s ({elapsed/60:.1f} min)")
-    print(f"  Events:          {totals['n_events']:>12,}")
-    print(f"  Hits:            {totals['n_hits']:>12,}")
-    print(f"  Particles:       {totals['n_particles']:>12,}")
-    print(f"  Selected tracks: {totals['n_selected_tracks']:>12,}")
-    print(f"  Selected hits:   {totals['n_selected_hits']:>12,}")
-    print(f"  Output:          {output_dir}")
-    print(f"  Manifest:        {output_dir / 'manifest.json'}")
+    print(f"Compact preprocessing complete in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    print(f"  Events:              {totals['n_events']:>12,}")
+    print(f"  Selected tracks:     {totals['n_selected_tracks']:>12,}")
+    print(f"  Selected hits:       {totals['n_selected_hits']:>12,}")
+    print(f"  ACTS double-matched: {totals['n_acts_double_matched']:>12,}")
+    print(f"  Output:              {output_dir}")
+    print(f"  Manifest:            {output_dir / 'manifest.json'}")
 
     # Auto-create split.json (90/5/5) if it doesn't already exist
     split_path = output_dir / "split.json"
