@@ -37,9 +37,18 @@ class CLI(LightningCLI):
     """CLI with implicit base config loading."""
 
     def add_arguments_to_parser(self, parser):
-        parser.default_config_files = [
-            str(Path(__file__).parent / "config" / "base.yaml")
-        ]
+        import sys
+        
+        # Determine the base config dynamically based on the provided config file
+        default_config = Path(__file__).parent / "config" / "base.yaml"
+        for i, arg in enumerate(sys.argv):
+            if arg in ("-c", "--config") and i + 1 < len(sys.argv):
+                config_path = Path(sys.argv[i + 1])
+                if (config_path.parent / "base.yaml").exists():
+                    default_config = config_path.parent / "base.yaml"
+                break
+
+        parser.default_config_files = [str(default_config)]
 
 
 def main():

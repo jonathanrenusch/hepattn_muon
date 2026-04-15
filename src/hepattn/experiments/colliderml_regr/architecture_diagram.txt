@@ -1,0 +1,114 @@
+
+  Track Parameter Regression with Bidirectional Mamba-2 SSM
+  =========================================================
+
+  Input: Raw detector hits (B tracks x N hits x 12 features)
+         [x, y, z, r, phi, theta, s, vol_id, layer_id, surf_id, detector, eta]
+
+         +------------------------------------------------------+
+         |            Min-Max Normalization  [0, 1]             |
+         +------------------------------------------------------+
+                                  |
+                                  v
+         +------------------------------------------------------+
+         |         Fourier Feature Encoding (7 scales)          |
+         |     12 feats x 7 scales x 2 (sin/cos) = 168 dims     |
+         +------------------------------------------------------+
+                                  |
+                     (B, N, 168)  v
+         +------------------------------------------------------+
+         |              Input Net  (Dense MLP)                  |
+         |          Linear(168,128) -> SiLU -> Linear(128,128)  |
+         +------------------------------------------------------+
+                                  |
+                     (B, N, 128)  v
+  ================================================================
+  ||        Bidirectional Mamba-2 Encoder  (8 layers)           ||
+  ||                                                            ||
+  ||  Layers 1-7: BidirectionalMambaLayer                       ||
+  ||  +------------------------------------------------------+  ||
+  ||  |                                                      |  ||
+  ||  |  x -----> RMSNorm -----+----> Mamba2 (fwd) ---+      |  ||
+  ||  |  |                     |                       |     |  ||
+  ||  |  |                     |             gate = sigmoid( |  ||
+  ||  |  |                     |               Linear(norm)) |  ||
+  ||  |  |                     |                       |     |  ||
+  ||  |  |                     +----> Mamba2 (bwd) -+  |     |  ||
+  ||  |  |                       (reversed seq)     |  |     |  ||
+  ||  |  |                                          v  v     |  ||
+  ||  |  |                    gate*fwd + (1-gate)*bwd        |  ||
+  ||  |  |                                  |                |  ||
+  ||  |  +------ residual skip connection --+                |  ||
+  ||  |                                                      |  ||
+  ||  +------------------------------------------------------+  ||
+  ||                          x 7                               ||
+  ||                                                            ||
+  ||  Layer 8: BidirectionalMambaStateLayer                     ||
+  ||  +------------------------------------------------------+  ||
+  ||  |  Same as above, but uses Mamba2WithState              | ||
+  ||  |  -> Extracts final SSM hidden states from both dirs   | ||
+  ||  |                                                       | ||
+  ||  |  Outputs:                                             | ||
+  ||  |    seq_out:      (B, N, 128)   [not used downstream]  | ||
+  ||  |    hidden_state: (B, 16384)    [8192 fwd + 8192 bwd]  | ||
+  ||  +------------------------------------------------------+  ||
+  ||                                                            ||
+  ||  Final RMSNorm(128)                                        ||
+  ================================================================
+                                  |
+                    (B, 16384)    v     SSM state vector
+                       +------- split -------+
+                       |                     |
+              (B, 8192) fwd          (B, 8192) bwd
+                       |                     |
+                       v                     v
+        +--------------------+  +--------------------+
+        |  Fwd State Head    |  |  Bwd State Head    |
+        |  (Dense MLP)       |  |  (Dense MLP)       |
+        |  Lin(8192,192)     |  |  Lin(8192,192)     |
+        |  -> SiLU           |  |  -> SiLU           |
+        |  -> Lin(192,128)   |  |  -> Lin(192,128)   |
+        +--------------------+  +--------------------+
+                       |                     |
+              (B, 128) v                     v (B, 128)
+                       +--- concatenate -----+
+                                  |
+                     (B, 256)     v
+         +------------------------------------------------------+
+         |             Output Head  (Dense MLP)                 |
+         |          Linear(256,128) -> SiLU -> Linear(128,30)   |
+         +------------------------------------------------------+
+                                  |
+                      (B, 30)     v
+         +------------------------------------------------------+
+         |             TrackParameterLoss                       |
+         |                                                      |
+         |  Splits 30 outputs into 5 track parameters:          |
+         |                                                      |
+         |    d0    [0:7]   Quantile regression (7 quantiles)   |
+         |    z0    [7:14]  Quantile regression (7 quantiles)   |
+         |    phi  [14:16]  Circular loss (sin/cos -> atan2)    |
+         |    theta [16:23] Eta-quantile regr. (7 quantiles)    |
+         |    qop  [23:30]  Quantile regression (7 quantiles)   |
+         |                                                      |
+         |  Quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]  |
+         |  qop tail weight: 1.5 (up-weight high-|qop| tracks)  |
+         +------------------------------------------------------+
+                                  |
+                                  v
+         Output: {d0, z0, phi, theta, q/p} per-track predictions
+                 with full quantile uncertainty estimates
+
+
+  ======================== Key Numbers =========================
+
+  Mamba-2 SSM config:     dim=128, d_state=32, expand=2,
+                          headdim=32, d_conv=4, ngroups=1
+  Internal SSM dim:       128 x 2 (expand) = 256
+  SSM heads:              256 / 32 (headdim) = 8 heads
+  State per direction:    8 heads x 32 (headdim) x 32 (d_state)
+                          = 8192
+
+  Fine-tuning:            AdamW, cosine schedule
+                          LR: 1e-5 -> 1e-3 -> 1e-6
+                          From checkpoint @ epoch 49

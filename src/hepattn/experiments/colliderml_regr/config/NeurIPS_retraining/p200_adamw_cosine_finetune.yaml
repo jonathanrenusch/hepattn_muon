@@ -1,0 +1,146 @@
+# =============================================================================
+# Fine-tune v2 — AdamW cosine, 19-quantile, from Q19 from-scratch checkpoint
+# =============================================================================
+# Switches from Lion to AdamW for fine-tuning.  AdamW maintains per-parameter
+# adaptive second-moment estimates which are beneficial when fine-tuning a
+# partially converged model.
+#
+# Changes vs previous 7-quantile config (informed by quantile alignment study):
+#   - 19 quantiles (every 5th percentile) for dense CDF estimation
+#   - theta uses quantile_eta (eta space) with norm range [-4,4]
+#   - z0 norm range widened: [-200,200] to avoid tail clipping
+#   - Differentiated loss weights: d0=0.5, theta=5.0, qop=3.0
+#   - qop_tail_weight=1.5 for better high-curvature track coverage
+#
+# Usage:
+#   python train.py fit --config config/NeurIPS_retraining/p200_adamw_cosine_finetune.yaml
+#
+# NOTE: Do NOT pass --ckpt_path; weights are loaded via pretrained_ckpt_path.
+# =============================================================================
+
+trainer:
+  devices: -1 
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-FT-v2-Q19-AdamWCosine-p200
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  # Load weights only — optimizer and LR schedule start fresh.
+  # Point this to the best checkpoint from the Q19 from-scratch run
+  # (alt_study4_direct_quantile_eta.yaml).
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_Q19_FROM_SCRATCH.ckpt
+  optimizer: AdamW
+  lrs_config:
+    initial: 1.0e-05     # linear warmup start
+    max: 1.0e-3         # AdamW aggressive fine-tune peak (above from-scratch 3e-4 for warm restart)
+    end: 1.0e-06         # very low final LR — squeeze out the last bits
+    pct_start: 0.10     # 5-epoch warmup
+    weight_decay: 0.01   # AdamW-style: moderate WD with adaptive LR
+    betas: [0.9, 0.95]   # reduced beta2 for faster gradient variance adaptation
+    skip_scheduler: false
+    schedule: cosine
+
+  model:
+    init_args:
+      # Architecture must be identical to the from-scratch Q19 checkpoint
+      dim: 128
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      # Loss: 19-quantile with eta-space theta, differentiated weights
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5 # Only set those if you are dealing with very soft tracks
+          qop_scale: 2.0 # Only set those if you are dealing with very soft tracks
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            phi:
+              type: circular
+              weight: 10.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 5.0
+              norm_min: -4.0
+              norm_max: 4.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_preprocessed_plus_qcd
+  load_acts: true
+  batch_size: 30000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

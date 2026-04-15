@@ -22,3 +22,22 @@ def load_selection_defaults(path: str | Path | None = None) -> dict:
     with open(p) as f:
         cfg = yaml.safe_load(f)
     return cfg["selection"]
+
+
+def load_selection_variant(path: str | Path, variant: str) -> dict:
+    """Load a named selection variant from a multi-variant YAML file.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to a YAML file with top-level keys as variant names.
+    variant : str
+        Which variant to load (e.g. ``"loose"``, ``"core"``).
+    """
+    p = Path(path)
+    with open(p) as f:
+        cfg = yaml.safe_load(f)
+    if variant not in cfg:
+        available = ", ".join(sorted(cfg.keys()))
+        raise KeyError(f"Variant '{variant}' not found in {p}. Available: {available}")
+    return dict(cfg[variant])

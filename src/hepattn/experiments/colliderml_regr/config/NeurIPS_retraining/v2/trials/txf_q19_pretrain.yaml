@@ -1,0 +1,106 @@
+# =============================================================================
+# Transformer (flash-attn2 + learned register token) + Q19 — pretrain on p0
+# =============================================================================
+# Architecture:
+#   - 12-layer Transformer at dim=192 with SiLU FFN (4x hidden_dim_scale)
+#   - attn_type=flash (flash-attn2), no window_size (21 tokens, full attention)
+#   - Single learned register token (managed by EncoderWithCLS)
+# Parameter budget target ~5.2M — within 5% of the SSM configs.
+# =============================================================================
+
+trainer:
+  devices: [3]
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-TXF-Q19-pretrain
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      # Transformer uses a wider model (192) to approximately match the
+      # SSM param budget at num_layers=12.
+      dim: 192
+      pool: register_token
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.transformer_encoder.EncoderWithCLS
+        init_args:
+          dim: 192
+          num_layers: 12
+          # flash-varlen supports kv masking (unpads on the fly); plain flash does not.
+          attn_type: flash-varlen
+          norm: RMSNorm
+          value_residual: false
+          # Stabilisation: QK-norm prevents attention logit explosion,
+          # layer_scale (CaiT) soft-starts residual contributions,
+          # drop_path adds mild stochastic depth regularisation.
+          qkv_norm: true
+          layer_scale: 1.0e-5
+          drop_path: 0.05
+          # num_heads=6 → head_dim=192/6=32, matching the SSM headdim=32 so
+          # the Transformer and SSM have the same per-head capacity.
+          attn_kwargs:
+            num_heads: 6
+          dense_kwargs:
+            # hidden_dim_scale=4 → conventional 4x FFN expansion.
+            # Activation defaults to nn.SiLU() inside Dense, matching the SSM.
+            hidden_dim_scale: 4
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            phi:
+              type: circular
+              weight: 10.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 5.0
+              norm_min: -3.1
+              norm_max: 3.1
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -5.5
+              norm_max: 5.5
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 1.5e-04
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+    schedule: cosine
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_loose_pretrain
+  batch_size: 2048
+  num_workers: 8

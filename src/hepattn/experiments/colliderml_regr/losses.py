@@ -12,10 +12,18 @@ Supported loss types
     Smooth-L1 in quantile-spline-normalised ``[0, 1]`` space.
 ``quantile``
     Pinball (quantile) loss directly on physical / normalised targets.
+``quantile_eta``
+    Pinball loss in pseudorapidity space (for θ).
 ``spline_quantile``
     Pinball loss in spline-normalised space.
 ``circular``
     ``SmoothL1(sin) + SmoothL1(cos)`` for angular parameters (phi).
+``gaussian``
+    Gaussian NLL on normalised targets, outputs ``(mu, log_var)``.
+``gaussian_eta``
+    Gaussian NLL in η-space (for θ), outputs ``(mu, log_var)``.
+``cosine_phi``
+    ``1 - cos(phi_pred - phi_true)`` via (sin, cos) outputs for stability.
 
 All individual components expose ``.forward(pred, target) → loss``
 and ``.predict(raw_output) → physical_value``.
@@ -23,6 +31,7 @@ and ``.predict(raw_output) → physical_value``.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -519,14 +528,21 @@ class CircularPhiLoss(nn.Module):
         Loss weight.
     beta : float
         Smooth-L1 transition point.
+    reduction : str
+        ``"mean"`` (default) returns scalar; ``"none"`` returns the
+        per-sample ``weight * loss_i`` tensor with ``sample_weights``
+        multiplied in but not normalised.  Used by batch-trimming.
     """
 
     num_outputs: int = 2
 
-    def __init__(self, weight: float = 1.0, beta: float = 1.0):
+    def __init__(self, weight: float = 1.0, beta: float = 1.0, reduction: str = "mean"):
         super().__init__()
         self.weight = weight
         self.beta = beta
+        if reduction not in ("mean", "none"):
+            raise ValueError(f"reduction must be 'mean' or 'none', got {reduction!r}")
+        self.reduction = reduction
 
     def forward(self, pred: Tensor, target: Tensor, sample_weights: Tensor | None = None) -> Tensor:
         """pred: (N, 2) with [sin, cos];  target: (N,) with phi in radians."""
@@ -538,6 +554,252 @@ class CircularPhiLoss(nn.Module):
             F.smooth_l1_loss(sin_pred, sin_true, beta=self.beta, reduction="none")
             + F.smooth_l1_loss(cos_pred, cos_true, beta=self.beta, reduction="none")
         )
+
+        if self.reduction == "none":
+            if sample_weights is not None:
+                per_sample = sample_weights * per_sample
+            return self.weight * per_sample
+
+        if sample_weights is not None:
+            loss = (sample_weights * per_sample).sum() / sample_weights.sum()
+        else:
+            loss = per_sample.mean()
+        return self.weight * loss
+
+    def predict(self, raw: Tensor) -> Tensor:
+        """Recover phi from (sin, cos) outputs."""
+        return torch.atan2(raw[..., 0], raw[..., 1])
+
+
+# ============================================================================
+# Gaussian NLL losses (for the "Gaussian" loss family — sharpens core
+# resolution at the cost of the quantile loss's tail focus)
+# ============================================================================
+
+
+class GaussianParameterLoss(nn.Module):
+    """Gaussian negative log-likelihood on linearly normalised targets.
+
+    The model outputs ``(mu, log_var)`` per parameter.  Loss is the standard
+    Gaussian NLL with the constant term dropped (irrelevant for gradients)::
+
+        per_sample = 0.5 * (exp(-log_var) * (target_norm - mu)**2 + log_var)
+
+    Using ``log_var`` instead of ``var`` guarantees positive variance without
+    clamping and prevents divide-by-zero / NaN gradient explosions.
+
+    Targets are linearly normalised to ``[-1, 1]`` using ``norm_min`` /
+    ``norm_max`` before the NLL is computed; predictions are denormalised
+    back to physical space.  Analytic quantile predictions are available via
+    ``predict_quantiles(raw, quantiles)``.
+
+    Parameters
+    ----------
+    norm_min : float
+        Lower bound of the physical range for linear normalisation.
+    norm_max : float
+        Upper bound of the physical range for linear normalisation.
+    weight : float
+        Multiplicative weight applied to this parameter's loss.
+    log_var_clamp : float
+        Symmetric clamp applied to ``log_var`` inside the NLL.  Protects
+        against ``exp(-log_var)`` overflow under sharp loss-landscape
+        perturbations (e.g. SAM ascent step) which can otherwise push
+        ``log_var`` arbitrarily negative → NaN.  Default ``5.0`` limits
+        σ_min to exp(-2.5) ≈ 0.08 in normalised space, preventing the
+        catastrophic exp(8) ≈ 3000 multiplier that caused gradient spikes
+        with the previous default of 8.0.
+    reduction : str
+        ``"mean"`` (default): return scalar, current behaviour.
+        ``"none"``: return per-sample ``weight * per_sample`` with shape
+        ``(N,)``, with ``sample_weights`` multiplied in but **not
+        normalised**.  Used by batch-trimming to rank samples.
+    """
+
+    num_outputs: int = 2
+
+    def __init__(
+        self,
+        norm_min: float = -1.0,
+        norm_max: float = 1.0,
+        weight: float = 1.0,
+        log_var_clamp: float = 5.0,
+        reduction: str = "mean",
+    ):
+        super().__init__()
+        self.weight = weight
+        self.log_var_clamp = float(log_var_clamp)
+        if reduction not in ("mean", "none"):
+            raise ValueError(f"reduction must be 'mean' or 'none', got {reduction!r}")
+        self.reduction = reduction
+        self.register_buffer("norm_min", torch.tensor(norm_min, dtype=torch.float32))
+        self.register_buffer("norm_max", torch.tensor(norm_max, dtype=torch.float32))
+
+    def _nll(self, mu: Tensor, log_var: Tensor, target_norm: Tensor) -> Tensor:
+        """Full Gaussian NLL including the 0.5·log(2π) constant.
+
+        Including the constant keeps the loss non-negative when the model
+        is well-calibrated (σ ≈ residual std), which prevents confusing
+        negative loss values on the dashboard and makes the loss landscape
+        smoother near the optimum.
+        """
+        # Clamp log_var to prevent exp(-log_var) overflow.  The clamp is
+        # placed inside the same autograd-tracked expression so that the
+        # gradient is zero outside the clamp region (saturated), which
+        # is the desired behaviour — we do NOT want the optimizer to
+        # keep driving log_var past the clamp.
+        log_var = log_var.clamp(-self.log_var_clamp, self.log_var_clamp)
+        return 0.5 * (torch.exp(-log_var) * (target_norm - mu) ** 2 + log_var + math.log(2.0 * math.pi))
+
+    def forward(self, pred: Tensor, target: Tensor, sample_weights: Tensor | None = None) -> Tensor:
+        """pred: (N, 2) with [mu, log_var];  target: (N,) in physical units."""
+        mu = pred[..., 0]
+        log_var = pred[..., 1]
+        t_norm = _linear_normalise(target, self.norm_min, self.norm_max)
+        per_sample = self._nll(mu, log_var, t_norm)
+
+        if self.reduction == "none":
+            # Per-sample form: apply sample_weights as a multiplier (not a
+            # normaliser) so downstream code can sum across parameters.
+            if sample_weights is not None:
+                per_sample = sample_weights * per_sample
+            return self.weight * per_sample
+
+        if sample_weights is not None:
+            loss = (sample_weights * per_sample).sum() / sample_weights.sum()
+        else:
+            loss = per_sample.mean()
+        return self.weight * loss
+
+    def predict(self, raw: Tensor) -> Tensor:
+        """Return the mean (``mu``) denormalised to physical units."""
+        return _linear_denormalise(raw[..., 0], self.norm_min, self.norm_max)
+
+    def predict_quantiles(self, raw: Tensor, quantiles: list[float] | Tensor | None = None) -> Tensor:
+        """Analytic quantiles from (mu, log_var).
+
+        For a Gaussian, ``Q(τ) = μ + σ · Φ⁻¹(τ)``.  The inverse CDF is
+        computed via ``Φ⁻¹(τ) = √2 · erfinv(2τ - 1)``.  Both ``mu`` and
+        ``sigma`` are converted to physical units before the quantile is
+        formed, so the return value is in physical space.
+
+        Parameters
+        ----------
+        raw : Tensor
+            Model output of shape ``(N, 2)`` with ``[mu, log_var]``.
+        quantiles : list[float] | Tensor | None
+            Quantile levels to sample.  Defaults to the standard
+            ``[0.05, 0.25, 0.5, 0.75, 0.95]`` five-point summary.
+        """
+        if quantiles is None:
+            quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
+        if not isinstance(quantiles, Tensor):
+            quantiles = torch.tensor(list(quantiles), dtype=raw.dtype, device=raw.device)
+
+        mu_phys = _linear_denormalise(raw[..., 0], self.norm_min, self.norm_max)
+        # σ is in normalised space; the linear de-normalisation scales it by
+        # (norm_max - norm_min) / 2 (same scale factor applied to every coord)
+        half_range = 0.5 * (self.norm_max - self.norm_min)
+        sigma_phys = torch.exp(0.5 * raw[..., 1]) * half_range
+        z = math.sqrt(2.0) * torch.erfinv(2.0 * quantiles - 1.0)  # Φ⁻¹(τ)
+        return mu_phys.unsqueeze(-1) + sigma_phys.unsqueeze(-1) * z  # (N, Q)
+
+
+class GaussianEtaLoss(GaussianParameterLoss):
+    """Gaussian NLL in pseudorapidity (η) space for the θ parameter.
+
+    Mirrors :class:`EtaQuantileLoss`: targets arrive as θ ∈ (0, π), are
+    converted to η = -ln(tan(θ/2)), normalised to [-1, 1] in η units, and
+    the Gaussian NLL is computed in that space.  **Predictions are returned
+    in θ space** (via the inverse η→θ map) so downstream metrics remain
+    comparable to the θ-native quantile loss.
+    """
+
+    num_outputs: int = 2
+
+    def forward(self, pred: Tensor, target: Tensor, sample_weights: Tensor | None = None) -> Tensor:
+        # Convert θ → η once and delegate to the parent's NLL on the η-space target.
+        return super().forward(pred, _theta_to_eta(target), sample_weights)
+
+    def predict(self, raw: Tensor) -> Tensor:
+        """Return the mean η denormalised and converted back to θ."""
+        eta_pred = _linear_denormalise(raw[..., 0], self.norm_min, self.norm_max)
+        return _eta_to_theta(eta_pred)
+
+    def predict_quantiles(self, raw: Tensor, quantiles: list[float] | Tensor | None = None) -> Tensor:
+        """Analytic quantiles in θ space.
+
+        Compute quantiles in η space (where the Gaussian lives), then apply
+        the monotonic η→θ map.  Note: η→θ is monotonically decreasing, so the
+        resulting θ quantiles are in *reverse* order.  We sort descending to
+        keep the returned tensor monotonically increasing in θ.
+        """
+        if quantiles is None:
+            quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
+        if not isinstance(quantiles, Tensor):
+            quantiles = torch.tensor(list(quantiles), dtype=raw.dtype, device=raw.device)
+
+        mu_eta = raw[..., 0]  # in normalised η-space
+        log_var = raw[..., 1]
+        sigma_norm = torch.exp(0.5 * log_var)
+        z = math.sqrt(2.0) * torch.erfinv(2.0 * quantiles - 1.0)
+        # quantiles in normalised η-space: μ + σ · z
+        eta_norm_q = mu_eta.unsqueeze(-1) + sigma_norm.unsqueeze(-1) * z  # (N, Q)
+        eta_phys_q = _linear_denormalise(eta_norm_q, self.norm_min, self.norm_max)
+        theta_q = _eta_to_theta(eta_phys_q)  # (N, Q), decreasing in q
+        # Sort to ascending θ order so downstream code sees monotonic quantiles.
+        return torch.sort(theta_q, dim=-1).values
+
+
+class CosinePhiLoss(nn.Module):
+    """Angular loss ``1 - cos(phi_pred - phi_true)`` via (sin, cos) outputs.
+
+    The model outputs ``(sin_raw, cos_raw)``.  These are unit-normalised
+    inside the forward (divided by ``sqrt(sin² + cos²)``) to prevent the
+    unbounded-drift failure mode of direct-φ prediction.  The loss is::
+
+        1 - cos(phi_pred - phi_true)
+            = 1 - (sin_p · sin(phi_true) + cos_p · cos(phi_true))
+
+    which is naturally wraparound-safe.  Recovery: ``φ = atan2(sin, cos)``.
+    Uses ``num_outputs=2`` to match :class:`CircularPhiLoss` so the rest of
+    the metric / slice machinery does not need to branch on loss type.
+
+    Parameters
+    ----------
+    weight : float
+        Loss weight.
+    reduction : str
+        ``"mean"`` (default) returns scalar; ``"none"`` returns the
+        per-sample ``weight * (1 - cos(Δφ))`` tensor with ``sample_weights``
+        multiplied in but not normalised.  Used by batch-trimming.
+    """
+
+    num_outputs: int = 2
+
+    def __init__(self, weight: float = 1.0, reduction: str = "mean"):
+        super().__init__()
+        self.weight = weight
+        if reduction not in ("mean", "none"):
+            raise ValueError(f"reduction must be 'mean' or 'none', got {reduction!r}")
+        self.reduction = reduction
+
+    def forward(self, pred: Tensor, target: Tensor, sample_weights: Tensor | None = None) -> Tensor:
+        """pred: (N, 2) with [sin, cos];  target: (N,) with phi in radians."""
+        sin_p = pred[..., 0]
+        cos_p = pred[..., 1]
+        # Unit-normalise to the circle; small epsilon guards against zero norm.
+        norm = torch.sqrt(sin_p * sin_p + cos_p * cos_p + 1e-8)
+        sin_p = sin_p / norm
+        cos_p = cos_p / norm
+        # 1 - cos(pred - target) = 1 - (sin_p sin_t + cos_p cos_t)
+        per_sample = 1.0 - (sin_p * torch.sin(target) + cos_p * torch.cos(target))
+
+        if self.reduction == "none":
+            if sample_weights is not None:
+                per_sample = sample_weights * per_sample
+            return self.weight * per_sample
+
         if sample_weights is not None:
             loss = (sample_weights * per_sample).sum() / sample_weights.sum()
         else:
@@ -560,6 +822,9 @@ LOSS_REGISTRY: dict[str, type] = {
     "quantile_eta": EtaQuantileLoss,
     "spline_quantile": SplineQuantileLoss,
     "circular": CircularPhiLoss,
+    "gaussian": GaussianParameterLoss,
+    "gaussian_eta": GaussianEtaLoss,
+    "cosine_phi": CosinePhiLoss,
 }
 
 
@@ -648,6 +913,7 @@ class TrackParameterLoss(nn.Module):
         pred: Tensor,
         targets: dict[str, Tensor],
         valid_mask: Tensor | None = None,
+        trim_mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Compute per-parameter losses.
 
@@ -661,6 +927,16 @@ class TrackParameterLoss(nn.Module):
         valid_mask : Tensor | None
             Boolean mask ``(B,)`` selecting valid tracks.  If given,
             both ``pred`` and ``targets`` are masked before computing losses.
+        trim_mask : Tensor | None
+            Optional per-sample weight mask of shape ``(N_valid,)``
+            (i.e. same size as ``valid_mask.sum()`` if a valid_mask is
+            given, else same size as ``pred.shape[0]``).  Used by
+            batch-trimming: a float tensor of 0/1 values where 0 drops
+            the sample from the loss and 1 keeps it with its full
+            weight.  The trim mask is multiplied into ``sample_weights``
+            so that the weighted-mean normalisation denominator is
+            ``(sample_weights * trim_mask).sum()`` — i.e. a proper mean
+            over retained samples, not a scaled mean over all samples.
 
         Returns
         -------
@@ -683,6 +959,15 @@ class TrackParameterLoss(nn.Module):
             w = 1.0 + self.qop_tail_weight * (qop_vals.abs() / self.qop_scale).clamp(max=1.0)
             sample_weights = w / w.mean()
 
+        # Fold the trim_mask into sample_weights (creating one if needed).
+        # The sub-losses use ``sum(sw * per) / sum(sw)`` so a hard 0/1 mask
+        # acts as a dropout filter on the batch.
+        if trim_mask is not None:
+            if sample_weights is None:
+                sample_weights = trim_mask
+            else:
+                sample_weights = sample_weights * trim_mask
+
         for name in self.parameter_order:
             start, end = self._output_slices[name]
             p = pred[..., start:end] if end - start > 1 else pred[..., start]
@@ -702,6 +987,88 @@ class TrackParameterLoss(nn.Module):
 
         losses["total"] = total
         return losses
+
+    def per_sample_total(
+        self,
+        pred: Tensor,
+        targets: dict[str, Tensor],
+        valid_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Return per-sample weighted sum of the five parameter losses.
+
+        Shape: ``(N_valid,)`` — one scalar per *kept* track, which is the
+        quantity a batch-trimming rule should rank on.  The per-parameter
+        loss weights from the YAML config are applied (so this matches the
+        objective the optimizer sees), but the ``qop_tail_weight`` meta
+        sample weights are **deliberately NOT** applied — those are an
+        orthogonal curvature re-weighting and would bias the trimmer
+        toward keeping high-|qop| tracks, which is the opposite of what
+        we want.
+
+        Each sub-loss is invoked in its ``reduction="none"`` path, which
+        requires that every loss class used in the config supports it.
+        The currently supported ones are ``gaussian``, ``gaussian_eta``,
+        and ``cosine_phi``.  If a quantile loss is plugged in later a
+        ``reduction`` argument will have to be added there too — we fail
+        loudly with a clear error rather than silently returning a wrong
+        aggregate.
+
+        Parameters
+        ----------
+        pred : Tensor
+            Raw model output ``(B, total_outputs)``.
+        targets : dict[str, Tensor]
+            Per-parameter targets, each ``(B,)``.
+        valid_mask : Tensor | None
+            Boolean mask selecting valid tracks.
+
+        Returns
+        -------
+        Tensor
+            Shape ``(N_valid,)`` — per-sample aggregate loss, detached
+            from the autograd graph (safe to feed into ``kthvalue``).
+        """
+        device = pred.device
+
+        # Determine N_valid for the zero-init accumulator.
+        n_valid = (
+            int(valid_mask.sum().item())
+            if valid_mask is not None
+            else int(pred.shape[0])
+        )
+        if n_valid == 0:
+            return torch.zeros(0, device=device)
+
+        aggregate = torch.zeros(n_valid, device=device)
+
+        for name in self.parameter_order:
+            sub_loss = self.losses[name]
+            if not hasattr(sub_loss, "reduction"):
+                raise RuntimeError(
+                    f"per_sample_total: loss class {type(sub_loss).__name__} "
+                    f"for parameter {name!r} does not support reduction='none'. "
+                    "Batch trimming requires per-sample losses on every parameter."
+                )
+
+            start, end = self._output_slices[name]
+            p = pred[..., start:end] if end - start > 1 else pred[..., start]
+            t = targets[name]
+            if valid_mask is not None:
+                p = p[valid_mask]
+                t = t[valid_mask]
+            if t.numel() == 0:
+                continue
+
+            prev = sub_loss.reduction
+            sub_loss.reduction = "none"
+            try:
+                per_sample = sub_loss(p, t, sample_weights=None)
+            finally:
+                sub_loss.reduction = prev
+
+            aggregate = aggregate + per_sample
+
+        return aggregate.detach()
 
     def predict(
         self,
@@ -733,13 +1100,19 @@ class TrackParameterLoss(nn.Module):
         """Return full quantile predictions (for quantile-based losses only).
 
         For non-quantile parameters the single point prediction is returned.
+        Gaussian losses (``GaussianParameterLoss`` / ``GaussianEtaLoss``)
+        expose an analytic ``predict_quantiles`` from ``(mu, log_var)`` and are
+        therefore included in the dispatch.
         """
         preds: dict[str, Tensor] = {}
         for name in self.parameter_order:
             start, end = self._output_slices[name]
             raw = pred[..., start:end]
             loss_fn = self.losses[name]
-            if isinstance(loss_fn, (QuantileLoss, EtaQuantileLoss, SplineQuantileLoss)):
+            if isinstance(
+                loss_fn,
+                (QuantileLoss, EtaQuantileLoss, SplineQuantileLoss, GaussianParameterLoss),
+            ):
                 preds[name] = loss_fn.predict_quantiles(raw)
             else:
                 preds[name] = loss_fn.predict(raw)

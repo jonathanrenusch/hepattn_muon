@@ -1,0 +1,98 @@
+# =============================================================================
+# Alt Study 4 — 19-Quantile Regression with theta in eta space (from scratch)
+# =============================================================================
+# Regresses theta via pseudorapidity (eta = -ln(tan(theta/2))) for more
+# uniform distribution in loss space.  All predictions and logged metrics
+# (MAE, precision) are in theta space for direct comparison.
+#
+# Changes vs previous 7-quantile config (informed by quantile alignment study):
+#   - 19 quantiles (every 5th percentile) for dense CDF estimation
+#   - d0 norm range widened: [-1,1] → [-5,5] to cover full data range
+#   - z0 norm range widened: [-150,150] → [-200,200] to avoid tail clipping
+#   - theta eta norm range widened: [-3,3] → [-4,4] for forward-region headroom
+#   - qop norm range widened: [-2,2] → [-5,5] (data extends to ±4.9)
+#   - Differentiated loss weights: d0=0.5, theta=5.0, qop=3.0
+#   - qop_tail_weight=1.5 for better high-curvature track coverage
+#
+# Usage:  python train.py fit --config config/NeurIPS_retraining/alt_study4_direct_quantile_eta.yaml
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-Alt-Study4-Q19-Eta
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      # --- Alt architecture overrides (from hit-filtering project) ---
+      dim: 128
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      # --- Loss ---
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -4.0
+              norm_max: 4.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+data:
+  batch_size: 2048
+  num_workers: 8

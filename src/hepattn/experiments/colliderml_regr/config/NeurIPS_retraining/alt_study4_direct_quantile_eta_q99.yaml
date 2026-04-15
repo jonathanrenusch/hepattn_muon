@@ -1,0 +1,127 @@
+# =============================================================================
+# Alt Study 4 — 99-Quantile Regression with theta in eta space (from scratch)
+# =============================================================================
+# EXPERIMENTAL: Full GEFCom-style 99-percentile CDF estimation.
+#
+# 99 quantiles (tau=0.01..0.99) per quantile-enabled parameter gives the
+# densest possible discrete CDF representation.  Total model outputs:
+# 4×99 + 2(phi) = 398 — significantly larger output head than the 19-quantile
+# variant (78 outputs).  May require a wider output_head_hidden_layers.
+#
+# Same norm ranges, weights, and architecture as the 19-quantile config.
+#
+# Usage:  python train.py fit --config config/NeurIPS_retraining/alt_study4_direct_quantile_eta_q99.yaml
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-Alt-Study4-Q99-Eta
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      # --- Alt architecture overrides (from hit-filtering project) ---
+      dim: 128
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      # Wider output head to handle 398 outputs
+      output_head_hidden_layers: [256]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      # --- Loss ---
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                          0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20,
+                          0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.30,
+                          0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.40,
+                          0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48, 0.49, 0.50,
+                          0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60,
+                          0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.68, 0.69, 0.70,
+                          0.71, 0.72, 0.73, 0.74, 0.75, 0.76, 0.77, 0.78, 0.79, 0.80,
+                          0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.89, 0.90,
+                          0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                          0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20,
+                          0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.30,
+                          0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.40,
+                          0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48, 0.49, 0.50,
+                          0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60,
+                          0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.68, 0.69, 0.70,
+                          0.71, 0.72, 0.73, 0.74, 0.75, 0.76, 0.77, 0.78, 0.79, 0.80,
+                          0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.89, 0.90,
+                          0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -4.0
+              norm_max: 4.0
+              quantiles: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                          0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20,
+                          0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.30,
+                          0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.40,
+                          0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48, 0.49, 0.50,
+                          0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60,
+                          0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.68, 0.69, 0.70,
+                          0.71, 0.72, 0.73, 0.74, 0.75, 0.76, 0.77, 0.78, 0.79, 0.80,
+                          0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.89, 0.90,
+                          0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                          0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20,
+                          0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.30,
+                          0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.40,
+                          0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48, 0.49, 0.50,
+                          0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60,
+                          0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.68, 0.69, 0.70,
+                          0.71, 0.72, 0.73, 0.74, 0.75, 0.76, 0.77, 0.78, 0.79, 0.80,
+                          0.81, 0.82, 0.83, 0.84, 0.85, 0.86, 0.87, 0.88, 0.89, 0.90,
+                          0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
+
+data:
+  batch_size: 2048
+  num_workers: 8

@@ -18,7 +18,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-Alt-Study4-Quantile-Eta-SmallModel
+      name: TRK-Alt-Study4-Quantile-Eta-SmallBatch
       offline_directory: logs/comet_offline
 
 model:
@@ -36,15 +36,15 @@ model:
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
         init_args:
-          num_layers: 4
+          num_layers: 8
           dim: 128
-          d_state: 16
+          d_state: 32
           d_conv: 4
           expand: 2
           headdim: 32
           ngroups: 1
           chunk_size: 256
-          norm: LayerNorm
+          norm: RMSNorm
           dropout: 0.0
       # --- Loss ---
       loss_module:
@@ -70,13 +70,13 @@ model:
               beta: 0.01
             theta:
               type: quantile_eta
-              weight: 10.0
+              weight: 1.0
               norm_min: -3.0
               norm_max: 3.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             qop:
               type: quantile
-              weight: 5.0
+              weight: 1.0
               norm_min: -2.0
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]

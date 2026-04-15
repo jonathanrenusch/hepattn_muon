@@ -29,7 +29,14 @@
 #   ./parallel_copy_to_scratch.sh p0 --raw        # copy p0 raw parquets instead
 #   ./parallel_copy_to_scratch.sh p200            # copy p200 raw parquets
 #   ./parallel_copy_to_scratch.sh p200_compact    # copy p200 compact preprocessed
-#   ./parallel_copy_to_scratch.sh all             # copy p0 preprocessed + p200 raw + p200 compact
+#
+#   # NeurIPS dataset pairs (pretrain on p0 + finetune on p200):
+#   ./parallel_copy_to_scratch.sh p200_datasets              # all 4 pairs = 8 datasets
+#   ./parallel_copy_to_scratch.sh p200_datasets loose        # loose pair only (2 datasets)
+#   ./parallel_copy_to_scratch.sh p200_datasets core_kf_hits # core_kf_hits pair only
+#   ./parallel_copy_to_scratch.sh p200_datasets loose core   # loose + core pairs
+#
+#   ./parallel_copy_to_scratch.sh all             # copy everything
 #   ./parallel_copy_to_scratch.sh p0 --jobs 30    # use 30 parallel jobs
 #   ./parallel_copy_to_scratch.sh p0 --dry-run    # show what would be copied
 #
@@ -50,6 +57,7 @@ P0_PREPROCESSED_SRC="/eos/project/e/end-to-end-muon-tracking/tracking/colliderml
 P0_RAW_SRC="/eos/project/e/end-to-end-muon-tracking/tracking/colliderml/p0/CERN__ColliderML-Release-1"
 P200_SRC="/eos/project/n/ngt2-4/data/ColliderML-Release-1.old/data"
 P200_COMPACT_SRC="/eos/project/e/end-to-end-colliderml/data/p200_preprocessed_plus_qcd"
+P200_DATASETS_BASE="/eos/project/e/end-to-end-colliderml/data/NeurIPS_retraining"
 
 # ── Target layout ──
 P0_PREPROCESSED_DST="${SCRATCH}/colliderml/p0/p0_preprocessed"
@@ -57,9 +65,27 @@ P0_RAW_DST="${SCRATCH}/colliderml/p0"
 P200_DST="${SCRATCH}/colliderml/p200"
 P200_COMPACT_DST="${SCRATCH}/colliderml/p200_preprocessed_plus_qcd"
 
+# ── NeurIPS dataset pair variants (pretrain on p0 + finetune on p200) ──
+ALL_PAIR_VARIANTS=(loose core core_kf_matched core_kf_hits)
+
+# Build the dataset name for a pair variant + stage
+# Args: $1=variant $2=stage(pretrain|finetune) → prints dataset name
+pair_dataset_name() {
+    local variant="$1"
+    local stage="$2"
+    if [[ "$stage" == "pretrain" ]]; then
+        echo "p0_${variant}_pretrain"
+    else
+        echo "p200_${variant}_finetune"
+    fi
+}
+
 # ── Parse arguments ──
 DATASET="${1:-}"
 shift || true
+
+# Collect remaining positional args as pair variant filters; flags handled separately.
+PAIR_FILTERS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -72,14 +98,42 @@ while [[ $# -gt 0 ]]; do
                     P200_DST="${SCRATCH}/colliderml/p200"
                     P200_COMPACT_DST="${SCRATCH}/colliderml/p200_preprocessed_plus_qcd"
                     shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        --*) echo "Unknown option: $1"; exit 1 ;;
+        *)  PAIR_FILTERS+=("$1"); shift ;;
     esac
 done
 
-if [[ -z "$DATASET" ]] || [[ ! "$DATASET" =~ ^(p0|p200|p200_compact|all)$ ]]; then
-    echo "Usage: $0 {p0|p200|p200_compact|all} [--jobs N] [--dry-run] [--raw] [--scratch /path]"
+if [[ -z "$DATASET" ]] || [[ ! "$DATASET" =~ ^(p0|p200|p200_compact|p200_datasets|all)$ ]]; then
+    echo "Usage: $0 {p0|p200|p200_compact|p200_datasets [variant...]|all} [--jobs N] [--dry-run] [--raw] [--scratch /path]"
+    echo "  Pair variants: ${ALL_PAIR_VARIANTS[*]}"
     exit 1
 fi
+
+# Validate pair filters (only meaningful for p200_datasets)
+if [[ ${#PAIR_FILTERS[@]} -gt 0 ]] && [[ "$DATASET" != "p200_datasets" ]]; then
+    echo "Error: extra positional args only allowed with 'p200_datasets': ${PAIR_FILTERS[*]}"
+    exit 1
+fi
+
+# Resolve which pair variants to copy (default: all)
+if [[ ${#PAIR_FILTERS[@]} -eq 0 ]]; then
+    SELECTED_PAIR_VARIANTS=("${ALL_PAIR_VARIANTS[@]}")
+else
+    SELECTED_PAIR_VARIANTS=("${PAIR_FILTERS[@]}")
+    for v in "${SELECTED_PAIR_VARIANTS[@]}"; do
+        if [[ ! " ${ALL_PAIR_VARIANTS[*]} " =~ " ${v} " ]]; then
+            echo "Error: unknown pair variant '${v}'. Valid: ${ALL_PAIR_VARIANTS[*]}"
+            exit 1
+        fi
+    done
+fi
+
+# Build P200_DATASET_NAMES from the selected variants (2 datasets per pair)
+P200_DATASET_NAMES=()
+for v in "${SELECTED_PAIR_VARIANTS[@]}"; do
+    P200_DATASET_NAMES+=("$(pair_dataset_name "$v" pretrain)")
+    P200_DATASET_NAMES+=("$(pair_dataset_name "$v" finetune)")
+done
 
 # ── Helper: copy a single directory of parquets in parallel ──
 # Args: $1=source_dir $2=dest_dir $3=label
@@ -178,15 +232,12 @@ copy_shards_parallel() {
 
     mkdir -p "$dst_dir"
 
-    # Copy the manifest if it exists
-    if [[ -f "${src_dir}/manifest.json" ]]; then
-        cp -n "${src_dir}/manifest.json" "${dst_dir}/manifest.json" 2>/dev/null || true
-    fi
-
-    # Copy the split file if it exists (created by create_split.py)
-    if [[ -f "${src_dir}/split.json" ]]; then
-        cp -n "${src_dir}/split.json" "${dst_dir}/split.json" 2>/dev/null || true
-    fi
+    # Copy top-level metadata files (manifest, split, etc.) — always overwrite
+    for meta in manifest.json split.json; do
+        if [[ -f "${src_dir}/${meta}" ]]; then
+            cp -f "${src_dir}/${meta}" "${dst_dir}/${meta}"
+        fi
+    done
 
     # Build list of files to copy (all files in all shard_* dirs)
     local file_list
@@ -304,6 +355,9 @@ echo "  Mode:       $(if $RAW; then echo 'raw'; else echo 'preprocessed'; fi)"
 echo "  Jobs:       $JOBS"
 echo "  Scratch:    $SCRATCH"
 echo "  Dry run:    $DRY_RUN"
+if [[ "$DATASET" == "p200_datasets" || "$DATASET" == "all" ]]; then
+    echo "  Pair vars:  ${SELECTED_PAIR_VARIANTS[*]}"
+fi
 echo ""
 echo "  Scratch free: $(df -h "$SCRATCH" | tail -1 | awk '{print $4}')"
 echo ""
@@ -368,6 +422,17 @@ if [[ "$DATASET" == "p200_compact" || "$DATASET" == "all" ]]; then
         "${P200_COMPACT_SRC}" \
         "${P200_COMPACT_DST}" \
         "p200 compact preprocessed shards"
+    echo ""
+fi
+
+if [[ "$DATASET" == "p200_datasets" || "$DATASET" == "all" ]]; then
+    echo "── P200 Dataset Variants (8 preprocessed datasets) ────────────────"
+    for ds_name in "${P200_DATASET_NAMES[@]}"; do
+        copy_shards_parallel \
+            "${P200_DATASETS_BASE}/${ds_name}" \
+            "${SCRATCH}/colliderml/${ds_name}" \
+            "$ds_name"
+    done
     echo ""
 fi
 

@@ -1,0 +1,86 @@
+# =============================================================================
+# Alt Study 4 — Quantile Regression with theta in eta space (from scratch)
+# =============================================================================
+# Identical to alt_study4_direct_quantile_smallbatch_smallmodel.yaml but
+# regresses theta via pseudorapidity (eta = -ln(tan(theta/2))).
+#
+# The loss operates in eta space (more uniform distribution than raw theta),
+# but all predictions and logged metrics (MAE, precision) are in theta space
+# for direct comparison with previous runs.
+#
+# Usage:  python train.py fit --config config/alt_study4_direct_quantile_eta_smallmodel.yaml
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-Alt-Study4-Quantile-Eta-SmallModel-Ref
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      # --- Alt architecture overrides (from hit-filtering project) ---
+      dim: 128
+      state_head_output_dim: 128
+      state_head_hidden_layers: [192]
+      state_head_dropout: 0.0
+      output_head_hidden_layers: [128]
+      output_head_dropout: 0.0
+      input_net_hidden_layers: [128]
+      input_net_dropout: 0.0
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 4
+          dim: 128
+          d_state: 16
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: LayerNorm
+          dropout: 0.0
+      # --- Loss ---
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: quantile
+              weight: 1.0
+              norm_min: -1.0
+              norm_max: 1.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -150.0
+              norm_max: 150.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+data:
+  batch_size: 2048
+  num_workers: 8

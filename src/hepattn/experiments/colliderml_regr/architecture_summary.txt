@@ -1,0 +1,47 @@
+
+  Track Parameter Regression — Bidirectional Mamba-2 SSM
+  ======================================================
+
+  Detector Hits (B, N, 12)
+         |
+         v
+  +------------------+
+  | Fourier Encoding |  12 feats -> 168 dims (multi-scale sin/cos)
+  +------------------+
+         |
+         v
+  +------------------+
+  |    Input MLP     |  168 -> 128
+  +------------------+
+         |
+         v
+  +====================+
+  ||  Bidir. Mamba-2  ||  8 layers, dim=128, d_state=32
+  ||                  ||  Gated fwd/bwd fusion + residual
+  ||  -> SSM state    ||  Final layer extracts hidden state
+  +====================+
+         |
+    (B, 16384)  SSM state = concat(fwd, bwd)
+         |
+    +----+----+
+    |         |
+    v         v
+  +-----+  +-----+
+  | Fwd |  | Bwd |   State heads: 8192 -> [192] -> 128
+  | MLP |  | MLP |
+  +-----+  +-----+
+    |         |
+    +----+----+
+         |
+    (B, 256) concat
+         |
+         v
+  +------------------+
+  |   Output MLP     |  256 -> [128] -> 30
+  +------------------+
+         |
+         v
+  +------------------+
+  |   5 Track Params |  d0, z0, phi, theta, q/p
+  |   Quantile Loss  |  7 quantiles per param (phi: circular)
+  +------------------+

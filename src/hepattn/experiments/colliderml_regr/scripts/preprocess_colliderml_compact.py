@@ -54,7 +54,10 @@ import numpy as np
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-from hepattn.experiments.colliderml_regr.utils.selection_utils import load_selection_defaults
+from hepattn.experiments.colliderml_regr.utils.selection_utils import (
+    load_selection_defaults,
+    load_selection_variant,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -75,11 +78,47 @@ TARGET_NAMES = ["d0", "z0", "phi", "theta", "qop"]
 PIXEL_DETECTORS = np.array([0, 1, 2, 3], dtype=np.int32)
 STRIP_DETECTORS = np.array([4, 5, 6, 7, 8], dtype=np.int32)
 
+
+# ---------------------------------------------------------------------------
+# EOS-robust saving
+# ---------------------------------------------------------------------------
+#
+# EOS under heavy parallel I/O occasionally returns ENOENT from open() even
+# though the parent directory exists — a known transient consistency issue.
+# `_safe_save` wraps np.save with a short retry loop that re-creates the parent
+# directory and sleeps briefly between attempts.  On persistent failure, the
+# original exception is re-raised so the worker still reports it.
+#
+# `_COMPLETE_MARKER` is the filename of an empty sentinel file written at the
+# very end of process_shard().  Main loop uses its presence (not the older
+# track_targets.npy check) to decide whether a shard is complete and skippable,
+# so partially-written shards from a previous crash are automatically redone.
+
+_COMPLETE_MARKER = "_complete"
+_SAVE_RETRY_ATTEMPTS = 6
+_SAVE_RETRY_BASE_SLEEP = 0.5  # seconds; exponential backoff
+
+
+def _safe_save(path: Path, arr: np.ndarray) -> None:
+    """np.save with retries for transient EOS ENOENT / OSError."""
+    parent = path.parent
+    last_exc: Exception | None = None
+    for attempt in range(_SAVE_RETRY_ATTEMPTS):
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            np.save(path, arr)
+            return
+        except (FileNotFoundError, OSError) as e:
+            last_exc = e
+            time.sleep(_SAVE_RETRY_BASE_SLEEP * (2 ** attempt))
+    # All retries exhausted — re-raise to surface the error in the worker.
+    raise last_exc  # type: ignore[misc]
+
 # Default selection file
 _SELECTION_FILE = (
     Path(__file__).resolve().parent.parent
     / "utils"
-    / "selection_defaults_P200_softscatter_training.yaml"
+    / "selection_p200_datasets.yaml"
 )
 
 
@@ -270,9 +309,12 @@ def process_shard(
                         set(ev_hids[t_idx]),  # reco hit id set
                     )
 
+        use_acts_hits_only = sel.get("use_acts_hits_only", False)
+        require_acts_dm = sel.get("require_acts_dm", False)
+
         for si in sel_indices:
             sel_pid = int(pid[si])
-            # Find hits belonging to this particle
+            # Find all truth hits belonging to this particle
             hit_mask = h_pid == sel_pid
             track_hit_local = np.where(hit_mask)[0]
 
@@ -282,7 +324,7 @@ def process_shard(
             if "max_hits" in sel and n_track_hits > sel["max_hits"]:
                 continue
 
-            # Detector-specific hit requirement
+            # Detector-specific hit requirement (on truth hits)
             if require_pixel_strip:
                 track_det = h_det[track_hit_local]
                 n_pixel = np.isin(track_det, PIXEL_DETECTORS).sum()
@@ -290,17 +332,8 @@ def process_shard(
                 if n_pixel < min_pixel_hits or n_strip < min_strip_hits:
                     continue
 
-            # Sort track hits by s (distance from IP)
-            track_s = s[track_hit_local]
-            sort_order = np.argsort(track_s)
-            track_hit_local = track_hit_local[sort_order]
-
-            # Gather hit features for this track (compact storage)
-            track_hit_feats = hit_feats[track_hit_local]  # (L, 11)
-            all_compact_hits.append(track_hit_feats)
-
-            # ACTS augmentation per selected track
-            all_track_particle_ids.append(sel_pid)
+            # ACTS double-matching — always computed on original truth hits
+            acts_dm = False
             if ttable is not None:
                 if sel_pid in pid_to_acts_track:
                     acts_reco_params, reco_hit_set = pid_to_acts_track[sel_pid]
@@ -311,6 +344,44 @@ def process_shard(
                     purity = n_majority / n_reco if n_reco > 0 else 0.0
                     efficiency = n_majority / n_truth if n_truth > 0 else 0.0
                     acts_dm = purity > 0.75 and efficiency > 0.75
+
+            # Skip non-double-matched tracks if required
+            if require_acts_dm and not acts_dm:
+                continue
+
+            # After DM check: optionally replace truth hits with the exact set
+            # of hits the CKF assigned to this track (pure CKF hits, *including*
+            # any wrong/noise hits the CKF picked up — no truth intersection).
+            if use_acts_hits_only:
+                if sel_pid not in pid_to_acts_track:
+                    continue  # no ACTS match → no KF hits → skip
+                _, reco_hit_set_for_hits = pid_to_acts_track[sel_pid]
+                # Filter to valid local indices (defensive — they should already
+                # be local indices into the per-event hit table, same space as
+                # the DM purity/efficiency calc above).
+                track_hit_local = np.array(
+                    sorted(i for i in reco_hit_set_for_hits if 0 <= i < nhits),
+                    dtype=np.int64,
+                )
+                n_track_hits = len(track_hit_local)
+                if n_track_hits < sel["min_hits"]:
+                    continue
+                if "max_hits" in sel and n_track_hits > sel["max_hits"]:
+                    continue
+
+            # Sort track hits by s (distance from IP)
+            track_s = s[track_hit_local]
+            sort_order = np.argsort(track_s)
+            track_hit_local = track_hit_local[sort_order]
+
+            # Gather hit features for this track (compact storage)
+            # Placed after all filtering to avoid appending hits for skipped tracks
+            track_hit_feats = hit_feats[track_hit_local]  # (L, 11)
+            all_compact_hits.append(track_hit_feats)
+
+            all_track_particle_ids.append(sel_pid)
+            if ttable is not None:
+                if sel_pid in pid_to_acts_track:
                     all_track_acts_reco.append(acts_reco_params)
                     all_track_acts_dm.append(acts_dm)
                 else:
@@ -354,31 +425,36 @@ def process_shard(
         track_event_idx = np.zeros(0, dtype=np.int32)
 
     # Save compact hits at shard level
-    np.save(output_dir / "hits.npy", compact_hits)
+    _safe_save(output_dir / "hits.npy", compact_hits)
 
-    # Save selected tracks
-    np.save(sel_dir / "track_targets.npy", track_targets)
-    np.save(sel_dir / "track_hit_indices.npy", track_hit_indices)
-    np.save(sel_dir / "track_hit_offsets.npy", track_hit_offsets)
-    np.save(sel_dir / "track_event_idx.npy", track_event_idx)
+    # Save selected tracks (track_targets last so its presence alone is NOT
+    # treated as completion — the real completion marker is written at end).
+    _safe_save(sel_dir / "track_hit_indices.npy", track_hit_indices)
+    _safe_save(sel_dir / "track_hit_offsets.npy", track_hit_offsets)
+    _safe_save(sel_dir / "track_event_idx.npy", track_event_idx)
 
     # Always save particle IDs
     track_particle_ids = np.array(all_track_particle_ids, dtype=np.int64) if all_track_particle_ids else np.zeros(0, dtype=np.int64)
-    np.save(sel_dir / "track_particle_ids.npy", track_particle_ids)
+    _safe_save(sel_dir / "track_particle_ids.npy", track_particle_ids)
 
     # Save ACTS reco if computed
     if all_track_acts_reco:
         acts_reco_arr = np.stack(all_track_acts_reco, axis=0)  # (N, 5)
         acts_dm_arr = np.array(all_track_acts_dm, dtype=bool)  # (N,)
-        np.save(sel_dir / "acts_reco.npy", acts_reco_arr)
-        np.save(sel_dir / "acts_dm_mask.npy", acts_dm_arr)
+        _safe_save(sel_dir / "acts_reco.npy", acts_reco_arr)
+        _safe_save(sel_dir / "acts_dm_mask.npy", acts_dm_arr)
 
     # Save track metadata (pt, vertex_primary) for tight selection filtering
     if all_track_meta:
         track_meta = np.stack(all_track_meta, axis=0)  # (N, 2): [pt, vertex_primary]
     else:
         track_meta = np.zeros((0, 2), dtype=np.float32)
-    np.save(sel_dir / "track_meta.npy", track_meta)
+    _safe_save(sel_dir / "track_meta.npy", track_meta)
+
+    # Save track_targets.npy and the _complete sentinel last.  An atomic(-ish)
+    # completion check can then use either, but _complete is the primary.
+    _safe_save(sel_dir / "track_targets.npy", track_targets)
+    (output_dir / _COMPLETE_MARKER).touch()
 
     total_compact_hits = len(compact_hits)
 
@@ -409,6 +485,9 @@ def main():
                         help="Number of shards to process (-1 for all)")
     parser.add_argument("--selection-file", type=str, default=None,
                         help="Path to selection defaults YAML (default: P200 soft-scatter)")
+    parser.add_argument("--selection-variant", type=str, default=None,
+                        help="Named variant to load from a multi-variant YAML "
+                             "(e.g. 'loose', 'core', 'core_kf_matched', 'core_kf_hits')")
     parser.add_argument("--selection", type=str, default=None,
                         help="JSON string of selection overrides")
     parser.add_argument("--particles-subdir", type=str,
@@ -429,11 +508,20 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load selection defaults
+    # Load selection
     sel_file = Path(args.selection_file) if args.selection_file else _SELECTION_FILE
-    selection = dict(load_selection_defaults(sel_file))
+    if args.selection_variant:
+        selection = load_selection_variant(sel_file, args.selection_variant)
+    else:
+        selection = dict(load_selection_defaults(sel_file))
     if args.selection:
         selection.update(json.loads(args.selection))
+
+    # Validate ACTS requirements
+    if selection.get("require_acts_dm") and not augment_acts:
+        sys.exit("ERROR: require_acts_dm=true requires ACTS augmentation (remove --no-acts)")
+    if selection.get("use_acts_hits_only") and not augment_acts:
+        sys.exit("ERROR: use_acts_hits_only=true requires ACTS augmentation (remove --no-acts)")
 
     particles_dir = data_dir / args.particles_subdir
     hits_dir = data_dir / args.hits_subdir
@@ -486,14 +574,49 @@ def main():
         "n_acts_double_matched": 0,
     }
 
-    # Build job list, skipping already-completed shards
+    # Backfill `_complete` markers for shards written by the old version of
+    # this script (which did not write the sentinel).  A shard is considered
+    # "legacy-complete" if it has a full, well-formed set of output files.
+    # This keeps the new skip-check compatible with older output directories.
+    def _legacy_is_complete(shard_out: Path) -> bool:
+        sel_d = shard_out / "selected_tracks"
+        required = [
+            shard_out / "hits.npy",
+            sel_d / "track_targets.npy",
+            sel_d / "track_hit_indices.npy",
+            sel_d / "track_hit_offsets.npy",
+            sel_d / "track_event_idx.npy",
+            sel_d / "track_particle_ids.npy",
+            sel_d / "track_meta.npy",
+        ]
+        if augment_acts:
+            required += [sel_d / "acts_reco.npy", sel_d / "acts_dm_mask.npy"]
+        return all(p.exists() for p in required)
+
+    n_backfilled = 0
+    for shard_name in common:
+        shard_idx = int(shard_name.split("-")[1])
+        shard_out = output_dir / f"shard_{shard_idx:04d}"
+        if (shard_out / _COMPLETE_MARKER).exists():
+            continue
+        if shard_out.exists() and _legacy_is_complete(shard_out):
+            (shard_out / _COMPLETE_MARKER).touch()
+            n_backfilled += 1
+    if n_backfilled:
+        print(f"Backfilled {_COMPLETE_MARKER} marker for {n_backfilled} legacy-complete shards")
+
+    # Build job list, skipping already-completed shards.
+    # A shard is considered complete iff its `_complete` sentinel file exists.
+    # This sentinel is written atomically at the very end of process_shard(),
+    # so partially-written shards (e.g. from an EOS-crashed previous run) are
+    # automatically re-processed.  Any stale partial files are silently
+    # overwritten by the new run.
     jobs = []
     n_skipped = 0
     for shard_name in common:
         shard_idx = int(shard_name.split("-")[1])
         shard_out = output_dir / f"shard_{shard_idx:04d}"
-        # A shard is complete if its selected_tracks/track_targets.npy exists
-        if (shard_out / "selected_tracks" / "track_targets.npy").exists():
+        if (shard_out / _COMPLETE_MARKER).exists():
             n_skipped += 1
             continue
         tracks_f = tf_by_name.get(shard_name) if augment_acts else None

@@ -21,3 +21,28 @@ selection:
   d0_max: 1.0             # mm
   z0_min: -150.0          # mm
   z0_max: 150.0           # mm
+
+# ---------------------------------------------------------------------------
+# Primary-d0 regime: double-matched tracks with |d0_truth| < 0.25 mm
+# Removes secondary vertices whose wide d0 distribution inflates tails.
+# ---------------------------------------------------------------------------
+primary_d0:
+  inherits: double_matched
+  d0_truth_abs_max: 0.25    # mm — only primary vertex tracks
+
+secondary_d0:
+  inherits: double_matched
+  d0_truth_abs_min: 0.25    # mm — only secondary vertex tracks (|d0| >= 0.25 mm)
+
+# ---------------------------------------------------------------------------
+# Comparison regime: minimal kinematic cuts + ACTS double-matching baseline
+# Used by evaluate_predictions.py Regime 3 to compare SSM vs ACTS on the
+# subset of tracks that pass both loose kinematic requirements and ACTS
+# double-matching (hit purity > 75% AND hit efficiency > 75%).
+# ---------------------------------------------------------------------------
+comparison:
+  min_hits: 6
+  pt_min: 0.5             # GeV
+  eta_min: -3.0
+  eta_max: 3.0
+  acts_double_matched: true

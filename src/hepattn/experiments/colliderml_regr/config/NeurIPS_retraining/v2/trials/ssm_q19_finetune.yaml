@@ -1,0 +1,128 @@
+# =============================================================================
+# SSM (Bidirectional Mamba-2 state) + Q19 — fine-tune on p200 from ssm_q19 ckpt
+# =============================================================================
+# Stage: finetune on full PU200 with loose selection (4 x H100 DDP).
+# LR schedule: cosine_freeze — linear warmup → hold at max → cosine decay from
+# unfreeze_lr, with the encoder frozen for the first `unfreeze_epoch` epochs.
+# =============================================================================
+
+trainer:
+  devices: -1
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSM-Q19-p200
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MambaBackboneFreeze
+      init_args:
+        unfreeze_epoch: 5
+
+model:
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ssm_q19_pretrain.ckpt
+  optimizer: AdamW
+  lrs_config:
+    initial: 1.0e-05
+    max: 1.0e-03
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 0.01
+    betas: [0.9, 0.95]
+    skip_scheduler: false
+    schedule: cosine_freeze
+    unfreeze_epoch: 5
+    unfreeze_lr: 5.0e-05
+
+  model:
+    init_args:
+      pool: ssm_state
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            phi:
+              type: circular
+              weight: 10.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 5.0
+              norm_min: -3.1
+              norm_max: 3.1
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -5.5
+              norm_max: 5.5
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_loose_finetune
+  load_acts: true
+  batch_size: 30000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

@@ -1,0 +1,87 @@
+# =============================================================================
+# Transformer (flash-attn2 + learned register token) + Gaussian/circular-phi —
+# pretrain on p0
+# =============================================================================
+# Gaussian NLL on (mu, log_var) for d0/z0/qop, gaussian_eta for theta,
+# circular (smooth-L1 on sin/cos) for phi.  Total regression outputs: 10.
+# =============================================================================
+
+trainer:
+  devices: 1
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-TXF-Gauss-pretrain
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      dim: 192
+      pool: register_token
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.transformer_encoder.EncoderWithCLS
+        init_args:
+          dim: 192
+          num_layers: 12
+          # flash-varlen supports kv masking (unpads on the fly); plain flash does not.
+          attn_type: flash-varlen
+          norm: RMSNorm
+          value_residual: false
+          qkv_norm: true
+          layer_scale: 1.0e-5
+          drop_path: 0.05
+          attn_kwargs:
+            num_heads: 6
+          dense_kwargs:
+            hidden_dim_scale: 4
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: gaussian
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+            z0:
+              type: gaussian
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+            phi:
+              type: circular
+              weight: 10.0
+              beta: 0.01
+            theta:
+              type: gaussian_eta
+              weight: 5.0
+              norm_min: -3.1
+              norm_max: 3.1
+            qop:
+              type: gaussian
+              weight: 5.0
+              norm_min: -5.5
+              norm_max: 5.5
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 1.5e-04
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+    schedule: cosine
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_loose_pretrain
+  batch_size: 2048
+  num_workers: 8

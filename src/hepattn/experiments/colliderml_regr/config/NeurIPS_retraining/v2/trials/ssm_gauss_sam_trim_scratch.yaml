@@ -1,0 +1,138 @@
+# =============================================================================
+# SSM (ssm_state) + Gaussian NLL + circular-phi + SAM + batch trimming
+# Trained FROM SCRATCH (no pretraining) on the KF double-matched p200 dataset.
+# Target: sharpen the inner-95% core resolution on the double-matched subset
+# past the ACTS Kalman filter baseline.
+# 4xH100 DDP, batch 30k per GPU.
+# =============================================================================
+# Key deltas vs ssm_gauss_finetune.yaml:
+#   - no pretrained_ckpt_path (from-scratch training)
+#   - no MambaBackboneFreeze callback (no freeze phase)
+#   - schedule: cosine (not cosine_freeze)
+#   - optimizer: AdamW + SAM wrapper (rho=0.05, starts after epoch 2)
+#   - batch trimming: drop the worst 5% of per-sample losses after a
+#     10%-of-max_epochs warmup
+#   - data: p200_core_kf_hits_finetune (~100M KF double-matched tracks)
+# =============================================================================
+
+trainer:
+  devices: -1
+  max_epochs: 50
+  num_sanity_val_steps: 1
+  # Lightning forbids trainer.gradient_clip_val under manual optimization
+  # (which the SAM path uses).  Clipping is applied inside training_step
+  # via model.gradient_clip_val instead.  We explicitly null out the base
+  # config's value so Lightning doesn't raise.
+  gradient_clip_val: null
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSM-Gauss-SAM-trim-scratch
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+    # NOTE: no MambaBackboneFreeze — training from scratch.
+
+model:
+  # No pretrained_ckpt_path — this run is from-scratch on p200 KF-matched.
+  optimizer: AdamW
+  use_sam: true
+  sam_rho: 0.05
+  sam_adaptive: false
+  sam_start_epoch: 2          # wait out warmup before applying ascent perturbation
+  trim_frac: 0.05             # drop worst 5% of samples per batch once warmup passes
+  trim_warmup_frac: 0.1       # warmup = 10% of max_epochs = 5 epochs for max_epochs=50
+  gradient_clip_val: 1.0      # manual grad clip inside training_step
+
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-04              # between pretrain (3e-4) and finetune (1e-3)
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 0.01
+    betas: [0.9, 0.95]
+    skip_scheduler: false
+    schedule: cosine          # NOT cosine_freeze — no freeze phase from scratch
+
+  model:
+    init_args:
+      pool: ssm_state
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: gaussian
+              weight: 0.5
+              norm_min: -2.6
+              norm_max: 2.6
+            z0:
+              type: gaussian
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+            phi:
+              type: circular
+              weight: 10.0
+              beta: 0.01
+            theta:
+              type: gaussian_eta
+              weight: 5.0
+              norm_min: -3.1
+              norm_max: 3.1
+            qop:
+              type: gaussian
+              weight: 5.0
+              norm_min: -2.1
+              norm_max: 2.1
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_core_kf_hits_finetune
+  load_acts: true
+  batch_size: 30000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

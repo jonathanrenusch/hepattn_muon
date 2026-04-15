@@ -37,10 +37,12 @@ import numpy as np
 from tqdm import tqdm
 
 # Reuse precision plotting utilities from the evaluation module
-from hepattn.experiments.colliderml_regr.evaluate_predictions import (
+from hepattn.experiments.colliderml_regr.eval_utils import (
     PARAM_LABELS,
     UNIT_SCALE,
     compute_precision_vs_eta,
+)
+from hepattn.experiments.colliderml_regr.evaluate_predictions import (
     plot_precision_vs_eta,
 )
 

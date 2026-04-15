@@ -1,0 +1,99 @@
+# =============================================================================
+# SSM-CLS (Mamba-2 with learned CLS tokens) + Q19 — pretrain on p0
+# =============================================================================
+# Same Mamba-2 block stack as ssm_q19 but with learned CLS tokens instead of
+# final SSM state extraction.  Pool dim = 2 * model_dim = 256 (bypasses the
+# state_head projection).  Use this to test whether the SSM hidden state is
+# really the game changer, or whether plain CLS-token pooling suffices.
+# =============================================================================
+
+trainer:
+  devices: [1]
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-Q19-pretrain
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      # Widen dim 128 → 192 and deepen 8 → 10 layers to match the SSM-state
+      # param budget (~5.2 M) after removing the 2 × 8192→128 state_head
+      # projections. dim=192 matches the Transformer exactly, so SSM-CLS vs
+      # TXF is a width-matched, head-dim-matched comparison; SSM-CLS vs SSM
+      # is param-matched. headdim stays 32 → 6 heads per direction.
+      # Total params measured at ~5.35 M (see v2/ param probe).
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 10
+          dim: 192
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          qop_tail_weight: 1.5
+          qop_scale: 2.0
+          config:
+            d0:
+              type: quantile
+              weight: 0.5
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            phi:
+              type: circular
+              weight: 10.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 5.0
+              norm_min: -3.1
+              norm_max: 3.1
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -5.5
+              norm_max: 5.5
+              quantiles: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+                          0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 3.0e-04
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+    schedule: cosine
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_loose_pretrain
+  batch_size: 2048
+  num_workers: 8
