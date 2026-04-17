@@ -386,6 +386,15 @@ def collate_tracks(batch: list[dict[str, np.ndarray]]) -> tuple[dict[str, Tensor
         "hit_s": hit_s,
         "hit_valid": hit_valid,
     }
+
+    # Compute innermost hit features for delta parameterization.
+    # Innermost = smallest arc-length (s); padding positions (s=0, invalid)
+    # are masked to +inf so they never win the argmin.
+    innermost_idx = torch.where(hit_valid, hit_s, torch.inf).argmin(dim=1)
+    batch_arange = torch.arange(batch_size)
+    innermost_phi = hit_features[batch_arange, innermost_idx, 4]   # phi_hit
+    innermost_theta = hit_features[batch_arange, innermost_idx, 5]  # theta_hit
+
     target_dict = {
         "d0": all_targets[:, 0],
         "z0": all_targets[:, 1],
@@ -393,6 +402,8 @@ def collate_tracks(batch: list[dict[str, np.ndarray]]) -> tuple[dict[str, Tensor
         "theta": all_targets[:, 3],
         "qop": all_targets[:, 4],
         "track_valid": torch.ones(batch_size, dtype=torch.bool),
+        "innermost_phi": innermost_phi,
+        "innermost_theta": innermost_theta,
     }
 
     # Pass through ACTS reco data when available
@@ -464,6 +475,7 @@ class ColliderMLRegrDataModule(LightningDataModule):
         load_acts: bool = False,
         streaming: bool = False,
         shard_buffer_size: int = 8,
+        prefetch_factor: int | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -476,6 +488,7 @@ class ColliderMLRegrDataModule(LightningDataModule):
         self.load_acts = load_acts
         self.streaming = streaming
         self.shard_buffer_size = shard_buffer_size
+        self.prefetch_factor = prefetch_factor
 
         self._train_ds: ColliderMLTrackDataset | ColliderMLStreamingDataset | None = None
         self._val_ds: ColliderMLTrackDataset | None = None
@@ -564,8 +577,7 @@ class ColliderMLRegrDataModule(LightningDataModule):
                     safe_batches = min_rank_total // self.batch_size
                     self.trainer.limit_train_batches = safe_batches
 
-            return DataLoader(
-                self._train_ds,
+            dl_kwargs: dict = dict(
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
@@ -577,9 +589,11 @@ class ColliderMLRegrDataModule(LightningDataModule):
                 # benefit and risks stale worker state from the previous epoch.
                 persistent_workers=False,
             )
+            if self.prefetch_factor is not None and self.num_workers > 0:
+                dl_kwargs["prefetch_factor"] = self.prefetch_factor
+            return DataLoader(self._train_ds, **dl_kwargs)
 
-        return DataLoader(
-            self._train_ds,
+        dl_kwargs = dict(
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
@@ -588,11 +602,13 @@ class ColliderMLRegrDataModule(LightningDataModule):
             drop_last=True,
             persistent_workers=self.num_workers > 0,
         )
+        if self.prefetch_factor is not None and self.num_workers > 0:
+            dl_kwargs["prefetch_factor"] = self.prefetch_factor
+        return DataLoader(self._train_ds, **dl_kwargs)
 
     def val_dataloader(self) -> DataLoader:
         assert self._val_ds is not None
-        return DataLoader(
-            self._val_ds,
+        dl_kwargs: dict = dict(
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -603,17 +619,22 @@ class ColliderMLRegrDataModule(LightningDataModule):
             # (pytorch/pytorch#91252 — potential deadlock on DataLoader recreation).
             persistent_workers=False,
         )
+        if self.prefetch_factor is not None and self.num_workers > 0:
+            dl_kwargs["prefetch_factor"] = self.prefetch_factor
+        return DataLoader(self._val_ds, **dl_kwargs)
 
     def test_dataloader(self) -> DataLoader:
         assert self._test_ds is not None
-        return DataLoader(
-            self._test_ds,
+        dl_kwargs: dict = dict(
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_tracks,
         )
+        if self.prefetch_factor is not None and self.num_workers > 0:
+            dl_kwargs["prefetch_factor"] = self.prefetch_factor
+        return DataLoader(self._test_ds, **dl_kwargs)
 
     def predict_dataloader(self) -> DataLoader:
         return self.test_dataloader()

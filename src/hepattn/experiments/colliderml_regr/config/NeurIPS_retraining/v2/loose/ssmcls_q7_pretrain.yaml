@@ -1,16 +1,28 @@
 # =============================================================================
-# Transformer (flash-attn2 + register token) + Q7 safety — bf16-mixed fine-tune
+# SSM-CLS (Mamba-2 + learned CLS tokens) + Q7 safety — FP32 pretrain on p0
+# =============================================================================
+# Safety-net fallback:
+#   - FP32 precision (encoder autocast to bf16)
+#   - 7 quantiles [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+#   - dim=192, num_layers=10 (matches SSM-state param budget ~5.35 M)
+#   - phi: circular loss, qop tail weighting on
+#
+# Stability patches (SSM-CLS showed unstable training / non-convergence in the
+# initial FP32 run):
+#   - Encoder dropout 0.0 → 0.1
+#   - Lion max LR 3.3e-05 (alt_study4 baseline 5.0e-05 x 2/3 for the
+#     regularization stack; original 3.0e-04 was 6x above the proven peak)
+#   - Lion betas (0.9, 0.99) → (0.9, 0.95)
+#   - GradientSpikeSkip callback (critical for Lion's sign-based update).
 # =============================================================================
 
 trainer:
-  devices: -1
-  max_epochs: 100
-  precision: bf16-mixed
-  gradient_clip_val: 1.0
+  devices: [2]
+  max_epochs: 50
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-TXF-Q7save16-p200
+      name: TRK-v2-SSMCLS-Q7-FP32-Loose-pretrain
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -41,51 +53,32 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/total
-        patience: 30
+        patience: 50
         min_delta: 0.0
         mode: min
         verbose: true
         check_on_train_epoch_end: false
-    - class_path: hepattn.experiments.colliderml_regr.callbacks.MambaBackboneFreeze
-      init_args:
-        unfreeze_epoch: 5
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_txf_q7_save16_pretrain.ckpt
-  optimizer: AdamW
-  lrs_config:
-    initial: 1.0e-05
-    max: 7.0e-04
-    end: 1.0e-06
-    pct_start: 0.10
-    weight_decay: 0.01
-    betas: [0.9, 0.95]
-    skip_scheduler: false
-    schedule: cosine_freeze
-    unfreeze_epoch: 5
-    unfreeze_lr: 5.0e-05
-
   model:
     init_args:
+      pool: ssm_cls
       dim: 192
-      pool: register_token
       input_net_hidden_layers: [192]
       output_head_hidden_layers: [256]
       encoder:
-        class_path: hepattn.experiments.colliderml_regr.transformer_encoder.EncoderWithCLS
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
+          num_layers: 10
           dim: 192
-          num_layers: 12
-          attn_type: flash-varlen
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
           norm: RMSNorm
-          value_residual: false
-          qkv_norm: true
-          layer_scale: 1.0e-5
-          drop_path: 0.05
-          attn_kwargs:
-            num_heads: 6
-          dense_kwargs:
-            hidden_dim_scale: 4
+          dropout: 0.1
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
@@ -120,10 +113,16 @@ model:
               norm_max: 5.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
 
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
 data:
-  preprocessed_dir: /scratch/colliderml/p200_loose_finetune
-  load_acts: true
-  batch_size: 30000
-  num_workers: 1
-  streaming: true
-  shard_buffer_size: 50
+  preprocessed_dir: /scratch/colliderml/p0_loose_pretrain
+  batch_size: 2048
+  num_workers: 16

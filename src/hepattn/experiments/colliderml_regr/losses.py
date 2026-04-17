@@ -19,9 +19,10 @@ Supported loss types
 ``circular``
     ``SmoothL1(sin) + SmoothL1(cos)`` for angular parameters (phi).
 ``gaussian``
-    Gaussian NLL on normalised targets, outputs ``(mu, log_var)``.
+    Gaussian NLL on normalised targets, outputs ``(mu, raw_var)``.
+    Set ``variance_param: softplus`` for bounded-gradient parameterisation.
 ``gaussian_eta``
-    Gaussian NLL in η-space (for θ), outputs ``(mu, log_var)``.
+    Gaussian NLL in η-space (for θ), outputs ``(mu, raw_var)``.
 ``cosine_phi``
     ``1 - cos(phi_pred - phi_true)`` via (sin, cos) outputs for stability.
 
@@ -609,6 +610,16 @@ class GaussianParameterLoss(nn.Module):
         σ_min to exp(-2.5) ≈ 0.08 in normalised space, preventing the
         catastrophic exp(8) ≈ 3000 multiplier that caused gradient spikes
         with the previous default of 8.0.
+    log_var_init : float
+        Fixed bias added to the raw ``log_var`` output before clamping.
+        Shifts the effective starting point of the variance prediction so
+        that a zero-initialised output head produces ``exp(-(0 +
+        log_var_init))`` as the initial precision.  A positive value
+        (e.g. ``1.0``) starts the model with lower precision (higher
+        variance), which prevents the ``exp(-log_var) * residual²``
+        gradient explosion that occurs when ``log_var`` is randomly
+        negative at initialisation.  Default ``0.0`` preserves the
+        original behaviour.
     reduction : str
         ``"mean"`` (default): return scalar, current behaviour.
         ``"none"``: return per-sample ``weight * per_sample`` with shape
@@ -624,39 +635,79 @@ class GaussianParameterLoss(nn.Module):
         norm_max: float = 1.0,
         weight: float = 1.0,
         log_var_clamp: float = 5.0,
+        log_var_init: float = 0.0,
+        variance_param: str = "log_var",
+        var_init: float = 0.0,
+        var_eps: float = 1e-6,
         reduction: str = "mean",
+        beta_nll: float = 0.0,
     ):
         super().__init__()
+        if variance_param not in ("log_var", "softplus"):
+            raise ValueError(f"variance_param must be 'log_var' or 'softplus', got {variance_param!r}")
         self.weight = weight
+        self.variance_param = variance_param
         self.log_var_clamp = float(log_var_clamp)
+        self.beta_nll = float(beta_nll)
         if reduction not in ("mean", "none"):
             raise ValueError(f"reduction must be 'mean' or 'none', got {reduction!r}")
         self.reduction = reduction
         self.register_buffer("norm_min", torch.tensor(norm_min, dtype=torch.float32))
         self.register_buffer("norm_max", torch.tensor(norm_max, dtype=torch.float32))
+        # Legacy log_var buffers (used when variance_param == "log_var")
+        self.register_buffer("_log_var_init", torch.tensor(float(log_var_init), dtype=torch.float32))
+        # Softplus buffers (used when variance_param == "softplus")
+        self.register_buffer("_var_init", torch.tensor(float(var_init), dtype=torch.float32))
+        self.register_buffer("_var_eps", torch.tensor(float(var_eps), dtype=torch.float32))
 
-    def _nll(self, mu: Tensor, log_var: Tensor, target_norm: Tensor) -> Tensor:
+    def _nll(self, mu: Tensor, raw_var: Tensor, target_norm: Tensor) -> Tensor:
         """Full Gaussian NLL including the 0.5·log(2π) constant.
 
         Including the constant keeps the loss non-negative when the model
         is well-calibrated (σ ≈ residual std), which prevents confusing
         negative loss values on the dashboard and makes the loss landscape
         smoother near the optimum.
+
+        When ``variance_param == "softplus"``, variance is parameterised as
+        ``softplus(raw + bias) + eps`` instead of ``exp(log_var)``.  The
+        softplus gradient is ``sigmoid(x) ∈ (0, 1)`` — always bounded, no
+        clamping needed, no dead zones at saturation boundaries.
+
+        When ``beta_nll > 0``, applies the β-NLL weighting from Seitzer et
+        al. (ICLR 2022): each sample's NLL is multiplied by σ^(2β) with
+        stop-gradient, preventing the model from inflating predicted
+        variance to reduce the loss on hard examples.
         """
-        # Clamp log_var to prevent exp(-log_var) overflow.  The clamp is
-        # placed inside the same autograd-tracked expression so that the
-        # gradient is zero outside the clamp region (saturated), which
-        # is the desired behaviour — we do NOT want the optimizer to
-        # keep driving log_var past the clamp.
-        log_var = log_var.clamp(-self.log_var_clamp, self.log_var_clamp)
-        return 0.5 * (torch.exp(-log_var) * (target_norm - mu) ** 2 + log_var + math.log(2.0 * math.pi))
+        residual_sq = (target_norm - mu) ** 2
+
+        if self.variance_param == "softplus":
+            var = F.softplus(raw_var + self._var_init) + self._var_eps
+            nll_core = 0.5 * (residual_sq / var + torch.log(var))
+        else:
+            # Legacy exp(-log_var) path
+            log_var = raw_var + self._log_var_init
+            log_var = log_var.clamp(-self.log_var_clamp, self.log_var_clamp)
+            var = torch.exp(log_var)
+            nll_core = 0.5 * (residual_sq / var + log_var)
+
+        # β-NLL (Seitzer et al., ICLR 2022): weight the data-dependent NLL by
+        # σ^(2β) = var^β with stop-gradient to prevent variance inflation on
+        # hard examples.  β=0.5 gives scale-invariant gradients w.r.t. μ.
+        # The 0.5·log(2π) normalisation constant is added *outside* the
+        # β-weighting — it has zero gradient so the math is unaffected, but
+        # pulling it out keeps the logged loss interpretable (a clean
+        # additive offset rather than a σ²ᵝ-scaled one).
+        if self.beta_nll > 0.0:
+            nll_core = var.detach().pow(self.beta_nll) * nll_core
+
+        return nll_core + 0.5 * math.log(2.0 * math.pi)
 
     def forward(self, pred: Tensor, target: Tensor, sample_weights: Tensor | None = None) -> Tensor:
-        """pred: (N, 2) with [mu, log_var];  target: (N,) in physical units."""
+        """pred: (N, 2) with [mu, raw_var];  target: (N,) in physical units."""
         mu = pred[..., 0]
-        log_var = pred[..., 1]
+        raw_var = pred[..., 1]
         t_norm = _linear_normalise(target, self.norm_min, self.norm_max)
-        per_sample = self._nll(mu, log_var, t_norm)
+        per_sample = self._nll(mu, raw_var, t_norm)
 
         if self.reduction == "none":
             # Per-sample form: apply sample_weights as a multiplier (not a
@@ -675,8 +726,15 @@ class GaussianParameterLoss(nn.Module):
         """Return the mean (``mu``) denormalised to physical units."""
         return _linear_denormalise(raw[..., 0], self.norm_min, self.norm_max)
 
+    def _sigma_from_raw(self, raw_var: Tensor) -> Tensor:
+        """Convert the raw variance channel to σ (std dev) in normalised space."""
+        if self.variance_param == "softplus":
+            var = F.softplus(raw_var + self._var_init) + self._var_eps
+            return torch.sqrt(var)
+        return torch.exp(0.5 * (raw_var + self._log_var_init))
+
     def predict_quantiles(self, raw: Tensor, quantiles: list[float] | Tensor | None = None) -> Tensor:
-        """Analytic quantiles from (mu, log_var).
+        """Analytic quantiles from (mu, raw_var).
 
         For a Gaussian, ``Q(τ) = μ + σ · Φ⁻¹(τ)``.  The inverse CDF is
         computed via ``Φ⁻¹(τ) = √2 · erfinv(2τ - 1)``.  Both ``mu`` and
@@ -686,7 +744,7 @@ class GaussianParameterLoss(nn.Module):
         Parameters
         ----------
         raw : Tensor
-            Model output of shape ``(N, 2)`` with ``[mu, log_var]``.
+            Model output of shape ``(N, 2)`` with ``[mu, raw_var]``.
         quantiles : list[float] | Tensor | None
             Quantile levels to sample.  Defaults to the standard
             ``[0.05, 0.25, 0.5, 0.75, 0.95]`` five-point summary.
@@ -698,9 +756,9 @@ class GaussianParameterLoss(nn.Module):
 
         mu_phys = _linear_denormalise(raw[..., 0], self.norm_min, self.norm_max)
         # σ is in normalised space; the linear de-normalisation scales it by
-        # (norm_max - norm_min) / 2 (same scale factor applied to every coord)
+        # (norm_max - norm_min) / 2 (same scale factor applied to every coord).
         half_range = 0.5 * (self.norm_max - self.norm_min)
-        sigma_phys = torch.exp(0.5 * raw[..., 1]) * half_range
+        sigma_phys = self._sigma_from_raw(raw[..., 1]) * half_range
         z = math.sqrt(2.0) * torch.erfinv(2.0 * quantiles - 1.0)  # Φ⁻¹(τ)
         return mu_phys.unsqueeze(-1) + sigma_phys.unsqueeze(-1) * z  # (N, Q)
 
@@ -740,8 +798,7 @@ class GaussianEtaLoss(GaussianParameterLoss):
             quantiles = torch.tensor(list(quantiles), dtype=raw.dtype, device=raw.device)
 
         mu_eta = raw[..., 0]  # in normalised η-space
-        log_var = raw[..., 1]
-        sigma_norm = torch.exp(0.5 * log_var)
+        sigma_norm = self._sigma_from_raw(raw[..., 1])
         z = math.sqrt(2.0) * torch.erfinv(2.0 * quantiles - 1.0)
         # quantiles in normalised η-space: μ + σ · z
         eta_norm_q = mu_eta.unsqueeze(-1) + sigma_norm.unsqueeze(-1) * z  # (N, Q)
@@ -857,9 +914,16 @@ class TrackParameterLoss(nn.Module):
     config : dict[str, dict]
         Per-parameter loss config keyed by parameter name.
         Each value is a dict with at least ``type`` plus any kwargs
-        for that loss class.
+        for that loss class.  Optionally includes ``delta_anchor`` —
+        a key in the targets dict whose value is subtracted from the
+        target before computing the loss (for delta parameterization).
     parameter_order : list[str]
         Canonical ordering of the five parameters.
+    loss_aggregation : str
+        How to combine per-parameter losses: ``"sum"`` (default) or
+        ``"geometric_mean"``.  Geometric mean is scale-invariant and
+        automatically balances tasks without manual weight tuning
+        (Chennupati et al., MultiNet++, 2019).
     """
 
     def __init__(
@@ -868,19 +932,28 @@ class TrackParameterLoss(nn.Module):
         parameter_order: list[str] | None = None,
         qop_tail_weight: float = 0.0,
         qop_scale: float = 2.0,
+        loss_aggregation: str = "sum",
     ):
         super().__init__()
 
         if parameter_order is None:
             parameter_order = ["d0", "z0", "phi", "theta", "qop"]
+        if loss_aggregation not in ("sum", "geometric_mean"):
+            raise ValueError(f"loss_aggregation must be 'sum' or 'geometric_mean', got {loss_aggregation!r}")
 
         self.parameter_order = parameter_order
+        self.loss_aggregation = loss_aggregation
         self.losses = nn.ModuleDict()
+        self._delta_anchors: dict[str, str] = {}
 
         for name in parameter_order:
             assert name in config, f"Missing loss config for parameter '{name}'"
             cfg = dict(config[name])  # shallow copy to pop from
             loss_type = cfg.pop("type")
+            # Pop delta_anchor before passing remaining kwargs to the sub-loss
+            delta_anchor = cfg.pop("delta_anchor", None)
+            if delta_anchor is not None:
+                self._delta_anchors[name] = delta_anchor
             assert loss_type in LOSS_REGISTRY, (
                 f"Unknown loss type '{loss_type}' for parameter '{name}'. "
                 f"Available: {list(LOSS_REGISTRY.keys())}"
@@ -945,7 +1018,6 @@ class TrackParameterLoss(nn.Module):
         """
         losses: dict[str, Tensor] = {}
         device = pred.device
-        total = torch.tensor(0.0, device=device)
 
         # Per-track |qop| weighting — opt-in, off by default (qop_tail_weight=0)
         # Tracks with high |qop| (large curvature, significant scattering) get
@@ -968,14 +1040,31 @@ class TrackParameterLoss(nn.Module):
             else:
                 sample_weights = sample_weights * trim_mask
 
+        loss_values: list[Tensor] = []
+
         for name in self.parameter_order:
             start, end = self._output_slices[name]
             p = pred[..., start:end] if end - start > 1 else pred[..., start]
             t = targets[name]
 
+            # Delta anchor: subtract anchor value from target so the model
+            # predicts the residual (e.g. phi - innermost_hit_phi).
+            anchor: Tensor | None = None
+            if name in self._delta_anchors:
+                anchor_key = self._delta_anchors[name]
+                anchor = targets.get(anchor_key)
+
             if valid_mask is not None:
                 p = p[valid_mask]
                 t = t[valid_mask]
+                if anchor is not None:
+                    anchor = anchor[valid_mask]
+
+            if anchor is not None:
+                t = t - anchor
+                # Wrap phi-like deltas to [-π, π]
+                if name == "phi":
+                    t = torch.remainder(t + math.pi, 2.0 * math.pi) - math.pi
 
             if t.numel() == 0:
                 losses[name] = torch.tensor(0.0, device=device)
@@ -983,9 +1072,18 @@ class TrackParameterLoss(nn.Module):
 
             loss = self.losses[name](p, t, sample_weights=sample_weights)
             losses[name] = loss
-            total = total + loss
+            loss_values.append(loss)
 
-        losses["total"] = total
+        # Aggregate per-parameter losses into total
+        if self.loss_aggregation == "geometric_mean" and loss_values:
+            log_losses = torch.stack([torch.log(lv.clamp(min=1e-8)) for lv in loss_values])
+            losses["total"] = torch.exp(log_losses.mean())
+        else:
+            total = torch.tensor(0.0, device=device)
+            for lv in loss_values:
+                total = total + lv
+            losses["total"] = total
+
         return losses
 
     def per_sample_total(
@@ -1053,9 +1151,23 @@ class TrackParameterLoss(nn.Module):
             start, end = self._output_slices[name]
             p = pred[..., start:end] if end - start > 1 else pred[..., start]
             t = targets[name]
+
+            # Delta anchor — same transform as forward()
+            anchor: Tensor | None = None
+            if name in self._delta_anchors:
+                anchor = targets.get(self._delta_anchors[name])
+
             if valid_mask is not None:
                 p = p[valid_mask]
                 t = t[valid_mask]
+                if anchor is not None:
+                    anchor = anchor[valid_mask]
+
+            if anchor is not None:
+                t = t - anchor
+                if name == "phi":
+                    t = torch.remainder(t + math.pi, 2.0 * math.pi) - math.pi
+
             if t.numel() == 0:
                 continue
 
@@ -1091,6 +1203,35 @@ class TrackParameterLoss(nn.Module):
             start, end = self._output_slices[name]
             raw = pred[..., start:end] if end - start > 1 else pred[..., start:start + 1]
             preds[name] = self.losses[name].predict(raw)
+        return preds
+
+    def predict_physical(
+        self,
+        pred: Tensor,
+        targets: dict[str, Tensor] | None = None,
+    ) -> dict[str, Tensor]:
+        """Convert raw model outputs to physical predictions, adding back delta anchors.
+
+        For parameters with ``delta_anchor`` configured, the prediction is
+        in delta space.  This method adds back the anchor value to recover
+        the full physical prediction.  Falls back to :meth:`predict` when
+        no delta anchors are configured or ``targets`` is ``None``.
+
+        Parameters
+        ----------
+        pred : Tensor
+            Raw model output ``(B, total_outputs)``.
+        targets : dict[str, Tensor] | None
+            Target dict containing anchor values (e.g. ``innermost_phi``).
+        """
+        preds = self.predict(pred)
+        if targets is not None and self._delta_anchors:
+            for name, anchor_key in self._delta_anchors.items():
+                if anchor_key in targets:
+                    preds[name] = preds[name] + targets[anchor_key]
+                    # Wrap phi to [-π, π]
+                    if name == "phi":
+                        preds[name] = torch.remainder(preds[name] + math.pi, 2.0 * math.pi) - math.pi
         return preds
 
     def predict_quantiles(

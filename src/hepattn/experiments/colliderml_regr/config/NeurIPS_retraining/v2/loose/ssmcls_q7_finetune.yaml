@@ -1,25 +1,15 @@
 # =============================================================================
-# SSM (ssm_state) + Gaussian NLL + circular-phi + SAM + batch trimming — SCALED
-# Sibling of ssm_gauss_sam_trim_scratch.yaml with a width + d_state bump.
-# dim 128 → 192, d_state 32 → 64.  Expected ~12–14M params.
-# 4xH100 DDP, batch 16k per GPU (activations grow with dim * d_state).
-# =============================================================================
-# All training knobs (SAM, trim, schedule, data, losses) are identical to the
-# 4a baseline config.  Only the encoder + projection head widths and the
-# per-GPU batch size differ.  Running 4a and 4b as a pair cleanly attributes
-# core-resolution gains to either the SAM+trim recipe or the capacity bump.
+# SSM-CLS (Mamba-2 + learned CLS) + Q7 safety — FP32 fine-tune on p200
 # =============================================================================
 
 trainer:
   devices: -1
-  max_epochs: 50
-  num_sanity_val_steps: 1
-  # See 4a note: manual optimization forbids trainer.gradient_clip_val.
-  gradient_clip_val: null
+  max_epochs: 100
+  gradient_clip_val: 1.0
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSM-Gauss-SAM-trim-scratch-scaled
+      name: TRK-v2-SSMCLS-Q7-FP32-Loose-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -31,6 +21,11 @@ trainer:
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
         log_every_n_steps: 50
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.GradientSpikeSkip
+      init_args:
+        k: 5.0
+        warmup_steps: 200
+        buffer_size: 500
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
       init_args:
@@ -50,85 +45,82 @@ trainer:
         mode: min
         verbose: true
         check_on_train_epoch_end: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MambaBackboneFreeze
+      init_args:
+        unfreeze_epoch: 5
 
 model:
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ssmcls_q7_pretrain.ckpt
   optimizer: AdamW
-  use_sam: true
-  sam_rho: 0.05
-  sam_adaptive: false
-  sam_start_epoch: 2
-  trim_frac: 0.05
-  trim_warmup_frac: 0.1
-  gradient_clip_val: 1.0
-
   lrs_config:
     initial: 1.0e-05
-    max: 5.0e-04
+    max: 7.0e-04
     end: 1.0e-06
     pct_start: 0.10
     weight_decay: 0.01
     betas: [0.9, 0.95]
     skip_scheduler: false
-    schedule: cosine
+    schedule: cosine_freeze
+    unfreeze_epoch: 5
+    unfreeze_lr: 5.0e-05
 
   model:
     init_args:
-      # -- width bump: 128 -> 192 (overrides base.yaml) ---------------------
+      pool: ssm_cls
       dim: 192
-      state_head_output_dim: 192
-      state_head_hidden_layers: [256]
-      output_head_hidden_layers: [192]
       input_net_hidden_layers: [192]
-      pool: ssm_state
+      output_head_hidden_layers: [256]
       encoder:
-        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 8
+          num_layers: 10
           dim: 192
-          d_state: 64           # 32 -> 64 : linear cost, larger SSM memory
+          d_state: 32
           d_conv: 4
           expand: 2
-          headdim: 32           # => nheads = dim * expand / headdim = 12
+          headdim: 32
           ngroups: 1
           chunk_size: 256
           norm: RMSNorm
-          dropout: 0.0
+          dropout: 0.1
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
           parameter_order: [d0, z0, phi, theta, qop]
-          qop_tail_weight: 1.5
-          qop_scale: 2.0
           config:
             d0:
-              type: gaussian
-              weight: 0.5
-              norm_min: -2.6
-              norm_max: 2.6
+              type: quantile
+              weight: 1.0
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
-              type: gaussian
+              type: quantile
               weight: 1.0
               norm_min: -200.0
               norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
               type: circular
-              weight: 10.0
+              weight: 1.0
               beta: 0.01
             theta:
-              type: gaussian_eta
-              weight: 5.0
-              norm_min: -3.1
-              norm_max: 3.1
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             qop:
-              type: gaussian
+              type: quantile
               weight: 5.0
-              norm_min: -2.1
-              norm_max: 2.1
+              norm_min: -5.0
+              norm_max: 5.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
 
 data:
-  preprocessed_dir: /scratch/collider_ml/p200_core_kf_hits_finetune
+  preprocessed_dir: /scratch/colliderml/p200_loose_finetune
   load_acts: true
-  batch_size: 16000            # reduced from 30k: Mamba-2 activations grow with dim*d_state
+  batch_size: 30000
   num_workers: 1
   streaming: true
   shard_buffer_size: 50

@@ -1,20 +1,25 @@
-  # =============================================================================
+# =============================================================================
 # SSM (ssm_state) + Gaussian NLL + circular-phi + SAM + batch trimming — SCALED
-# Same scaled architecture as ssm_gauss_sam_trim_scratch_scaled.yaml
-# (dim 192, d_state 64, ~17M params) but trained on the loose-cuts p200
-# finetune dataset for comparison against the KF double-matched version.
-# 4xH100 DDP, batch 16k per GPU.
+# Sibling of ssm_gauss_sam_trim_scratch.yaml with a width + d_state bump.
+# dim 128 → 192, d_state 32 → 64.  Expected ~12–14M params.
+# 4xH100 DDP, batch 16k per GPU (activations grow with dim * d_state).
+# =============================================================================
+# All training knobs (SAM, trim, schedule, data, losses) are identical to the
+# 4a baseline config.  Only the encoder + projection head widths and the
+# per-GPU batch size differ.  Running 4a and 4b as a pair cleanly attributes
+# core-resolution gains to either the SAM+trim recipe or the capacity bump.
 # =============================================================================
 
 trainer:
   devices: -1
   max_epochs: 50
   num_sanity_val_steps: 1
+  # See 4a note: manual optimization forbids trainer.gradient_clip_val.
   gradient_clip_val: null
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSM-Gauss-SAM-trim-scratch-scaled-loose
+      name: TRK-v2-SSM192-Gauss-FP32-CoreKF-scratch-SAMtrim
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -68,6 +73,7 @@ model:
 
   model:
     init_args:
+      # -- width bump: 128 -> 192 (overrides base.yaml) ---------------------
       dim: 192
       state_head_output_dim: 192
       state_head_hidden_layers: [256]
@@ -79,10 +85,10 @@ model:
         init_args:
           num_layers: 8
           dim: 192
-          d_state: 64
+          d_state: 64           # 32 -> 64 : linear cost, larger SSM memory
           d_conv: 4
           expand: 2
-          headdim: 32
+          headdim: 32           # => nheads = dim * expand / headdim = 12
           ngroups: 1
           chunk_size: 256
           norm: RMSNorm
@@ -97,8 +103,8 @@ model:
             d0:
               type: gaussian
               weight: 0.5
-              norm_min: -5.0
-              norm_max: 5.0
+              norm_min: -2.6
+              norm_max: 2.6
             z0:
               type: gaussian
               weight: 1.0
@@ -116,13 +122,13 @@ model:
             qop:
               type: gaussian
               weight: 5.0
-              norm_min: -5.5
-              norm_max: 5.5
+              norm_min: -2.1
+              norm_max: 2.1
 
 data:
-  preprocessed_dir: /scratch/colliderml/p200_loose_finetune
+  preprocessed_dir: /scratch/collider_ml/p200_core_kf_hits_finetune
   load_acts: true
-  batch_size: 16000
+  batch_size: 16000            # reduced from 30k: Mamba-2 activations grow with dim*d_state
   num_workers: 1
   streaming: true
   shard_buffer_size: 50

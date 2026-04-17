@@ -1,0 +1,101 @@
+================================================================================
+ACTS CKF d0 OUTLIER INVESTIGATION REPORT
+================================================================================
+
+Total tracks loaded:             23,380,891
+Tracks with ACTS match:           8,014,862
+Double-matched (DM) tracks:       6,617,521
+
+------------------------------------------------------------
+DOUBLE-MATCHED TRACKS: d0 statistics
+------------------------------------------------------------
+  Truth d0 mean:       0.000056 mm
+  Truth d0 std:        0.198152 mm
+  ACTS d0 mean:       -0.000027 mm
+  ACTS d0 std:         0.284689 mm
+  Residual mean:      -0.000083 mm
+  Residual std:        0.210246 mm
+
+------------------------------------------------------------
+OUTLIER QUANTIFICATION (DM tracks)
+------------------------------------------------------------
+
+Definition: |truth d0| < window AND |ACTS d0 residual| > threshold
+
+  |truth d0| < 0.10 mm  (6,429,055 tracks):
+    |residual| > 0.5 mm:  133,590  (2.078%)
+    |residual| > 1.0 mm:   55,231  (0.859%)
+    |residual| > 2.0 mm:   12,996  (0.202%)
+    |residual| > 3.0 mm:    2,550  (0.040%)
+
+  |truth d0| < 0.25 mm  (6,477,253 tracks):
+    |residual| > 0.5 mm:  134,512  (2.077%)
+    |residual| > 1.0 mm:   55,601  (0.858%)
+    |residual| > 2.0 mm:   13,079  (0.202%)
+    |residual| > 3.0 mm:    2,565  (0.040%)
+
+  |truth d0| < 0.50 mm  (6,515,701 tracks):
+    |residual| > 0.5 mm:  135,496  (2.080%)
+    |residual| > 1.0 mm:   56,017  (0.860%)
+    |residual| > 2.0 mm:   13,162  (0.202%)
+    |residual| > 3.0 mm:    2,584  (0.040%)
+
+  |truth d0| < 1.00 mm  (6,557,543 tracks):
+    |residual| > 0.5 mm:  136,843  (2.087%)
+    |residual| > 1.0 mm:   56,520  (0.862%)
+    |residual| > 2.0 mm:   13,253  (0.202%)
+    |residual| > 3.0 mm:    2,614  (0.040%)
+
+------------------------------------------------------------
+TRACKS WITH EXACTLY truth d0 = 0.0 (DM)
+------------------------------------------------------------
+  Count: 0 of 6,617,521 DM tracks (0.000%)
+
+------------------------------------------------------------
+OUTLIER CHARACTERISATION (|truth d0| < 0.5, |ACTS resid| > 1 mm, DM)
+------------------------------------------------------------
+  Outlier count: 56,017
+  Good count:    6,459,684
+  Outlier fraction: 0.860%
+
+  Kinematic comparison (mean ± std):
+        pT [GeV]: outlier=1.056±0.522  good=1.449±2.178
+           nhits: outlier=12.499±2.025  good=13.010±2.209
+       vp=1 frac: outlier=0.018  good=0.040
+
+  Other ACTS residuals for outlier tracks:
+       d0: outlier σ=1.8316 mm  good σ=0.1207 mm
+       z0: outlier σ=13.5816 mm  good σ=1.1472 mm
+      phi: outlier σ=45.5620 mrad  good σ=3.6548 mrad
+    theta: outlier σ=22.3608 mrad  good σ=2.1549 mrad
+      qop: outlier σ=0.0131 1/GeV  good σ=0.0061 1/GeV
+
+------------------------------------------------------------
+EXTRAPOLATION TO FULL DATASET
+------------------------------------------------------------
+  DM tracks (|truth d0|<0.5, |resid|>1mm):
+    In loaded shards (50): 56,017
+    Estimated in full dataset (~1000 shards): ~1,120,340
+
+  All tracks with ACTS (|truth d0|<0.5, |resid|>1mm):
+    In loaded shards (50): 442,949
+    Estimated in full dataset (~1000 shards): ~8,858,980
+
+------------------------------------------------------------
+SUGGESTED PREPROCESSING CUTS
+------------------------------------------------------------
+
+Option 1 (conservative): Filter on ACTS d0 residual
+  When a track has an ACTS match (DM or not), discard if
+  |ACTS_d0 - truth_d0| > 2.0 mm
+  At threshold 1.0 mm: removes 57,830 DM tracks (0.874%)
+  At threshold 2.0 mm: removes 13,625 DM tracks (0.206%)
+  At threshold 3.0 mm: removes 2,784 DM tracks (0.042%)
+
+Option 2 (targeted): Only remove if truth d0 ≈ 0
+  Discard if |truth_d0| < 0.1 mm AND |ACTS_d0 - truth_d0| > 1.0 mm
+  Removes: 55,231 DM tracks (0.835%)
+
+Option 3 (simulation-level): Flag truth d0 == 0.0 exactly
+  These may be simulation artifacts (particle not properly propagated)
+  Removes: 0 DM tracks (0.000%)

@@ -549,7 +549,8 @@ class BidirectionalMambaEncoder(nn.Module):
 
         # Tie sequence output into hidden_state graph so all parameters
         # participate in the backward pass (avoids DDP unused-parameter errors).
-        # The 0-valued addition is a no-op numerically.
-        hidden_state = hidden_state + 0.0 * x.sum()
+        # The 0-valued addition is a no-op numerically.  The .float() prevents
+        # bf16 overflow on the sum (long sequences can exceed bf16 range).
+        hidden_state = hidden_state + 0.0 * x.float().sum()
 
         return x, hidden_state

@@ -129,9 +129,12 @@ class BidirectionalMambaCLSFinalLayer(nn.Module):
         x_combined = gate * x_fwd + (1 - gate) * x_bwd
         output = skip + self.dropout(x_combined)
 
-        # Per-direction CLS readouts — ungated.
-        cls_fwd_out = x_fwd[:, -1, :]   # forward scan terminal → cls_fwd
-        cls_bwd_out = x_bwd[:, 0, :]    # backward scan terminal (post-flip) → cls_bwd
+        # Per-direction CLS readouts — extracted from the gated, residualized
+        # output.  Previously these were taken from the raw scan outputs
+        # (x_fwd[:, -1] / x_bwd[:, 0]) which bypassed the stabilising gate
+        # and residual connection, causing ~5 OOM gradient explosion.
+        cls_fwd_out = output[:, -1, :]   # forward scan terminal → cls_fwd
+        cls_bwd_out = output[:, 0, :]    # backward scan terminal → cls_bwd
 
         return output, cls_fwd_out, cls_bwd_out
 
@@ -205,6 +208,12 @@ class BidirectionalMambaCLSEncoder(nn.Module):
         else:
             self.final_norm = nn.Identity()
 
+        # Normalise CLS readouts before they enter the regression head.
+        # The per-direction CLS outputs are extracted from raw Mamba-2 scan
+        # outputs (ungated, no residual) and bypass ``final_norm`` above.
+        # Without this, their unconstrained magnitude causes gradient spikes.
+        self.cls_norm = nn.RMSNorm(dim)
+
     @property
     def pool_dim(self) -> int:
         """Dimension of the concatenated ``(cls_fwd, cls_bwd)`` pooled output."""
@@ -273,13 +282,19 @@ class BidirectionalMambaCLSEncoder(nn.Module):
             x_unsort_idx = torch.argsort(x_sort_idx, dim=-1)
             x_hits = torch.gather(x_hits, -2, x_unsort_idx.unsqueeze(-1).expand_as(x_hits))
 
+        # Normalise the per-direction CLS readouts (raw Mamba-2 scan
+        # outputs with unconstrained magnitude) before concatenation.
+        cls_fwd_out = self.cls_norm(cls_fwd_out)
+        cls_bwd_out = self.cls_norm(cls_bwd_out)
+
         # Concatenate the per-direction CLS readouts → (B, 2*dim).
         cls_concat = torch.cat([cls_fwd_out, cls_bwd_out], dim=-1)
 
         # DDP unused-parameter tie: pull the per-hit sequence-output path
         # (and therefore the `gate` weights inside each layer) into the
         # autograd graph even when the downstream model discards x_hits.
-        # Numerically a no-op — just a 0.0-scaled sum.
-        cls_concat = cls_concat + 0.0 * x_hits.sum()
+        # Numerically a no-op.  The .float() prevents bf16 overflow on the
+        # sum (long sequences can exceed bf16 range).
+        cls_concat = cls_concat + 0.0 * x_hits.float().sum()
 
         return x_hits, cls_concat

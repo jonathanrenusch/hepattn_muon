@@ -14,7 +14,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-TXF-Q19-pretrain
+      name: TRK-v2-TXF-Q19-FP32-Loose-pretrain
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
 

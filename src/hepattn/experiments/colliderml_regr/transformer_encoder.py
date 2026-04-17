@@ -77,6 +77,12 @@ class EncoderWithCLS(nn.Module):
         self.encoder = Encoder(dim=dim, **encoder_kwargs)
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * cls_init_scale)
 
+        # Final RMSNorm on the encoder output.  The inner Encoder uses
+        # pre-norm layers (norm → attn/ffn → residual) but has no final
+        # norm, so the residual stream magnitude grows with depth.
+        # Normalising before CLS extraction stabilises the regression head.
+        self.final_norm = nn.RMSNorm(dim)
+
     def forward(
         self,
         x: Tensor,
@@ -140,6 +146,10 @@ class EncoderWithCLS(nn.Module):
             **kwargs,
         )
 
+        # Normalise before splitting — the pre-norm Encoder has no final
+        # LayerNorm so the residual stream magnitude grows with depth.
+        seq_out = self.final_norm(seq_out)
+
         # Split CLS and hit outputs.
         cls_out = seq_out[:, 0, :]         # (B, D)
         hit_out = seq_out[:, 1:, :]        # (B, N, D)
@@ -154,7 +164,8 @@ class EncoderWithCLS(nn.Module):
         # DDP unused-parameter tie: pull the hit-output path (and therefore
         # every internal encoder parameter) into the autograd graph even
         # when the downstream model consumes only the CLS output.
-        # Numerically a no-op.
-        cls_out = cls_out + 0.0 * hit_out.sum()
+        # Numerically a no-op.  The .float() prevents bf16 overflow on the
+        # sum (long sequences can exceed bf16 range).
+        cls_out = cls_out + 0.0 * hit_out.float().sum()
 
         return hit_out, cls_out

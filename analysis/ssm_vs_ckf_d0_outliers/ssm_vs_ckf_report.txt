@@ -1,0 +1,111 @@
+================================================================================
+SSM vs CKF d0 OUTLIER CROSS-ANALYSIS
+================================================================================
+
+Total test tracks: 23,414,702
+Tracks with ACTS match: 8,036,141
+Double-matched tracks: 6,632,700
+|truth d0| < 0.5 mm: 22,754,751
+
+------------------------------------------------------------
+OUTLIER COUNTS (|truth d0| < 0.5 mm, |residual| > 1 mm)
+------------------------------------------------------------
+  SSM outliers (all tracks):           49,247
+  CKF outliers (DM tracks):            56,474
+  CKF outliers (any ACTS match):      444,414
+
+------------------------------------------------------------
+OVERLAP ANALYSIS (tracks with ACTS match, |truth d0| < 0.5)
+------------------------------------------------------------
+  Base population: 7,899,771 tracks
+  Both SSM + CKF fail:         8,083  (0.102%)
+  SSM only fails:              1,078  (0.014%)
+  CKF only fails:            436,331  (5.523%)
+  Neither fails:           7,454,279
+
+  DM subset: 6,530,251 tracks
+  Both fail (DM):              6,593  (0.101%)
+  SSM only fails (DM):           134  (0.002%)
+  CKF only fails (DM):        49,881  (0.764%)
+
+------------------------------------------------------------
+SSM-ONLY OUTLIER CHARACTERISATION
+------------------------------------------------------------
+  SSM outlier (all, near-zero d0): 49,247 tracks
+    pT mean: 0.556 GeV, median: 0.415 GeV
+    nhits mean: 12.0
+    |eta| mean: 1.68
+    frac pT < 0.5 GeV: 0.609
+    frac |eta| > 2: 0.392
+
+  SSM outlier + has ACTS: 9,161 tracks
+    pT mean: 1.024 GeV, median: 0.923 GeV
+    nhits mean: 12.8
+    |eta| mean: 1.68
+    frac pT < 0.5 GeV: 0.113
+    frac |eta| > 2: 0.390
+
+  SSM outlier + no ACTS match: 40,086 tracks
+    pT mean: 0.449 GeV, median: 0.367 GeV
+    nhits mean: 11.9
+    |eta| mean: 1.68
+    frac pT < 0.5 GeV: 0.722
+    frac |eta| > 2: 0.393
+
+  SSM outlier + DM: 6,727 tracks
+    pT mean: 1.140 GeV, median: 1.003 GeV
+    nhits mean: 12.8
+    |eta| mean: 1.74
+    frac pT < 0.5 GeV: 0.001
+    frac |eta| > 2: 0.448
+
+------------------------------------------------------------
+SSM d0 → 0 COLLAPSE (horizontal stripe)
+------------------------------------------------------------
+  |truth d0| > 0.5 mm, |SSM d0| < 0.1 mm: 92,702 of 659,951 (14.05%)
+  |truth d0| > 1.0 mm, |SSM d0| < 0.1 mm: 27,949 of 487,889 (5.73%)
+  |truth d0| > 2.0 mm, |SSM d0| < 0.1 mm: 5,948 of 278,925 (2.13%)
+  |truth d0| > 3.0 mm, |SSM d0| < 0.1 mm: 2,735 of 150,842 (1.81%)
+
+------------------------------------------------------------
+GRADIENT NOISE BUDGET — |SSM d0 residual| breakdown
+------------------------------------------------------------
+  |resid| in [0.0, 0.1): 22,653,448 tracks (96.75%), abs resid sum: 243618 (37.0% of total)
+  |resid| in [0.1, 0.5):    524,806 tracks (2.24%), abs resid sum: 125338 (19.0% of total)
+  |resid| in [0.5, 1.0):    138,025 tracks (0.59%), abs resid sum: 96248 (14.6% of total)
+  |resid| in [1.0, 2.0):     64,908 tracks (0.28%), abs resid sum: 88922 (13.5% of total)
+  |resid| in [2.0, 5.0):     33,184 tracks (0.14%), abs resid sum: 102501 (15.6% of total)
+  |resid| in [5.0, inf):        331 tracks (0.00%), abs resid sum: 1982 (0.3% of total)
+
+------------------------------------------------------------
+IMPACT OF PROPOSED CUTS ON SSM d0 PERFORMANCE
+------------------------------------------------------------
+  Remove DM tracks with |CKF d0 resid| > 2mm:
+    Tracks: 23,414,702 -> 23,401,165 (0.06% removed)
+    SSM d0 σ(resid): 0.1587 -> 0.1568 mm
+    SSM d0 outliers (|r|>1mm): 98,423 -> 96,110
+
+  Remove tracks with |CKF d0 resid| > 2mm (any ACTS):
+    Tracks: 23,414,702 -> 23,243,435 (0.73% removed)
+    SSM d0 σ(resid): 0.1587 -> 0.1563 mm
+    SSM d0 outliers (|r|>1mm): 98,423 -> 94,909
+
+  Remove low-pT pile-up (pT < 0.5 & non-hard-scatter):
+    Tracks: 23,414,702 -> 12,887,241 (44.96% removed)
+    SSM d0 σ(resid): 0.1587 -> 0.1246 mm
+    SSM d0 outliers (|r|>1mm): 98,423 -> 32,212
+
+  Require pT > 0.5 GeV:
+    Tracks: 23,414,702 -> 12,794,326 (45.36% removed)
+    SSM d0 σ(resid): 0.1587 -> 0.1239 mm
+    SSM d0 outliers (|r|>1mm): 98,423 -> 31,633
+
+  Require nhits >= 6:
+    Tracks: 23,414,702 -> 22,139,682 (5.45% removed)
+    SSM d0 σ(resid): 0.1587 -> 0.1545 mm
+    SSM d0 outliers (|r|>1mm): 98,423 -> 87,590
+
+  Require pT > 0.5 AND nhits >= 6:
+    Tracks: 23,414,702 -> 12,200,838 (47.89% removed)
+    SSM d0 σ(resid): 0.1587 -> 0.1193 mm
+    SSM d0 outliers (|r|>1mm): 98,423 -> 27,694

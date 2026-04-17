@@ -13,7 +13,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSM-Q19-p200
+      name: TRK-v2-SSM-Q19-FP32-Loose-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:

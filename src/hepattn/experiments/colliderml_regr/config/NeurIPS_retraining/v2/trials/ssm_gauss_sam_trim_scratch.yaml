@@ -27,7 +27,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSM-Gauss-SAM-trim-scratch
+      name: TRK-v2-SSM-Gauss-FP32-CoreKF-scratch-SAMtrim
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:

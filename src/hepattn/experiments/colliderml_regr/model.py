@@ -223,6 +223,12 @@ class TrackParameterRegressor(nn.Module):
         norm_max: list[float] | None = None,
         # Precision
         encoder_autocast_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16",
+        # Output head initialisation scale — multiply the last Linear layer's
+        # weights by this factor at init.  Keeps initial predictions near zero
+        # regardless of hidden-state magnitude, which is critical for Gaussian
+        # NLL (exp(-log_var) amplifies large initial outputs).  Default 1.0
+        # is a no-op.
+        output_head_init_scale: float = 1.0,
     ):
         super().__init__()
 
@@ -302,17 +308,34 @@ class TrackParameterRegressor(nn.Module):
             )
             output_head_input_dim = 2 * state_head_output_dim
         elif pool == "ssm_cls":
-            # Two learned CLS tokens concatenated → (B, 2 * dim)
+            # Two learned CLS tokens concatenated → (B, 2 * dim).
+            # Projection head provides a gradient bottleneck matching the
+            # ssm_state path — without it, raw encoder-output gradients
+            # enter the bf16 backward pass at ~7x higher magnitude.
             self.per_dir_dim = None
             self.fwd_head = None
             self.bwd_head = None
-            output_head_input_dim = 2 * dim
+            self.pool_head = Dense(
+                input_size=2 * dim,
+                output_size=state_head_output_dim,
+                hidden_layers=state_head_hidden_layers,
+                dropout=state_head_dropout,
+                activation=self._resolve_activation(state_head_activation),
+            )
+            output_head_input_dim = state_head_output_dim
         elif pool == "register_token":
-            # Single learned register token → (B, dim)
+            # Single learned register token → (B, dim).
             self.per_dir_dim = None
             self.fwd_head = None
             self.bwd_head = None
-            output_head_input_dim = dim
+            self.pool_head = Dense(
+                input_size=dim,
+                output_size=state_head_output_dim,
+                hidden_layers=state_head_hidden_layers,
+                dropout=state_head_dropout,
+                activation=self._resolve_activation(state_head_activation),
+            )
+            output_head_input_dim = state_head_output_dim
         else:  # unreachable — guarded above
             raise ValueError(f"Unknown pool '{pool}'")
 
@@ -324,6 +347,21 @@ class TrackParameterRegressor(nn.Module):
             dropout=output_head_dropout,
             activation=self._resolve_activation(output_head_activation),
         )
+
+        # Scale down the output head's last Linear layer so that initial
+        # predictions are near zero regardless of hidden-state magnitude.
+        # Critical for Gaussian NLL where large initial outputs push log_var
+        # into saturated clamp regions with zero gradient.
+        if output_head_init_scale != 1.0:
+            last_layer = self.output_head.net[-1]
+            assert isinstance(last_layer, nn.Linear), (
+                f"output_head_init_scale requires the last layer of output_head "
+                f"to be nn.Linear, got {type(last_layer).__name__}"
+            )
+            with torch.no_grad():
+                last_layer.weight.mul_(output_head_init_scale)
+                if last_layer.bias is not None:
+                    last_layer.bias.zero_()
 
     def _normalise(self, x: Tensor) -> Tensor:
         """Min-max normalise features to [0, 1]."""
@@ -401,8 +439,8 @@ class TrackParameterRegressor(nn.Module):
             z_bwd = self.bwd_head(h_bwd)
             z = torch.cat([z_fwd, z_bwd], dim=-1)
         else:
-            # ssm_cls / register_token — pooled already has the right dim.
-            z = pooled
+            # ssm_cls / register_token — project through pool_head bottleneck.
+            z = self.pool_head(pooled)
 
         # Final regression output (linear final activation)
         pred = self.output_head(z)
@@ -587,7 +625,7 @@ class TrackRegressionWrapper(LightningModule):
     def predict_step(self, batch, batch_idx):
         inputs, targets = batch
         outputs = self.model(inputs)
-        preds = self.model.predict(outputs)
+        preds = self.model.loss_module.predict_physical(outputs["pred"], targets)
         return preds, targets
 
     # -- step helpers -------------------------------------------------------
@@ -622,8 +660,9 @@ class TrackRegressionWrapper(LightningModule):
         for name, value in calibration_metrics.items():
             self.log(f"{stage}/{name}", value, sync_dist=do_sync)
 
-        # Compute and log per-parameter metrics for all stages
-        preds = self.model.predict(outputs)
+        # Compute and log per-parameter metrics for all stages.
+        # Use predict_physical to add back delta anchors for correct residuals.
+        preds = self.model.loss_module.predict_physical(outputs["pred"], targets)
         self._log_metrics(preds, targets, valid_mask, stage)
 
         return losses["total"]
@@ -893,7 +932,7 @@ class TrackRegressionWrapper(LightningModule):
             self.log(f"train/{name}", value, sync_dist=False)
 
         # Per-parameter MAE / precision / IQR / RMS logging.
-        preds = self.model.predict(outputs)
+        preds = self.model.loss_module.predict_physical(outputs["pred"], targets)
         self._log_metrics(preds, targets, valid_mask, "train")
 
         return {"loss": losses["total"]}
@@ -922,8 +961,8 @@ class TrackRegressionWrapper(LightningModule):
         for name, value in calibration_metrics.items():
             self.log(f"test/{name}", value, sync_dist=True)
 
-        # Compute predictions and metrics
-        preds = self.model.predict(outputs)
+        # Compute predictions and metrics (predict_physical adds back delta anchors)
+        preds = self.model.loss_module.predict_physical(outputs["pred"], targets)
         self._log_metrics(preds, targets, valid_mask, "test")
 
         # Full quantile predictions (for quantile-based losses)
