@@ -17,12 +17,12 @@ Usage::
     python fit_d0_spline_core.py --all               # use all 1000 shards
 
 Output:
-    config/NeurIPS_retraining/v2/core/splines/spline_d0.yaml
-    config/NeurIPS_retraining/v2/core/splines/d0_spline_fit.png
-    config/NeurIPS_retraining/v2/core/splines/d0_qq_uniform.png
-    config/NeurIPS_retraining/v2/core/splines/d0_calibration.png
-    config/NeurIPS_retraining/v2/core/splines/d0_pdf_overlay.png
-    config/NeurIPS_retraining/v2/core/splines/d0_transformed_hist.png
+    config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+    config/NeurIPS_retraining/v2/core_configs/splines/d0_spline_fit.png
+    config/NeurIPS_retraining/v2/core_configs/splines/d0_qq_uniform.png
+    config/NeurIPS_retraining/v2/core_configs/splines/d0_calibration.png
+    config/NeurIPS_retraining/v2/core_configs/splines/d0_pdf_overlay.png
+    config/NeurIPS_retraining/v2/core_configs/splines/d0_transformed_hist.png
 """
 
 from __future__ import annotations
@@ -407,7 +407,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
-        help="Output directory (default: config/NeurIPS_retraining/v2/core/splines)",
+        help="Output directory (default: config/NeurIPS_retraining/v2/core_configs/splines)",
     )
     parser.add_argument(
         "--num-shards", type=int, default=-1,

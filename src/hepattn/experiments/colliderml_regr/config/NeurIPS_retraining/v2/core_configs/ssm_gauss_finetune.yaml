@@ -1,0 +1,154 @@
+# =============================================================================
+# SSM + Gaussian NLL (+ circular phi) — finetune on p200_core, with 95% trim
+# =============================================================================
+# Pair to ssm_gauss_pretrain.yaml.
+#
+# Uses softplus variance parameterisation (same as pretrain) for stable
+# Gaussian NLL training.  See pretrain header for rationale.
+#
+# Extras vs pretrain:
+#   - pretrained_ckpt_path seeds from the core-pretrain run
+#   - AdamW + cosine_freeze (backbone frozen for 5 epochs, then unfreezes at LR
+#     5e-5 while the heads cosine-decay from 7e-4 to 1e-6)
+#   - MambaBackboneFreeze callback
+#   - 95% per-batch trim: after a 10% warm-up, drop the top-5% loss samples
+#     each step (genuine tail robustness for Gaussian NLL).
+#   - Manual optimization required (trim_frac > 0), so gradient_clip_val is
+#     routed through ``model.gradient_clip_val`` instead of trainer level.
+#   - GradientSpikeSkip kept as safety net during backbone unfreezing.
+# =============================================================================
+
+trainer:
+  devices: -1
+  max_epochs: 100
+  # Manual optimization used (trim_frac > 0) → Lightning forbids trainer
+  # gradient_clip_val.  Clipping is applied inside training_step via
+  # model.gradient_clip_val below.
+  gradient_clip_val: null
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSM-Gauss-FP32-Core-finetune
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.GradientSpikeSkip
+      init_args:
+        k: 5.0
+        warmup_steps: 200
+        buffer_size: 500
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MambaBackboneFreeze
+      init_args:
+        unfreeze_epoch: 10
+
+model:
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ssm_gauss_pretrain.ckpt
+  optimizer: AdamW
+  trim_frac: 0.05                # drop worst 5% of per-sample losses once warm-up passes
+  trim_warmup_frac: 0.1          # warm-up = 10% of max_epochs = 10 epochs (max_epochs=100)
+  gradient_clip_val: 1.0         # manual clip inside training_step
+
+  lrs_config:
+    initial: 1.0e-05
+    max: 7.0e-04
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 0.01
+    betas: [0.9, 0.95]
+    skip_scheduler: false
+    schedule: cosine_freeze
+    unfreeze_epoch: 10
+    unfreeze_lr: 5.0e-05
+
+  model:
+    init_args:
+      pool: ssm_state
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 8
+          dim: 128
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: gaussian
+              variance_param: softplus
+              var_init: 2.0
+              var_eps: 1.0e-03
+              weight: 1.0
+              norm_min: -2.5
+              norm_max: 2.5
+            z0:
+              type: gaussian
+              variance_param: softplus
+              var_init: 2.0
+              var_eps: 1.0e-03
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 1.0
+            theta:
+              type: gaussian_eta
+              variance_param: softplus
+              var_init: 2.0
+              var_eps: 1.0e-03
+              weight: 5.0
+              norm_min: -3.0
+              norm_max: 3.0
+            qop:
+              type: gaussian
+              variance_param: softplus
+              var_init: 2.0
+              var_eps: 1.0e-03
+              weight: 10.0
+              norm_min: -2.0
+              norm_max: 2.0
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_core_finetune
+  load_acts: true
+  batch_size: 30000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

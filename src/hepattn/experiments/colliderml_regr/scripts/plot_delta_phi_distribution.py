@@ -16,7 +16,7 @@ Usage::
     python plot_delta_phi_distribution.py --num-shards 100
     python plot_delta_phi_distribution.py --all           # use every shard
 
-Outputs (under ``colliderml_regr/config/NeurIPS_retraining/v2/core/splines/``):
+Outputs (under ``colliderml_regr/config/NeurIPS_retraining/v2/core_configs/splines/``):
     delta_phi_hist_log.png      — log-y histogram, full range + zoomed core
     delta_phi_cdf.png           — empirical CDF
     delta_phi_summary.txt       — quantile summary + spline-knot suggestion

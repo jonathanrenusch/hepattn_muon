@@ -1,0 +1,126 @@
+# =============================================================================
+# ULTIMATE QUANTILE SCALED — pretrain on p0_core
+# =============================================================================
+# Same loss design as ultimate_quantile_pretrain.yaml but with PURE depth-first
+# scaling (as validated for this regression task):
+#   - num_layers: 8 → 16 (2x depth, only axis for encoder scaling)
+#   - dim: 128 (unchanged — no width increase)
+#   - d_state: 32 → 64 (2x recurrence state; matches user's empirical +10%
+#     observation from doubling d_state)
+#   - headdim: 32 (unchanged; inner_dim=256, nheads=8)
+#   - Dense heads scaled to match the larger per-direction state
+#     (per_dir_dim = 8*32*64 = 16,384, 2x baseline's 8,192):
+#       state_head: Dense(16384 → [1024] → 512) with SiLU + dropout
+#       output_head: Dense(1024 → [256] → N) with SiLU
+# =============================================================================
+
+trainer:
+  devices: [3]
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-ULTIMATE-Q-SCALED-pretrain
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
+    init_args:
+      input_dim: 12
+      dim: 128
+      pool: ssm_state
+      state_head_output_dim: 512
+      state_head_hidden_layers: [1024]
+      output_head_hidden_layers: [256]
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
+        init_args:
+          num_layers: 16
+          dim: 128
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 256
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: spline_quantile
+              weight: 1.0
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: spline_quantile
+              weight: 1.0
+              delta_anchor: innermost_phi
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  load_acts: true
+  batch_size: 2048
+  num_workers: 16
+  prefetch_factor: 4
