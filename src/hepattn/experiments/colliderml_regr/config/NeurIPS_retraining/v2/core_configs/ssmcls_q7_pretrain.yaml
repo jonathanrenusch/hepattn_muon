@@ -12,9 +12,9 @@
 #   - Removed GradientSpikeSkip (band-aid, root cause now addressed).
 #   - Encoder dropout 0.0 — matches the working ssm_q7 config.
 # =============================================================================
-
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/3fc8acb5e66c4d01aba68d22d1c691cc/ckpts/epoch=015-val_total=0.01108.ckpt
 trainer:
-  devices: [2]
+  devices: [0]
   max_epochs: 50
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
@@ -69,7 +69,7 @@ model:
           expand: 2
           headdim: 32
           ngroups: 1
-          chunk_size: 256
+          chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
       loss_module:

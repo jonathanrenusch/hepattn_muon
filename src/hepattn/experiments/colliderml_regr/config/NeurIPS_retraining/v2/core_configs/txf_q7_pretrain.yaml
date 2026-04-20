@@ -12,8 +12,9 @@
 #     missing-projection-head problem.
 # =============================================================================
 
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/6735da4772d743c6a59ba3454c9c8124/ckpts/epoch=036-val_total=0.00859.ckpt
 trainer:
-  devices: [3]
+  devices: [0]
   max_epochs: 50
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger

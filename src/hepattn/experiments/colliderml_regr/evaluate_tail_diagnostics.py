@@ -197,6 +197,8 @@ def plot_mean_residual_vs_truth_d0(
                          capsize=2, label=acts_label)
 
         ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        if name == "phi":
+            ax.set_ylim(-10, 10)
         ax.set_xlabel(PARAM_VALUE_LABELS.get("d0", r"$d_0$ [mm]"), fontsize=12)
         ax.set_ylabel(MEAN_LABELS.get(name, f"μ({name})"), fontsize=12)
         ax.set_title(f"Mean {name.upper()} Residual vs Truth $d_0$", fontsize=14)

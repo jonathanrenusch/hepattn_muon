@@ -1,19 +1,33 @@
 # =============================================================================
-# ULTIMATE QUANTILE — fine-tune on p200_core
+# SSM Q7 — precision-aware pretrain (p0_core)
 # =============================================================================
-# Fine-tune from ultimate_quantile_pretrain checkpoint.  Same loss/arch,
-# AdamW with one-cycle cosine schedule (no freeze), peak LR 3e-4.
-# See ultimate_quantile_pretrain.yaml for design rationale.
+# Baseline architecture (8L, dim=128, d_state=32) with the central-resolution
+# fixes discussed for z0/theta/qop cores:
+#   - chunk_size: 256 -> 8   (max track length is 20 hits, so with 256 the
+#     whole track lives in one chunk and never hits the fp32 cross-chunk
+#     reduction; at 8 each track sees ~3 fp32 re-syncs, which is where the
+#     long-range-precision fix actually comes from under bf16 compute)
+#   - batch_size: 2048 -> 4096  (H100 is at ~10% utilisation at 2048;
+#     doubling BS lets Lion's sign update average over more samples, which
+#     the scaling literature says it wants, without killing flatness since
+#     we simultaneously drop LR)
+#   - LR max: 5.0e-5 -> 3.0e-5  (Lion + higher BS wants lower peak LR;
+#     empirically the 10% precision gain at BS=2048 came from flatter
+#     minima, and we recover most of that by reducing LR instead of BS)
+#   - pct_start: 0.10 -> 0.15  (deeper warmup for the larger effective step)
+#   - weight_decay: 1.0e-3 -> 1.5e-3  (Lion wd scales inversely with LR
+#     reduction to keep lr*wd regularisation strength roughly constant)
+# Encoder still runs in bf16 autocast — the mamba2 CUDA kernel is best-tested
+# there. The fp32-polish experiment lives in ssm_q7_fp32polish_finetune.yaml.
 # =============================================================================
 
 trainer:
-  devices: -1
-  max_epochs: 100
-  gradient_clip_val: 1.0
+  devices: [0]
+  max_epochs: 50
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-ULTIMATE-Q-finetune
+      name: TRK-v2-SSM-Q7-PRECISION-pretrain
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -39,30 +53,17 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/total
-        patience: 30
+        patience: 50
         min_delta: 0.0
         mode: min
         verbose: true
         check_on_train_epoch_end: false
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_quantile_pretrain.ckpt
-  optimizer: AdamW
-  lrs_config:
-    initial: 1.0e-05
-    max: 3.0e-04
-    end: 1.0e-06
-    pct_start: 0.10
-    weight_decay: 1.0e-04
-    betas: [0.9, 0.95]
-    skip_scheduler: false
-
   model:
-    class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
     init_args:
-      input_dim: 12
-      dim: 128
       pool: ssm_state
+      encoder_autocast_dtype: bfloat16
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
         init_args:
@@ -82,9 +83,10 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: spline_quantile
+              type: quantile
               weight: 1.0
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
@@ -93,11 +95,9 @@ model:
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
-              type: spline_quantile
+              type: circular
               weight: 1.0
-              delta_anchor: innermost_phi
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              beta: 0.01
             theta:
               type: quantile_eta
               weight: 10.0
@@ -110,11 +110,16 @@ model:
               norm_min: -2.0
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+  optimizer: Lion
+  lrs_config:
+    initial: 5.0e-06
+    max: 3.0e-05
+    end: 5.0e-07
+    pct_start: 0.15
+    weight_decay: 1.5e-03
+    skip_scheduler: false
 
 data:
-  preprocessed_dir: /scratch/colliderml/p200_core_finetune
-  load_acts: true
-  batch_size: 30000
-  num_workers: 1
-  streaming: true
-  shard_buffer_size: 50
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 4096
+  num_workers: 16

@@ -44,24 +44,18 @@ trainer:
         mode: min
         verbose: true
         check_on_train_epoch_end: false
-    - class_path: hepattn.experiments.colliderml_regr.callbacks.MambaBackboneFreeze
-      init_args:
-        unfreeze_epoch: 10
 
 model:
   pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_gaussian_pretrain.ckpt
   optimizer: AdamW
   lrs_config:
     initial: 1.0e-05
-    max: 1.0e-03
+    max: 3.0e-04
     end: 1.0e-06
     pct_start: 0.10
-    weight_decay: 0.01
+    weight_decay: 1.0e-04
     betas: [0.9, 0.95]
     skip_scheduler: false
-    schedule: cosine_freeze
-    unfreeze_epoch: 10
-    unfreeze_lr: 5.0e-05
 
   model:
     class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
@@ -80,7 +74,7 @@ model:
           expand: 2
           headdim: 32
           ngroups: 1
-          chunk_size: 256
+          chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
       loss_module:

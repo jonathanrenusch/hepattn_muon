@@ -1,9 +1,11 @@
 # =============================================================================
-# ULTIMATE QUANTILE — fine-tune on p200_core
+# SSM Q7 — precision-aware fine-tune (p200_core)
 # =============================================================================
-# Fine-tune from ultimate_quantile_pretrain checkpoint.  Same loss/arch,
-# AdamW with one-cycle cosine schedule (no freeze), peak LR 3e-4.
-# See ultimate_quantile_pretrain.yaml for design rationale.
+# Companion to ssm_q7_precision_pretrain.yaml.  Starts from the precision
+# pretrain and fine-tunes on p200 with the same chunk_size / BS philosophy.
+#
+# pretrained_ckpt_path MUST be updated after the precision pretrain finishes
+# — set to the best-val ckpt in the new run's offline directory.
 # =============================================================================
 
 trainer:
@@ -13,7 +15,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-ULTIMATE-Q-finetune
+      name: TRK-v2-SSM-Q7-PRECISION-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -46,23 +48,22 @@ trainer:
         check_on_train_epoch_end: false
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_quantile_pretrain.ckpt
+  # UPDATE this after the precision pretrain finishes.
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/TBD_precision_pretrain/ckpts/last.ckpt
   optimizer: AdamW
   lrs_config:
     initial: 1.0e-05
-    max: 3.0e-04
+    max: 2.0e-04
     end: 1.0e-06
-    pct_start: 0.10
+    pct_start: 0.15
     weight_decay: 1.0e-04
     betas: [0.9, 0.95]
     skip_scheduler: false
 
   model:
-    class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
     init_args:
-      input_dim: 12
-      dim: 128
       pool: ssm_state
+      encoder_autocast_dtype: bfloat16
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
         init_args:
@@ -82,9 +83,10 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: spline_quantile
+              type: quantile
               weight: 1.0
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
@@ -93,11 +95,9 @@ model:
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
-              type: spline_quantile
+              type: circular
               weight: 1.0
-              delta_anchor: innermost_phi
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              beta: 0.01
             theta:
               type: quantile_eta
               weight: 10.0

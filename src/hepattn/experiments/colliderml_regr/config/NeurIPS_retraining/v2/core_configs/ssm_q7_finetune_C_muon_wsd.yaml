@@ -1,9 +1,28 @@
 # =============================================================================
-# ULTIMATE QUANTILE — fine-tune on p200_core
+# Run C — Muon+AdamW hybrid + WSD fine-tune on p200 (experimental)
 # =============================================================================
-# Fine-tune from ultimate_quantile_pretrain checkpoint.  Same loss/arch,
-# AdamW with one-cycle cosine schedule (no freeze), peak LR 3e-4.
-# See ultimate_quantile_pretrain.yaml for design rationale.
+# Rationale (see memory/reference_optimizer_schedule_research_2026_04.md):
+#   - SpecMuon (arXiv:2602.16167, 2026) tested Muon variants specifically on
+#     PINN/DeepONet precision regression and reported 2–10× lower final MSE
+#     vs AdamW on Burgers PINN — the closest literature analog to our sub-
+#     mrad / 1e-3 curvature target.
+#   - Muon runs on 2-D matrix weights only (interior SSM in_proj/out_proj,
+#     Dense mid-layers).  AdamW handles everything else: RMSNorm (1-D),
+#     biases (1-D), SSM scalars A_log/D (1-D), plus input_net / pool_head /
+#     output_head (excluded by convention per Keller Jordan 2024).
+#   - The hybrid is implemented as a single composite optimizer
+#     :class:`hepattn.experiments.colliderml_regr.muon.MuonHybrid`, so
+#     automatic optimization + a single LR scheduler still work.
+# Caveats:
+#   - Checkpoint was trained with Lion — weight-norm regime will mismatch.
+#     Expect a rougher first epoch than Run B.
+#   - Newton-Schulz iteration runs in the parameter's native dtype (fp32
+#     for this model) to preserve gradient precision for the precision-
+#     sensitive phi/theta/qop/z0 heads.  On A100 this still uses TF32
+#     tensor cores so the speed penalty vs bfloat16 is small.  The weights,
+#     forward pass, loss, and gradients all stay fp32 regardless.
+#   - ``muon_max`` is 3× the AdamW peak, matching the "Muon LR ~3–10× AdamW
+#     LR" guidance from the Muon blog post.
 # =============================================================================
 
 trainer:
@@ -13,7 +32,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-ULTIMATE-Q-finetune
+      name: TRK-v2-SSM-Q7-C-MuonHybrid-WSD-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -46,22 +65,28 @@ trainer:
         check_on_train_epoch_end: false
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_quantile_pretrain.ckpt
-  optimizer: AdamW
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ac72e5c9ede74f6eb241412b8652c4d1/ckpts/epoch=049-val_total=0.00717.ckpt
+  optimizer: MuonHybrid
   lrs_config:
-    initial: 1.0e-05
-    max: 3.0e-04
-    end: 1.0e-06
-    pct_start: 0.10
-    weight_decay: 1.0e-04
+    schedule: wsd
+    # AdamW group (1-D params, input/pool/output heads) — standard scale.
+    initial: 1.0e-05       # start of warmup for AdamW group
+    max: 1.0e-04           # peak LR for AdamW group
+    end: 5.0e-06           # final LR (both groups cool to this absolute eta_min)
+    weight_decay: 0.02     # AdamW WD, dropped for Lion-pretrain compatibility
     betas: [0.9, 0.95]
+    # Muon group (2-D interior weights) — peak LR ~3× AdamW per Muon blog.
+    muon_max: 3.0e-04      # peak LR for Muon group
+    muon_weight_decay: 0.0 # Muon's orthogonalized update doesn't need WD
+    muon_momentum: 0.95
+    muon_ns_steps: 5
+    # Schedule shape
+    pct_start: 0.02        # 2% warmup applies to both groups proportionally
+    decay_pct: 0.15        # 15% cosine cooldown
     skip_scheduler: false
 
   model:
-    class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
     init_args:
-      input_dim: 12
-      dim: 128
       pool: ssm_state
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
@@ -82,9 +107,10 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: spline_quantile
+              type: quantile
               weight: 1.0
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
@@ -93,11 +119,9 @@ model:
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
-              type: spline_quantile
+              type: circular
               weight: 1.0
-              delta_anchor: innermost_phi
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              beta: 0.01
             theta:
               type: quantile_eta
               weight: 10.0

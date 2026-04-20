@@ -69,6 +69,7 @@ from torch.optim import AdamW
 from hepattn.models.dense import Dense
 from hepattn.experiments.colliderml_regr.losses import TrackParameterLoss
 from hepattn.experiments.colliderml_regr.mamba_state import BidirectionalMambaEncoder
+from hepattn.experiments.colliderml_regr.muon import MuonHybrid, split_params_for_muon
 from hepattn.experiments.colliderml_regr.sam import SAM
 
 
@@ -504,7 +505,7 @@ class TrackRegressionWrapper(LightningModule):
         self,
         model: TrackParameterRegressor,
         lrs_config: dict[str, Any],
-        optimizer: Literal["AdamW", "Lion"] = "AdamW",
+        optimizer: Literal["AdamW", "Lion", "MuonHybrid"] = "AdamW",
         name: str = "TrackRegression",
         pretrained_ckpt_path: str | None = None,
         use_sam: bool = False,
@@ -978,38 +979,68 @@ class TrackRegressionWrapper(LightningModule):
     # -- optimiser / scheduler ---------------------------------------------
 
     def configure_optimizers(self):
-        if self.opt_name.lower() == "adamw":
-            opt_cls = AdamW
-        elif self.opt_name.lower() == "lion":
-            opt_cls = Lion
-        else:
-            raise ValueError(f"Unknown optimizer: {self.opt_name}")
-
-        opt_kwargs: dict[str, Any] = dict(
-            lr=self.lrs_config["initial"],
-            weight_decay=self.lrs_config["weight_decay"],
-        )
-        # Both AdamW and lion_pytorch.Lion accept a ``betas`` kwarg; Lion
-        # defaults to (0.9, 0.99) vs AdamW's (0.9, 0.999).  If the user did not
-        # set betas in lrs_config we skip passing them so each optimizer keeps
-        # its own default.
-        if "betas" in self.lrs_config:
-            opt_kwargs["betas"] = self.opt_betas
-
-        if self.use_sam:
-            # SAM wraps the base optimizer and shares its param_groups, so
-            # any LR scheduler written against ``opt.param_groups`` (cosine,
-            # onecycle, cosine_freeze below) will transparently drive the
-            # underlying AdamW/Lion without any scheduler-side changes.
-            opt = SAM(
-                self.model.parameters(),
-                base_optimizer=opt_cls,
-                rho=self.sam_rho,
-                adaptive=self.sam_adaptive,
-                **opt_kwargs,
+        if self.opt_name.lower() == "muonhybrid":
+            # Muon for 2-D interior matrix weights, AdamW for 1-D params
+            # (norms, biases, SSM A_log/D, etc.) plus the input_net,
+            # pool_head, and output_head Dense stacks.  The split is handled
+            # by :func:`split_params_for_muon`; each group's initial LR is
+            # set to its *peak* (``muon_max`` and ``max``) so the WSD / cosine
+            # schedulers scale both groups proportionally from their own peak.
+            # The LR ratio (``initial`` / ``max``) is shared across groups,
+            # so the user must pick ``muon_max`` and ``max`` such that their
+            # warmup-start and final LRs line up with the single scheduler
+            # factor — typically ``muon_max ≈ 3–10× max`` per the Muon blog.
+            if self.use_sam or self._manual_opt_needed:
+                raise ValueError("MuonHybrid is not compatible with SAM/trim manual-opt paths.")
+            muon_peak = float(self.lrs_config["muon_max"])
+            adamw_peak = float(self.lrs_config["max"])
+            param_groups = split_params_for_muon(
+                self.model,
+                muon_lr=muon_peak,
+                muon_weight_decay=float(self.lrs_config.get("muon_weight_decay", self.lrs_config["weight_decay"])),
+                adamw_lr=adamw_peak,
+                adamw_weight_decay=float(self.lrs_config["weight_decay"]),
+                adamw_betas=self.opt_betas if "betas" in self.lrs_config else (0.9, 0.95),
+            )
+            opt = MuonHybrid(
+                param_groups,
+                lr=adamw_peak,  # group-level lrs override this default
+                momentum=float(self.lrs_config.get("muon_momentum", 0.95)),
+                ns_steps=int(self.lrs_config.get("muon_ns_steps", 5)),
             )
         else:
-            opt = opt_cls(self.model.parameters(), **opt_kwargs)
+            if self.opt_name.lower() == "adamw":
+                opt_cls = AdamW
+            elif self.opt_name.lower() == "lion":
+                opt_cls = Lion
+            else:
+                raise ValueError(f"Unknown optimizer: {self.opt_name}")
+
+            opt_kwargs: dict[str, Any] = dict(
+                lr=self.lrs_config["initial"],
+                weight_decay=self.lrs_config["weight_decay"],
+            )
+            # Both AdamW and lion_pytorch.Lion accept a ``betas`` kwarg; Lion
+            # defaults to (0.9, 0.99) vs AdamW's (0.9, 0.999).  If the user did not
+            # set betas in lrs_config we skip passing them so each optimizer keeps
+            # its own default.
+            if "betas" in self.lrs_config:
+                opt_kwargs["betas"] = self.opt_betas
+
+            if self.use_sam:
+                # SAM wraps the base optimizer and shares its param_groups, so
+                # any LR scheduler written against ``opt.param_groups`` (cosine,
+                # onecycle, cosine_freeze below) will transparently drive the
+                # underlying AdamW/Lion without any scheduler-side changes.
+                opt = SAM(
+                    self.model.parameters(),
+                    base_optimizer=opt_cls,
+                    rho=self.sam_rho,
+                    adaptive=self.sam_adaptive,
+                    **opt_kwargs,
+                )
+            else:
+                opt = opt_cls(self.model.parameters(), **opt_kwargs)
 
         if not self.lrs_config.get("skip_scheduler"):
             schedule = self.lrs_config.get("schedule", "onecycle")
@@ -1096,6 +1127,62 @@ class TrackRegressionWrapper(LightningModule):
                     opt,
                     schedulers=[warmup_sch, hold_sch, cosine_sch],
                     milestones=[warmup_steps, unfreeze_step],
+                )
+            elif schedule == "wsd":
+                # Warmup-Stable-Decay (Hägele et al. 2024, arXiv:2405.18392).
+                # Three phases, all driven by a single SequentialLR:
+                #   [0, warmup)             LinearLR   initial → max
+                #   [warmup, decay_start)   ConstantLR at max
+                #   [decay_start, total)    CosineAnnealingLR  max → end
+                # Recommended default for continuing from a converged checkpoint
+                # (domain-shift fine-tuning): short warmup (pct_start ≈ 0.02),
+                # long stable plateau, short cosine cooldown (decay_pct ≈ 0.15).
+                # For multi-group optimizers (MuonHybrid) each group keeps its
+                # own peak LR — LinearLR / CosineAnnealingLR apply the same
+                # relative factor to every group's base_lr.
+                warmup_pct = float(self.lrs_config.get("pct_start", 0.02))
+                decay_pct = float(self.lrs_config.get("decay_pct", 0.15))
+                warmup_steps = int(warmup_pct * total_steps)
+                decay_start = int((1.0 - decay_pct) * total_steps)
+                if not (0 < warmup_steps < decay_start < total_steps):
+                    raise ValueError(
+                        "Invalid WSD schedule: "
+                        f"warmup_steps={warmup_steps}, decay_start={decay_start}, "
+                        f"total_steps={total_steps} — require "
+                        "0 < warmup_steps < decay_start < total_steps"
+                    )
+
+                if len(opt.param_groups) == 1:
+                    # Single-group path: mirror the cosine branch and set the
+                    # base LR to `max` so LinearLR's start_factor scales it down
+                    # to `initial` at step 0.
+                    for pg in opt.param_groups:
+                        pg["lr"] = self.lrs_config["max"]
+                # else: MuonHybrid — each group's 'lr' was set to its own peak
+                # at construction time via split_params_for_muon, so we leave
+                # them alone and LinearLR applies the same factor per group.
+
+                start_factor = float(self.lrs_config["initial"]) / float(self.lrs_config["max"])
+                warmup_sch = torch.optim.lr_scheduler.LinearLR(
+                    opt,
+                    start_factor=start_factor,
+                    end_factor=1.0,
+                    total_iters=warmup_steps,
+                )
+                hold_sch = torch.optim.lr_scheduler.ConstantLR(
+                    opt,
+                    factor=1.0,
+                    total_iters=decay_start - warmup_steps,
+                )
+                cosine_sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    opt,
+                    T_max=total_steps - decay_start,
+                    eta_min=float(self.lrs_config["end"]),
+                )
+                sch = torch.optim.lr_scheduler.SequentialLR(
+                    opt,
+                    schedulers=[warmup_sch, hold_sch, cosine_sch],
+                    milestones=[warmup_steps, decay_start],
                 )
             else:
                 sch = torch.optim.lr_scheduler.OneCycleLR(

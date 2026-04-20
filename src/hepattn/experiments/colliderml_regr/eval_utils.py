@@ -55,7 +55,7 @@ FULL_RANGE_PARAMS = {"d0"}
 
 # Hard axis limits for specific parameters in heatmaps (keeps SSM/ACTS aligned)
 HEATMAP_RANGE = {
-    "d0": (-5.0, 5.0),
+    "d0": (-2.5, 2.5),
 }
 
 

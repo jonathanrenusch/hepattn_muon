@@ -1,9 +1,16 @@
 # =============================================================================
-# ULTIMATE QUANTILE — fine-tune on p200_core
+# Run A — AdamW + WSD fine-tune on p200 (Tier-1 fix of ssm_q7_finetune.yaml)
 # =============================================================================
-# Fine-tune from ultimate_quantile_pretrain checkpoint.  Same loss/arch,
-# AdamW with one-cycle cosine schedule (no freeze), peak LR 3e-4.
-# See ultimate_quantile_pretrain.yaml for design rationale.
+# Rationale (see memory/reference_optimizer_schedule_research_2026_04.md):
+#   - OneCycle with pct_start=0.10 and a 6× LR jump (5e-5 Lion → 3e-4 AdamW)
+#     blew the pretrained basin on the original ssm_q7_finetune run.
+#   - Switching to WSD (Hägele et al. 2024) keeps the LR flat after a short
+#     warmup, letting the pretrained weights adapt to p200 without a
+#     high-LR shock phase, then cools down at the end.
+#   - Peak LR dropped 3e-4 → 1e-4 (2× pretrain peak, not 6×), per Gupta et al.
+#     2023 — "peak LR dominates over warmup duration for forgetting control".
+#   - Weight decay dropped 0.1 → 0.02 because the Lion-trained checkpoint
+#     sits at a weight norm that AdamW's default WD would actively disturb.
 # =============================================================================
 
 trainer:
@@ -13,7 +20,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-ULTIMATE-Q-finetune
+      name: TRK-v2-SSM-Q7-A-AdamW-WSD-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -46,22 +53,21 @@ trainer:
         check_on_train_epoch_end: false
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_quantile_pretrain.ckpt
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ac72e5c9ede74f6eb241412b8652c4d1/ckpts/epoch=049-val_total=0.00717.ckpt
   optimizer: AdamW
   lrs_config:
-    initial: 1.0e-05
-    max: 3.0e-04
-    end: 1.0e-06
-    pct_start: 0.10
-    weight_decay: 1.0e-04
+    schedule: wsd          # Warmup-Stable-Decay (Hägele et al. 2024)
+    initial: 1.0e-05       # LR at step 0 (start of warmup)
+    max: 1.0e-04           # peak LR — 2× pretrain peak, not 6×
+    end: 5.0e-06           # final LR after cosine cooldown
+    pct_start: 0.02        # 2% warmup (vs. 10% in OneCycle)
+    decay_pct: 0.15        # last 15% is cosine cooldown; the middle 83% is flat
+    weight_decay: 0.02     # dropped from AdamW default; Lion pretrain WD = 1e-3
     betas: [0.9, 0.95]
     skip_scheduler: false
 
   model:
-    class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
     init_args:
-      input_dim: 12
-      dim: 128
       pool: ssm_state
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
@@ -82,9 +88,10 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: spline_quantile
+              type: quantile
               weight: 1.0
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
@@ -93,11 +100,9 @@ model:
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
-              type: spline_quantile
+              type: circular
               weight: 1.0
-              delta_anchor: innermost_phi
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              beta: 0.01
             theta:
               type: quantile_eta
               weight: 10.0

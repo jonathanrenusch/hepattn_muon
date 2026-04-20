@@ -8,9 +8,7 @@
 #
 # Extras vs pretrain:
 #   - pretrained_ckpt_path seeds from the core-pretrain run
-#   - AdamW + cosine_freeze (backbone frozen for 5 epochs, then unfreezes at LR
-#     5e-5 while the heads cosine-decay from 7e-4 to 1e-6)
-#   - MambaBackboneFreeze callback
+#   - AdamW + one-cycle cosine schedule (no freeze), peak LR 7e-4
 #   - 95% per-batch trim: after a 10% warm-up, drop the top-5% loss samples
 #     each step (genuine tail robustness for Gaussian NLL).
 #   - Manual optimization required (trim_frac > 0), so gradient_clip_val is
@@ -64,9 +62,6 @@ trainer:
         mode: min
         verbose: true
         check_on_train_epoch_end: false
-    - class_path: hepattn.experiments.colliderml_regr.callbacks.MambaBackboneFreeze
-      init_args:
-        unfreeze_epoch: 10
 
 model:
   pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ssm_gauss_pretrain.ckpt
@@ -80,12 +75,9 @@ model:
     max: 7.0e-04
     end: 1.0e-06
     pct_start: 0.10
-    weight_decay: 0.01
+    weight_decay: 1.0e-04
     betas: [0.9, 0.95]
     skip_scheduler: false
-    schedule: cosine_freeze
-    unfreeze_epoch: 10
-    unfreeze_lr: 5.0e-05
 
   model:
     init_args:
@@ -100,7 +92,7 @@ model:
           expand: 2
           headdim: 32
           ngroups: 1
-          chunk_size: 256
+          chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
       loss_module:

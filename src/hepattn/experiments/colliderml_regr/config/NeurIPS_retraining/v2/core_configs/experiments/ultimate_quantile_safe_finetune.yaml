@@ -1,19 +1,33 @@
 # =============================================================================
-# ULTIMATE QUANTILE — fine-tune on p200_core
+# ULTIMATE QUANTILE SAFE — gentle p200 fine-tune, pretrain-like recipe
 # =============================================================================
-# Fine-tune from ultimate_quantile_pretrain checkpoint.  Same loss/arch,
-# AdamW with one-cycle cosine schedule (no freeze), peak LR 3e-4.
-# See ultimate_quantile_pretrain.yaml for design rationale.
+# "Safety-net" variant: the only delta from ultimate_quantile_pretrain is the
+# dataset (p200 instead of p0) and a fresh pretrained_ckpt_path.  Schedule,
+# optimizer, batch size and num_workers match the pretrain exactly — this is
+# the conservative option we can fall back on if the aggressive fine-tunes
+# (AdamW @ 3e-4, bs 30k, multi-GPU) misbehave.
+#
+# Compared to ultimate_quantile_finetune.yaml:
+#   - Optimizer: Lion (pretrain) instead of AdamW
+#   - Peak LR: 5e-5 (pretrain) instead of 3e-4
+#   - Batch size: 2048 instead of 30000
+#   - Num workers: 16 instead of 1
+#   - streaming: false instead of true
+#   - max_epochs: 20 (short) instead of 100
+#   - Single GPU instead of -1
+#
+# The idea: run on one GPU for ~20 epochs as a safe baseline, confirm it moves
+# val/total in the right direction, and keep as a fallback checkpoint.
 # =============================================================================
 
 trainer:
-  devices: -1
-  max_epochs: 100
+  devices: [0]
+  max_epochs: 20
   gradient_clip_val: 1.0
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-ULTIMATE-Q-finetune
+      name: TRK-v2-ULTIMATE-Q-SAFE-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -39,7 +53,7 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/total
-        patience: 30
+        patience: 20
         min_delta: 0.0
         mode: min
         verbose: true
@@ -47,14 +61,13 @@ trainer:
 
 model:
   pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_quantile_pretrain.ckpt
-  optimizer: AdamW
+  optimizer: Lion
   lrs_config:
     initial: 1.0e-05
-    max: 3.0e-04
+    max: 5.0e-05
     end: 1.0e-06
     pct_start: 0.10
-    weight_decay: 1.0e-04
-    betas: [0.9, 0.95]
+    weight_decay: 1.0e-03
     skip_scheduler: false
 
   model:
@@ -114,7 +127,6 @@ model:
 data:
   preprocessed_dir: /scratch/colliderml/p200_core_finetune
   load_acts: true
-  batch_size: 30000
-  num_workers: 1
-  streaming: true
-  shard_buffer_size: 50
+  batch_size: 2048
+  num_workers: 16
+  prefetch_factor: 4

@@ -13,7 +13,7 @@
 # to keep training stable, and the skip callback was zeroing most updates.
 # =============================================================================
 
-
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ac72e5c9ede74f6eb241412b8652c4d1/ckpts/epoch=049-val_total=0.00717.ckpt
 
 trainer:
   devices: [0]
@@ -67,7 +67,7 @@ model:
           expand: 2
           headdim: 32
           ngroups: 1
-          chunk_size: 256
+          chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
       loss_module:

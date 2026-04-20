@@ -64,11 +64,14 @@ from hepattn.experiments.colliderml_regr.utils.selection_utils import (
 # Constants
 # ---------------------------------------------------------------------------
 
-# Hit features: x, y, z, r, phi_hit, theta_hit, s, volume_id, layer_id, surface_id, detector
-N_HIT_FEATURES = 11
+# Hit features: x, y, z, r, phi_hit, theta_hit, s, volume_id, layer_id, surface_id, detector, eta_hit
+# eta_hit is derived from theta_hit at preprocessing time (was historically computed
+# at DataLoader time — moved here to reduce per-batch CPU work and improve GPU
+# utilisation). Dataloader handles both 11- and 12-column legacy/new shards.
+N_HIT_FEATURES = 12
 HIT_FEATURE_NAMES = [
     "x", "y", "z", "r", "phi_hit", "theta_hit", "s",
-    "volume_id", "layer_id", "surface_id", "detector",
+    "volume_id", "layer_id", "surface_id", "detector", "eta_hit",
 ]
 
 # Track target parameters
@@ -242,6 +245,9 @@ def process_shard(
         phi_hit = np.arctan2(hy, hx)
         theta_hit = np.arccos(np.clip(hz / (np.sqrt(hx**2 + hy**2 + hz**2) + 1e-12), -1.0, 1.0))
         s = np.sqrt(hx**2 + hy**2 + hz**2)  # distance from IP
+        # eta_hit derived from theta_hit (same formula used previously in the DataLoader)
+        eta_hit = -np.log(np.tan(np.clip(theta_hit, 1e-8, np.pi - 1e-8) / 2.0))
+        eta_hit = np.clip(eta_hit, -10.0, 10.0)
 
         # Build full hit feature matrix for this event (used for gathering)
         hit_feats = np.zeros((nhits, N_HIT_FEATURES), dtype=np.float32)
@@ -256,6 +262,7 @@ def process_shard(
         hit_feats[:, 8] = h_lay.astype(np.float32)
         hit_feats[:, 9] = h_surf.astype(np.float32)
         hit_feats[:, 10] = h_det.astype(np.float32)
+        hit_feats[:, 11] = eta_hit.astype(np.float32)
 
         # ---- Track selection ------------------------------------------
         # Count hits per particle

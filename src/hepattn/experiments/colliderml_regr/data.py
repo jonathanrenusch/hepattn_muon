@@ -101,17 +101,20 @@ def _load_track(data: dict[str, np.ndarray], local_idx: int) -> dict[str, np.nda
     end = int(offsets[local_idx + 1])
     hit_idx = np.array(data["hit_indices"][start:end])
 
-    # Gather hit features
-    # Preprocessed: [x, y, z, r, phi_hit, theta_hit, s, volume_id, layer_id, surface_id, detector]
-    hit_feats = np.array(data["hits"][hit_idx])  # (L, 11)
+    # Gather hit features.
+    # New format (12 cols): [x, y, z, r, phi_hit, theta_hit, s, volume_id,
+    #                        layer_id, surface_id, detector, eta_hit]
+    # Legacy format (11 cols): same without eta_hit — derive it here so old
+    # shards (loose, core_kf_hits) continue to work.
+    hit_feats = np.array(data["hits"][hit_idx])
 
-    # Compute derived eta from theta_hit (col 5)
-    theta_hit = hit_feats[:, 5].copy()
-    eta_hit = -np.log(np.tan(np.clip(theta_hit, 1e-8, np.pi - 1e-8) / 2.0))
-    eta_hit = np.clip(eta_hit, -10.0, 10.0)
-
-    # Append eta as an extra feature -> (L, 12)
-    hit_feats = np.concatenate([hit_feats, eta_hit[:, None]], axis=1).astype(np.float32)
+    if hit_feats.shape[1] < 12:
+        theta_hit = hit_feats[:, 5].copy()
+        eta_hit = -np.log(np.tan(np.clip(theta_hit, 1e-8, np.pi - 1e-8) / 2.0))
+        eta_hit = np.clip(eta_hit, -10.0, 10.0)
+        hit_feats = np.concatenate([hit_feats, eta_hit[:, None]], axis=1).astype(np.float32)
+    else:
+        hit_feats = hit_feats.astype(np.float32, copy=False)
 
     hit_s = hit_feats[:, 6].copy()  # s column
     targets = np.array(data["targets"][local_idx])  # (5,)

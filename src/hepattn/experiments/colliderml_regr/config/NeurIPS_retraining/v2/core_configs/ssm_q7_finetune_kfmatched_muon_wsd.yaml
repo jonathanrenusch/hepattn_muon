@@ -1,9 +1,33 @@
 # =============================================================================
-# ULTIMATE QUANTILE — fine-tune on p200_core
+# KF-matched fine-tune — Muon+AdamW hybrid + WSD on p200_core_kf_matched
 # =============================================================================
-# Fine-tune from ultimate_quantile_pretrain checkpoint.  Same loss/arch,
-# AdamW with one-cycle cosine schedule (no freeze), peak LR 3e-4.
-# See ultimate_quantile_pretrain.yaml for design rationale.
+# Purpose
+# -------
+# Pretrain (p0_core_pretrain) is 79 % ACTS-DM; stock p200_core_finetune is only
+# ~54 % DM (verified: 658k / 1.21M over 5 shards).  That ~25 pp gap means the
+# fine-tune gradient is dominated by tracks the KF cannot match — yet the
+# validation metrics that matter (`ssm_iqr_dm`, `ssm_rms_dm`) only score the
+# DM subset.  Hypothesis: this distribution mismatch is part of why fine-tune
+# fails to close the core-resolution gap on z0/θ/q/p.
+#
+# This config points the fine-tune at `p200_core_kf_matched_finetune`, where
+# every track is ACTS-DM (require_acts_dm: True at preprocessing time).  The
+# training distribution is now aligned with the metric, matching the ~79 % DM
+# pretrain distribution in spirit.
+#
+# Optimizer recipe is identical to Run C (Muon+AdamW hybrid, WSD), since that
+# is the current best-motivated recipe for the core-resolution push
+# (SpecMuon arXiv:2602.16167 on PINN/DeepONet precision regression).
+#
+# Data location
+# -------------
+# Full dataset currently lives at
+#   /eos/project/e/end-to-end-colliderml/data/NeurIPS_retraining/
+#     p200_core_kf_matched_finetune
+# For training speed, sync to /scratch first:
+#   rsync -a /eos/.../NeurIPS_retraining/p200_core_kf_matched_finetune/ \
+#            /scratch/colliderml/p200_core_kf_matched_finetune/
+# The preprocessed_dir below assumes the /scratch copy exists.
 # =============================================================================
 
 trainer:
@@ -13,7 +37,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-ULTIMATE-Q-finetune
+      name: TRK-v2-SSM-Q7-MuonHybrid-WSD-finetune-kfmatched
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -46,22 +70,25 @@ trainer:
         check_on_train_epoch_end: false
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ultimate_quantile_pretrain.ckpt
-  optimizer: AdamW
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ac72e5c9ede74f6eb241412b8652c4d1/ckpts/epoch=049-val_total=0.00717.ckpt
+  optimizer: MuonHybrid
   lrs_config:
+    schedule: wsd
     initial: 1.0e-05
-    max: 3.0e-04
-    end: 1.0e-06
-    pct_start: 0.10
-    weight_decay: 1.0e-04
+    max: 1.0e-04
+    end: 5.0e-06
+    weight_decay: 0.02
     betas: [0.9, 0.95]
+    muon_max: 3.0e-04
+    muon_weight_decay: 0.0
+    muon_momentum: 0.95
+    muon_ns_steps: 5
+    pct_start: 0.02
+    decay_pct: 0.15
     skip_scheduler: false
 
   model:
-    class_path: hepattn.experiments.colliderml_regr.model.TrackParameterRegressor
     init_args:
-      input_dim: 12
-      dim: 128
       pool: ssm_state
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_state.BidirectionalMambaEncoder
@@ -82,9 +109,10 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: spline_quantile
+              type: quantile
               weight: 1.0
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0.yaml
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
@@ -93,11 +121,9 @@ model:
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
-              type: spline_quantile
+              type: circular
               weight: 1.0
-              delta_anchor: innermost_phi
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              beta: 0.01
             theta:
               type: quantile_eta
               weight: 10.0
@@ -112,7 +138,7 @@ model:
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
 
 data:
-  preprocessed_dir: /scratch/colliderml/p200_core_finetune
+  preprocessed_dir: /scratch/colliderml/p200_core_kf_matched_finetune
   load_acts: true
   batch_size: 30000
   num_workers: 1

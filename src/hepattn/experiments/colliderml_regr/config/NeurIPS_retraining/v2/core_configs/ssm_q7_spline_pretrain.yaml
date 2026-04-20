@@ -15,13 +15,13 @@
 
 
 trainer:
-  devices: [0]
+  devices: [1]
   max_epochs: 50
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
       # name: TRK-v2-SSM-Q7-SPLINE-FP32-Core-pretrain-tinyBatch # change batch size to 512 if you enable mini batch, is more running out of curiosity on some non used GPU
-      name: TRK-v2-SSM-Q7-SPLINE-FP32-Core-pretrain
+      name: TRK-v2-SSM-Q7-SPLINEd0-FP32-Core-pretrain
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -67,7 +67,7 @@ model:
           expand: 2
           headdim: 32
           ngroups: 1
-          chunk_size: 256
+          chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
       loss_module:
