@@ -177,11 +177,16 @@ params.** Future scaling work should build on `ssmcls_q7`, not `ssm_q7`.
 - **Fine-tune: 4× H100 (DDP).** Configured via `trainer.devices: -1` in the
   fine-tune YAMLs.
 - One pretrain run: **~60–100 h** to converge (depends on depth / dim).
-- One fine-tune run: **~60–100 h** wall-clock despite having 4× the compute
-  (it's a denser dataset with more epochs needed to close the p200 gap).
-- Plan NeurIPS runs accordingly: a fresh pretrain+finetune pair consumes
-  roughly a full week, so most deadline-critical experiments should branch
-  off an existing pretrained checkpoint rather than restart from scratch.
+- One fine-tune run (default config): **~2 days** wall-clock on 4× H100,
+  down from ~60–100 h before the `chunk_size: 256 → 16` kernel fix
+  (see Key conventions — intra-chunk compute on short tracks is
+  quadratic in `chunk_size`, so the old default wasted ~128× compute per
+  track on padded positions). This is the single largest wall-clock win
+  recorded in this study; always verify new configs inherit `chunk_size: 16`.
+- Plan NeurIPS runs accordingly: a fresh pretrain+finetune pair now
+  consumes ~5–6 days rather than a full week, but pretrain remains the
+  dominant cost — deadline-critical experiments should still branch off
+  an existing pretrained checkpoint rather than restart from scratch.
 
 **Scaling:**
 - Depth-first on the encoder: scale `num_layers` (primary), `d_state` (secondary).
