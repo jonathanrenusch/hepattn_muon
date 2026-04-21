@@ -220,7 +220,7 @@ Four preprocessed variants, each as a `{p0, p200}` pair. `p0` = no pileup
 (pretrain), `p200` = 200 pileup (fine-tune). Dirs live at
 `/scratch/colliderml/{p0,p200}_{variant}_{pretrain,finetune}`.
 
-| variant | pt_min [GeV] | |η| < | |d0| < [mm] | min_hits | extra |
+| variant | pt_min [GeV] | \|η\|&nbsp;max | \|d0\|&nbsp;max [mm] | min_hits | extra |
 |---|---|---|---|---|---|
 | `loose` | 0.2 | 3 | 5.0 | 3 | — |
 | `core` | 0.5 | 3 | 2.5 | 6 | — ← **NeurIPS v2 default** |
