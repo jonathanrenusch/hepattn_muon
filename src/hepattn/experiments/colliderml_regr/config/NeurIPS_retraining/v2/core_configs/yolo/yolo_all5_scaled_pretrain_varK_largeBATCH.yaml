@@ -1,0 +1,204 @@
+# =============================================================================
+# YOLO scaled pretrain — varK edition, large-batch
+# Scaled ssm_cls backbone: 30L × dim=192 × d_state=64 (≈16.5 M params)
+# p0_core_pretrain full dataset, **per-rank BS=7500 × 4× H100 DDP =
+# 30 000 global**, Lion + OneCycleLR, 50 epochs.
+#
+# Sibling of yolo_all5_scaled_pretrain_largeBATCH.yaml.  Three deltas from
+# that config, motivated by the variable-K geometry per parameter
+# (d0=66, z0=512, phi=32, theta=1024, qop=256 → total 1925 channels):
+#
+#   1. output_head_hidden_layers: [256] → [512] — relieves the shared
+#      softmax bottleneck feeding 1925 logits.  Five simultaneous heads
+#      pushing ~38 bits of peak-location info through a 256-dim vector
+#      hits the saturation zone flagged by arXiv:2404.07647; [512] is
+#      cheap (525 k → 1.05 M output-head params, 6 % of backbone) and
+#      clears the concern.
+#
+#   2. Per-parameter lambda_offset = 64/K.  Under QFL-soft coupling, the
+#      within-bin pinball is softmax-weighted across all K bins.  At init
+#      the "truth offset" (u·K − 0.5 − i) ranges to ±K, so the per-track
+#      pinball magnitude is ≈ K/8 — for theta (K=1024) that is ~128 at
+#      init vs ~4 for phi (K=32), a 32× imbalance that would dominate
+#      at BS=30k and reintroduce the exact heavy-tail gradient-variance
+#      failure mode DFL was supposed to eliminate.  Scaling lambda_offset
+#      ∝ 1/K restores per-head init magnitude to O(1) and preserves the
+#      bounded-gradient / large-batch scaling story.  K_ref = 64 keeps
+#      d0 ≈ 1.0.
+#
+#   3. weight: 1.0 everywhere (unchanged).  The log(K) CE spread is
+#      accepted as a transient early-training imbalance; no GradNorm.
+#
+# LR scaling (√k rule, see reference_optimizer_schedule_research_2026_04):
+#   ssmcls_q7_pretrain baseline is BS=2048 / (1e-5, 5e-5, 1e-6).  Here
+#   global BS=30 000 → √(30000/2048)=3.83× → (3.8e-5, 1.9e-4, 3.8e-6).
+#   If BS=30k diverges, fall back to global BS=16k (batch_size: 4000,
+#   LR ×2.8× → 2.8e-5 / 1.4e-4 / 2.8e-6).
+#
+# Risk flag carried over: BS=30 000 from scratch is aggressive.  The varK
+# 1/K-lambda_offset change is exactly the fix needed to keep DFL's BS
+# scaling story intact — but the pretrain BS implicit-regularisation
+# effect on the regression side remains an open hypothesis.
+# =============================================================================
+
+trainer:
+  devices: -1            # 4× H100 DDP
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-YOLO-Scaled-Core-pretrain-varK-largeBATCH
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    # Ramp each head's lambda_offset from 0 → configured (per-param 64/K)
+    # over the first 5% of training steps.  Especially relevant at large
+    # batch where per-step noise is lower and a single bad step hurts
+    # more.  The callback multiplies each sub-loss's configured value, so
+    # 0→1 ramp × 64/K base composes correctly.
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.OffsetWarmupCallback
+      init_args:
+        warmup_fraction: 0.05
+        start_factor: 0.0
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [512]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 30
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              # Full-range uniform 320 × 15.625 μm — no junk drawer, covers
+              # entire |d0| ≤ 2.5 mm physics range at CKF-competitive
+              # resolution.  Matches bin_hist_d0.pt (regenerated 2026-04-21).
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0                           # 64/66 ≈ 0.97, rounded to 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true                # Q-loop saves ~Q× offset-tensor memory at large K/BS
+              # Per-track tail upweight w = max(1, |d0| / 30 μm).
+              tail_weight_tau: 0.03
+              # Per-bin class rebalancing (DIR/LDS) on d0.
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            # Bin counts match yolo_all5_scaled_pretrain_varK.yaml.
+            z0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 512
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_z0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.125                         # 64/512
+              coupling: soft_qfl
+              offset_memory_efficient: true
+            phi:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 32
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              delta_anchor: innermost_phi
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 2.0                           # 64/32
+              coupling: soft_qfl
+              offset_memory_efficient: true
+            theta:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 1024
+              binning: cdf_eta
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_theta_eta.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.0625                        # 64/1024
+              coupling: soft_qfl
+              offset_memory_efficient: true
+            qop:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 256
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_qop.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.25                          # 64/256
+              coupling: soft_qfl
+              offset_memory_efficient: true
+
+  optimizer: Lion
+  lrs_config:
+    # √k scaling from ssmcls_q7_pretrain baseline (BS=2048, 1e-5/5e-5/1e-6)
+    # to global BS=30 000 (BS 14.65× → LR 3.83×).  If BS=30k diverges,
+    # drop to global BS=16k (batch_size: 4000) with LR × 2.80×:
+    # (2.8e-5, 1.4e-4, 2.8e-6).
+    initial: 3.8e-05
+    max: 1.9e-04
+    end: 3.8e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  load_acts: true
+  # 7500 is the per-rank memory ceiling on H100 for this 30 L backbone;
+  # Lightning treats batch_size as per-rank, so with devices: -1 across
+  # 4× H100 DDP this gives global BS = 7500 × 4 = 30 000.
+  batch_size: 7500
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

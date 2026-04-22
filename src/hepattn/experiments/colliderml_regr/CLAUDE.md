@@ -323,11 +323,13 @@ plots copy the whole dir into `/shared/tracking/logs/<contextual-name>/`.
 pretrain-or-finetune, dataset, run-hash-prefix, epoch, and any caveat. E.g.
 `ssm_q7_pretrain_p200_zeroshot_ac72e5c9_epoch49_replot`.
 
-## Current results — SSM (state pool) vs ACTS CKF
+## Current results — SSM vs ACTS CKF
 
-Zero-shot inference on p200 (200-pileup) using the p0-pretrained `ssm_q7`
-checkpoint `ac72e5c9ede74f6eb241412b8652c4d1`, epoch 49. Core-selection + DM
-subset, 6.59 M tracks. Source: `logs/ssm_q7_pretrain_p200_zeroshot_ac72e5c9_epoch49_replot/double_matched/residual_statistics.txt`.
+Zero-shot inference on p200 (200-pileup) from the `ssm_q7` (state pool,
+`ac72e5c9…`, epoch 49) and `ssmcls_q7` (CLS pool, `ea2d9fba5fab4dd0bbc095e3246bba0d`,
+epoch 48) p0-pretrained checkpoints. Core-selection + DM subset,
+**6,591,752 tracks** (identical for both). CLS source:
+`/shared/tracking/logs/ssmcls_q7_pretrain_p200_zeroshot_ea2d9fba_epoch48/double_matched/residual_statistics.txt`.
 
 Three complementary metric families are reported: raw standard deviation
 (tail-dominated, reflects overall performance including outliers), IQR / 1.349
@@ -339,44 +341,52 @@ independent of tails), and iterative 3σ-clipped RMS (the physicist-standard
 
 | | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
 |---|---|---|---|---|---|
-| SSM | 0.070 | 0.879 | 2.99 | 2.21 | 0.00522 |
+| SSM-state | 0.070 | 0.879 | 2.99 | 2.21 | 0.00522 |
+| SSM-CLS | 0.0696 | 0.845 | 2.96 | 2.15 | 0.00501 |
 | CKF | 0.209 | 1.652 | 6.28 | 2.83 | 0.00586 |
-| **SSM/CKF** | **0.34** | **0.53** | **0.48** | **0.78** | **0.89** |
+| **CLS/CKF** | **0.33** | **0.51** | **0.47** | **0.76** | **0.85** |
 
 **IQR / 1.349 (robust σ, no clipping):**
 
 | | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
 |---|---|---|---|---|---|
-| SSM | 0.0129 | 0.160 | 0.669 | 0.787 | 0.00321 |
+| SSM-state | 0.0129 | 0.160 | 0.669 | 0.787 | 0.00321 |
+| SSM-CLS | 0.0128 | 0.155 | 0.710 | 0.765 | 0.00299 |
 | CKF | 0.0599 | 0.113 | 1.877 | 0.700 | 0.00290 |
-| **SSM/CKF** | **0.22** | **1.42** | **0.36** | **1.12** | **1.11** |
+| **CLS/CKF** | **0.21** | **1.38** | **0.38** | **1.09** | **1.03** |
 
-**Iterative 3σ-clipped RMS (`ssm_iqr_dm` — physicist core resolution):**
+**Iterative 3σ-clipped RMS (physicist core resolution):**
 
 | | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
 |---|---|---|---|---|---|
-| SSM | 0.0123 | 0.214 | 0.661 | 0.905 | 0.00368 |
+| SSM-state | 0.0123 | 0.214 | 0.661 | 0.905 | 0.00368 |
+| SSM-CLS | 0.0123 | 0.207 | 0.700 | 0.878 | 0.00344 |
 | CKF | 0.0657 | 0.188 | 2.111 | 0.802 | 0.00344 |
-| **SSM/CKF** | **0.19** | **1.14** | **0.31** | **1.13** | **1.07** |
+| **CLS/CKF** | **0.19** | **1.10** | **0.33** | **1.09** | **1.00** |
 
 ### Interpretation
 
 The picture splits cleanly in two:
 
-- **Tail regime (raw std):** SSM wins on all five parameters, 1.1×–3× better.
+- **Tail regime (raw std):** SSM wins on all five parameters, 1.2×–3× better.
   The SSM captures non-Gaussian scattering structure that a linear Kalman
   filter cannot model.
 - **Core regime (IQR, clipped RMS):** SSM wins dramatically on `d0` and `φ`
-  (3-5× better), and **loses** on `z0`, `θ`, `q/p` by 7–42 %. These three
-  parameters depend on long-range integration along the full track;
-  CKF is near its Cramér–Rao bound there and is hard to beat with an SSM
+  (3-5× better), and loses on `z0`, `θ`, `q/p` — though by smaller margins with
+  CLS. These three parameters depend on long-range integration along the full
+  track; CKF is near its Cramér–Rao bound there and is hard to beat with an SSM
   that accumulates bf16 round-off through the recurrence.
 
-This result was achieved with **`ssm_state` pooling** (raw SSM state read-out
-via `fwd_head`/`bwd_head`), not CLS. The CLS variant showed +5 % over state at
-matched pretrain total params; evaluating it zero-shot on p200 at the same
-scale is a pending experiment and may already close part of the core-resolution
-gap.
+**CLS vs state (zero-shot p200 confirmation, 2026-04-21):** CLS gives slight
+improvements on nearly every metric — raw std: d0 −0.6 %, z0 −3.9 %, φ −1.1 %,
+θ −2.7 %, qop −4.0 %; 3σ-clipped RMS: z0 −3.3 %, θ −3.0 %, qop −6.5 %, d0
+≈ same (0.0123). The one regression is φ core (both IQR +6 % and clipped RMS
++6 %), possibly because CLS loses the per-hit locality that direct
+recurrent-state read-out preserves for the innermost-layer-dominated azimuth
+estimate. On `qop` the CLS now **matches CKF exactly** at the 3σ-clipped RMS
+(0.00344 vs 0.00344) — the first SSM variant to close that parameter's core
+gap. The overall ~3–5 % gain matches the pretrain-val +5 % signal from 2026-04-20
+and validates `ssmcls_q7` as the backbone for future scaling work.
 
 ## Current open issues (2026-04-20)
 
@@ -397,44 +407,60 @@ if it tightens the z0/θ/q/p cores, fp32 A_log + fp32 post-SSM RMSNorm become
 permanent fixtures. If not, the gap is architectural / Cramér–Rao-bound
 proximity, not precision.
 
-**3. d0 bias + core collapse artifact (MID PRIORITY — NeurIPS deadline 2026-05-04).**
+**3. d0 core collapse artifact (HIGH PRIORITY — promoted 2026-04-21 after PI
+review; blocker for NeurIPS deadline 2026-05-04).**
 Heatmaps show a characteristic cross at `d0 = 0`: a vertical band at truth=0
-and a horizontal band at pred=0. Root cause diagnosed: 95 % of tracks have
-`|d0| ≤ 0.031 mm`, 68 % within ±0.013 mm, so the empirical CDF is near-vertical
-at zero. The `spline_quantile` loss runs in u = CDF(d0) space, which means
-nearly the whole usable u-range (~0.025–0.975) decodes back to `|d0| < 0.03 mm`
-under `spline.inverse` — any "hedged" prediction (u ≈ 0.5) lands exactly on
-d0 = 0. The pinball loss therefore has enormous gradient for tiny physical
-shifts near the mode and almost none in the tails, which both reinforces the
-collapse and under-rewards tail-correct predictions. FP32 is *not* the
-bottleneck (ULP ≈ 1e-9 mm at target scale); if mixed-precision is ever
-enabled, keep the output head + loss in fp32 — bf16 around u = 0.5 would
-produce ~0.3 mm errors through the steep inverse.
+and a **horizontal band at pred=0** where the network defaults to predicting
+d0 ≈ 0 irrespective of the track's true impact parameter. Quantified on the
+`ac72e5c9…` zero-shot p200 run (12.1 M tracks, 2026-04-21): of the 421 K
+tracks with `|truth d0| ≥ 0.05 mm`, **SSM predicts |pred| < 5 μm for
+19.7 %** vs ACTS CKF 0.45 % — a **~1,700σ excess** over a per-track H0
+null that uses the SSM's own core resolution as the noise kernel. Per-band:
+62 % collapse rate at |truth| ∈ [0.05, 0.10] mm, 39 % at [0.10, 0.30] mm,
+still 7.7 % at [0.30, 1.00] mm.
 
-Improvement candidates, in preferred order:
-- **Swap spline→Gaussian NLL for d0** (or β-NLL; pretrain run
-  `65c08d6ddb604f489d8573cfb27a82d7` already uses this recipe for all
-  parameters). μ/σ parameterisation lets the model express uncertainty in σ
-  without collapsing μ to 0.
-- **Mixture density head for d0** (2–3 Gaussian mixture). Matches the
-  sharp-core-plus-tails shape natively, no transform needed.
+**The collapse is NOT caused by the spline loss alone** (reported 2026-04-21
+from PI-review evidence; source run TBD — needs a documented spline-free-d0
+checkpoint cited here). NB: the Gaussian-NLL run
+`65c08d6ddb604f489d8573cfb27a82d7` is **not** such a reference — it keeps
+`spline_quantile` on d0 and only swaps the other parameter losses. The
+earlier spline-mechanism diagnosis still holds as an *amplifier* (CDF
+warping concentrates u ≈ 0.5 onto |d0| < 0.03 mm; pinball gradient is tiny
+in the tails), but removing the spline is not expected to remove the
+collapse on its own. Underlying driver is the d0 truth distribution:
+95 % of mass within `|d0| ≤ 0.031 mm`, 68 % within ±0.013 mm, so any
+location-style loss (mean / median / midquantile, transformed or not) has
+a dominant attractor at the mode and the ≤20-hit track does not always
+carry enough signal to override it in the tails. FP32 is *not* the
+bottleneck (ULP ≈ 1e-9 mm at target scale).
+
+Improvement candidates, **re-ordered after 2026-04-21 evidence**:
+- **[NEW TOP] Mixture density head for d0** (2–3 Gaussian mixture). Matches
+  the sharp-core-plus-tails shape natively and does **not** collapse to a
+  single μ — each component keeps its own location under uncertainty. This
+  is the strongest remaining candidate now that plain Gaussian NLL is known
+  to collapse too.
+- **Per-track loss upweight for tail tracks.** Sample weight ∝
+  `max(1, |truth d0| / τ_core)` so the optimiser stops treating the
+  non-trivial-d0 minority as negligible. Cheap, can stack with any loss.
+- **Training-time offset calibration term.** Bin each batch on **truth d0**
+  and **truth η** (not predicted), compute per-bin mean residual, add
+  `λ · Σ bias²` to the loss (soft binning for differentiability). Directly
+  penalises the pull-to-zero signature.
+- **Post-hoc bias correction** (no retraining). Fit `bias(truth d0, truth η)`
+  on a held-out split, subtract at inference. Unblocks NeurIPS numbers on
+  existing checkpoints quickly; does not fix training.
 - **Drop the spline, use plain `quantile` with linear rescale.** Simpler
-  fallback; loses some tail calibration but removes the collapse attractor.
-- **Blended transform `u = α·linear + (1-α)·CDF`** with α ≈ 0.3–0.7. Keeps
-  some tail-matching but reduces the CDF-induced collapse. Requires
-  retraining (output head is calibrated to the specific transform).
-- **Training-time offset calibration term.** Bin each batch on **truth η**
-  (`η = -ln(tan(θ/2))`, *not* predicted), compute per-bin mean residual for
-  each parameter, add `λ · Σ bias²` to the loss (soft binning for
-  differentiability). Directly attacks the η-dependent bias visible in the
-  `mean_residual_vs_eta` plots without constraining the spread.
-- **Post-hoc bias correction** (no retraining). Fit `bias(η)` per parameter
-  on a held-out val split, subtract at inference. Cheap sanity-check; works
-  on existing checkpoints but does not prevent future training from drifting.
+  fallback. Expected to only partially help per the Gaussian-NLL evidence.
+
+**Status of the "swap spline→Gaussian NLL for d0" candidate:** believed not
+sufficient on its own (per PI-review evidence above) — but no run in the
+logs directly tests it yet (`65c08d6d…` kept the spline on d0). Queue one
+if it's cheap.
 
 **Not recommended:** zero-inflated classifier for "is-beamspot". The d0
 distribution is smooth-peaked, not physically bimodal — a hard threshold
-would be arbitrary and introduces a discontinuity.
+would be arbitrary and introduce a discontinuity.
 
 **4. Fine-tuning is not closing the gap.** The original OneCycle + AdamW +
 6× LR jump recipe "blew the pretrained basin". An A/B/C sweep under WSD

@@ -1,0 +1,241 @@
+# =============================================================================
+# SSM-CLS (Mamba-2 + learned CLS) — Q7 on {z0, phi, theta, qop}
+#                               + pure classifier on d0
+#                               + 15L depth scale-up  (FP32 pretrain on p0_core)
+# =============================================================================
+# NeurIPS "save config" — goal: close the ~7 % fine-tune gap on the 3 core-
+# resolution parameters (z0, theta, qop) where CKF is currently at parity,
+# and kill the d0 mode-collapse artifact that blocks an unambiguous
+# "beats CKF on everything" narrative.
+#
+# Changes vs ssmcls_q7_pretrain.yaml:
+#
+#  1. Encoder depth 10L → 15L (dim/d_state/chunk_size unchanged).
+#     Depth-first scaling per feedback_depth_first_scaling.  15L gives
+#     +50 % encoder capacity for long-range integration (the z0/theta/qop
+#     bottleneck) while staying well inside the H100 per-rank BS cap
+#     (memory: 7500 was measured at 30L; 15L is half that).  Peak LR
+#     dropped 5e-5 → 3.5e-5 to absorb the deeper residual path — linear
+#     interpolation between the 10L baseline (5e-5) and the 30L scaled
+#     backbone (3e-5, yolo_all5_scaled_pretrain_varK.yaml).
+#
+#  2. d0 loss: quantile (Q7) → binned_dfl_quantile, coupling="none".
+#     This is a *pure classifier* head on d0 — no within-bin offset loss,
+#     no offset ramp callback, no QFL coupling — exactly "DFL on its own".
+#     Motivation: Q7 on d0 exhibits the core-collapse artifact (19.7 %
+#     of tracks with |truth d0| >= 50 μm predicted at |pred| < 5 μm;
+#     see CLAUDE.md Open Issue 3).  A discrete bin vote cannot collapse
+#     to the mode — each bin is a separate output channel and the
+#     argmax/expectation is a weighted sum over all bins.
+#
+#  3. d0 binning: linear, 400 bins over [-2.5, 2.5] mm.
+#     Bin width = 5000 μm / 400 = 12.5 μm = the ±12.5 μm beamspot
+#     smearing applied in simulation (project_beamspot_floor memory).
+#     That is the *hard physical floor* on d0 core resolution — not
+#     headroom, the best any estimator can ever reach on this dataset.
+#     Going finer is wasted capacity; going coarser throws away
+#     resolution we want to keep.  No overflow bin (whole physics range
+#     [-2.5, 2.5] is inside).
+#
+#  4. NO class_balance weights, NO tail_weight_tau.
+#     User-requested "without any class weighing".  The rescaling logic
+#     in feedback_yolo_dfl_equal_weights (weight=1.0 across all five
+#     binned_dfl params) does not apply here because only d0 is binned —
+#     the other four are still quantile losses at Q7 scale and their
+#     relative weights (theta=10, qop=5) are the validated recipe.
+#
+#  5. d0 weight 1.0 -> 0.05 to match the quantile-loss magnitude of the
+#     other four parameters.
+#     Magnitude audit:
+#       - Q7 pinball on normalised residuals: ~0.01-0.05 per parameter
+#         (the baseline q7 configs converge there).
+#       - DFL CE on K=400 bins: log(400) = 5.99 at init, ~0.5-1.0 at
+#         convergence (soft 2-bin target entropy).
+#     Unscaled, d0 would dominate val/total by ~50x at init and ~25x at
+#     convergence.  weight=0.05 puts d0 at ~0.3 init and ~0.03 converged,
+#     same order as z0/phi and 10-100x smaller than the theta/qop-
+#     weighted contributions (theta=10 * 0.02 = 0.2; qop=5 * 0.02 = 0.1),
+#     so the optimiser is not dragged onto the d0 classifier in early
+#     training.
+#
+# Fresh pretrain: no ckpt_path — this is the NeurIPS candidate run.
+# =============================================================================
+
+trainer:
+  devices: [1]
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-CLS15-D0-FP32-Core-pretrain
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    # Ramp d0's lambda_offset from 0 -> configured over the first 5% of
+    # steps.  Keeps the within-bin offset head quiet while the classifier
+    # locks onto the coarse bin, then smoothly engages sub-bin refinement.
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.OffsetWarmupCallback
+      init_args:
+        warmup_fraction: 0.05
+        start_factor: 0.0
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      # Force strict FP32 throughout the encoder (disables bf16 autocast
+      # around the Mamba-2 kernels).  YOLO scaled runs confirmed the
+      # wall-clock penalty on H100 is small; worth paying to remove
+      # bf16 round-off as a suspected contributor to the z0/theta/qop
+      # core-resolution gap (CLAUDE.md Open Issue 2).
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 15
+          dim: 192
+          # d_state 32 -> 64: secondary scaling axis (depth is primary).
+          # Doubles the SSM recurrent-state capacity, targeting the
+          # z0/theta/qop core-resolution gap attributed to long-range
+          # integration (CLAUDE.md Open Issue 2).  YOLO varK uses
+          # d_state=64 at 30L * BS=2048; 15L * 64 is half that compute
+          # so H100 has ample headroom.
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              # Matches the validated YOLO d0 recipe exactly
+              # (yolo_all5_scaled_pretrain_varK.yaml): 320 linear bins
+              # over [-2.5, 2.5] mm = 15.625 um/bin, soft_qfl coupling
+              # so the 7-quantile offset head refines within the bin
+              # toward the 12.5 um beamspot floor.
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              # Offset head ON.  The per-bin offset is bounded to
+              # [-0.5, +0.5] bin widths and does NOT suffer from the
+              # Q7-on-d0 mode-at-zero collapse: that was a global
+              # location loss where predicting d0 ~= 0 minimised ~95 %
+              # of samples; the within-bin offset is local, each bin
+              # has its own independent offset target distribution,
+              # and bins far from zero do not pull offsets toward zero.
+              # The coarse location is handled entirely by the softmax
+              # over bins (the classifier half), which by construction
+              # cannot collapse -- bins are separate output channels.
+              # Benefit: sub-bin refinement recovers the ~3 um between
+              # bin-quantization (15.625 um) and the beamspot floor
+              # (12.5 um).
+              coupling: soft_qfl
+              lambda_offset: 1.0              # YOLO d0 uses 1.0 (64/66 ~= 1)
+              # Weight chosen to match quantile-scale: DFL CE
+              # (log(320) ~= 5.77 init -> ~0.5 converged) vs Q7 pinball
+              # (~0.02 converged).  0.05 puts d0 in the same order as
+              # the unweighted z0/phi terms.  Note: the offset-head
+              # pinball contribution rides on top of the CE at the same
+              # weight, and is already O(1) at init on 15.625 um bins
+              # (|offset_truth| up to 0.5 bin widths = 7.8 um), so the
+              # 0.05 multiplier brings the combined term in-scale.
+              weight: 0.05
+              # Per-track tail upweight w = max(1, |d0| / 30 um).
+              # The d0 distribution has 95% of mass within +/-31 um, so
+              # the ~5% of tracks with |d0| >> beamspot carry ~5% of the
+              # gradient under uniform weighting -- enough for the
+              # softmax to drift toward the central bins (Bayesian
+              # soft-collapse).  tau = 30 um restores tail gradient mass
+              # without overshooting.  Physical target weighting is OK
+              # here because coupling=none: we only up-weight the CE
+              # on the correct bin, we are not amplifying a broken
+              # location loss.  Same tau as yolo_all5_scaled_pretrain_varK.
+              tail_weight_tau: 0.03
+              # Per-bin class rebalancing (DIR/LDS, Yang et al. ICML 2021).
+              # Stacks with tail_weight_tau: the per-track weight says
+              # "value tail tracks at all", the per-bin weight says
+              # "when the occasional tail track arrives, spread its
+              # gradient across under-populated bins instead of letting
+              # the mode bin dominate by sheer count".
+              # Reuses the existing K=320 histogram (same file the
+              # YOLO varK config uses), so no regeneration required.
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            z0:
+              type: quantile
+              weight: 10.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 5.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 1.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 3.5e-05        # 10L=5e-5, 30L=3e-5; linear interp for 15L.
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 2048
+  num_workers: 16

@@ -1,0 +1,226 @@
+# =============================================================================
+# YOLO scaled pretrain — all 5 params with BinnedDFLQuantileOffsetLoss
+# Scaled ssm_cls backbone: 30L × dim=192 × d_state=64 (≈16.5 M params)
+# p0_core_pretrain full dataset, **per-rank BS=7500 × 4× H100 DDP =
+# 30 000 global**, Lion + OneCycleLR, 50 epochs.  7500 is the memory
+# ceiling per H100 for this backbone (verified empirically).  Tests the
+# YOLO DFL hypothesis: bounded softmax-CE gradients should unblock
+# large-batch pretraining without the precision hit that capped
+# BS=2048 for pinball-only regression.
+#
+# Scaling (per CLAUDE.md):
+#   - Depth-first: num_layers 10 → 30 (3× baseline)
+#   - d_state 32 → 64 (the "2× matches empirical +10% observation" hyperp)
+#   - dim kept at 192 (no width scaling for ssm_cls)
+#   - output_head_hidden_layers kept compact at [256]
+#
+# LR scaling (per √k rule, reference_optimizer_schedule_research_2026_04):
+#   Reference baseline is ssmcls_q7_pretrain.yaml at BS=2048 single-GPU
+#   with (initial, max, end) = (1e-5, 5e-5, 1e-6).  Global BS here is
+#   7500 × 4 = 30 000, a 14.65× jump → √k LR scale ≈ 3.83×.  Applied
+#   straight to the baseline triple (NOT to the 30 L scaled_pretrain
+#   single-GPU 3e-5 peak — that peak already included a 0.6× deep-stack
+#   reduction; at 14.65× BS the dominant effect is BS scaling, so we
+#   scale the baseline and drop the extra 0.6×).
+#
+# Risk flag: BS=30000 global from scratch is aggressive — CLAUDE.md notes
+# pretrain BS was kept low at 2048 specifically for its implicit-
+# regularisation effect on pure pinball regression.  The YOLO binned
+# design may unblock that, but it is a hypothesis.  An intermediate
+# BS=4000 global (1000 × 4) smoke is cheaper insurance before
+# committing 4× H100 to 50 epochs.
+#
+# Loss design (per the YOLO-binned R&D plan):
+#   - d0:  LINEAR bins + 2 overflow  (K=66)   — CDF-warp would amplify
+#          the mode-collapse attractor, so we go linear on the only
+#          parameter that exhibits it.  Offset head is the validated
+#          7-quantile pinball, QFL-coupled to the softmax classification.
+#   - z0:  CDF-warped bins (K=64)   via spline_z0.yaml
+#   - phi: CDF-warped bins (K=64)   via spline_delta_phi.yaml with
+#          delta_anchor: innermost_phi  (99.6 % within ±0.06 rad, so
+#          DFL-on-delta is circular-safe by construction — no
+#          wrap-aware loss needed; see the R&D plan for the reasoning).
+#   - theta: CDF-warped bins (K=64) in η-space via spline_theta_eta.yaml
+#   - qop: CDF-warped bins (K=64)   via spline_qop.yaml
+#   - coupling: soft_qfl (Generalized Focal Loss §3)
+#
+# Note: wall-clock budget.  The 10 L baseline pretrain takes ~60–100 h
+# on 1× H100 (CLAUDE.md).  30 L on 1× H100 would project to ~180–300 h;
+# DDP across 4× H100 at BS=30k aims to bring that back near the 1× H100
+# baseline wall-clock by trading GPU count for BS.  Communication overhead
+# and the large-batch regularisation penalty (CLAUDE.md: "Pretrain BS kept
+# artificially low for regularisation") are open risks — hence this is
+# the BS-scan config, not the primary pretrain.
+# =============================================================================
+
+trainer:
+  devices: -1            # 4× H100 DDP
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-YOLO-Scaled-Core-pretrain-largeBATCH
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    # Ramp the offset-head weight from 0 -> configured value over the first
+    # 5% of training steps.  More important at large batch (per-step gradient
+    # noise scales differently) than at BS=2048.
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.OffsetWarmupCallback
+      init_args:
+        warmup_fraction: 0.05
+        start_factor: 0.0
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      # Force strict FP32 throughout the encoder (disables bf16 autocast).
+      # The fast mamba-ssm CUDA kernel handles fp32 without a meaningful
+      # slowdown on this machine (empirically verified) — gives us the
+      # precision headroom the YOLO binned head was designed to exploit.
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 30
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              # Full-range uniform binning matching yolo_all5_scaled_pretrain.yaml.
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true    # Q-loop saves ~Q× offset-tensor memory at large K/BS
+              # Per-track tail upweight w = max(1, |d0| / 30 μm), matching
+              # ssmcls_mdn_d0_pretrain.yaml.  Counters the 95%/5%
+              # core/tail gradient imbalance that drives Bayesian
+              # soft-collapse under DFL.
+              tail_weight_tau: 0.03
+              # Per-bin class rebalancing (DIR/LDS, Yang et al. ICML 2021).
+              # Stacks with tail_weight_tau — central bins get ~0.1×
+              # CE, tail bins up to ~1.6× (raw weight range 16×).
+              # Particularly important at large batch where the
+              # small-batch noise that otherwise breaks mode-attractors
+              # is weaker.
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            # Bin counts match yolo_all5_scaled_pretrain.yaml — cls-only
+            # IQR anchored at SSM regression IQR per parameter.
+            z0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 512
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_z0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true    # Q-loop saves ~Q× offset-tensor memory at large K/BS
+            phi:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 32
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              delta_anchor: innermost_phi
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true    # Q-loop saves ~Q× offset-tensor memory at large K/BS
+            theta:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 1024
+              binning: cdf_eta
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_theta_eta.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true    # Q-loop saves ~Q× offset-tensor memory at large K/BS
+            qop:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 256
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_qop.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true    # Q-loop saves ~Q× offset-tensor memory at large K/BS
+
+  optimizer: Lion
+  lrs_config:
+    # LR scaled by √(BS_new / BS_base) = √(30000 / 2048) = 3.83×, applied
+    # to the ssmcls_q7_pretrain baseline (1e-5 / 5e-5 / 1e-6 at BS=2048).
+    # If the BS=30k run diverges, drop to global BS=16k first by setting
+    # batch_size: 4000 and scaling LR by √(16000/2048)=2.80× instead:
+    # (initial 2.8e-5 / max 1.4e-4 / end 2.8e-6).
+    initial: 3.8e-05
+    max: 1.9e-04
+    end: 3.8e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  load_acts: true
+  # 7500 is the per-rank memory ceiling on H100 for this 30 L backbone;
+  # Lightning treats batch_size as per-rank, so with devices: -1 across
+  # 4× H100 DDP this gives global BS = 7500 × 4 = 30 000.
+  batch_size: 7500
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

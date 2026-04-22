@@ -1,0 +1,191 @@
+# =============================================================================
+# YOLO scaled pretrain — varK edition
+# Scaled ssm_cls backbone: 30L × dim=192 × d_state=64 (≈16.5 M params)
+# p0_core_pretrain full dataset, BS=2048, Lion + OneCycleLR, 50 epochs
+#
+# Sibling of yolo_all5_scaled_pretrain.yaml.  Identical except for three
+# deltas motivated by the variable-K geometry (d0=66, z0=512, phi=32,
+# theta=1024, qop=256 → total 1925 output channels):
+#
+#   1. output_head_hidden_layers: [256] → [512]
+#      The 256-dim hidden layer is the narrowest point feeding the 1925
+#      logits.  With five simultaneous softmaxes sharing one hidden state
+#      (~38 bits of peak-location information), widening to 512 removes
+#      the shared-bottleneck interference risk flagged by the softmax-
+#      saturation literature (arXiv:2404.07647).  Output-head param count
+#      grows 525 k → 1.05 M (6 % of backbone) — still thin per CLAUDE.md.
+#
+#   2. Per-parameter lambda_offset = 64/K.
+#      Under QFL-soft coupling, the within-bin pinball offset loss reaches
+#      ~K/8 per track at init (far-from-truth bins have |off_truth| up to
+#      K).  At K=1024 that is ~128/track on theta vs ~4/track on phi —
+#      a 32× imbalance that would dominate at BS=30k and reintroduce the
+#      exact "heavy-tail gradient variance" failure mode DFL was supposed
+#      to eliminate.  Setting lambda_offset ∝ 1/K restores per-head init
+#      magnitude to O(1) and preserves the bounded-gradient / BS-scaling
+#      story.  K_ref = 64 keeps d0 ≈ 1.0 (unchanged from the K-uniform
+#      baseline).
+#
+#   3. weight: 1.0 everywhere (unchanged — see feedback_yolo_dfl_equal_weights).
+#      CE = log(K) spread is accepted; val/total will be theta-dominated
+#      for the first epochs, levelling out as softmaxes sharpen toward the
+#      ~log(2) 2-bin irreducible floor.
+#
+# Bin counts are anchored at the per-parameter SSM regression IQR (so the
+# cls-only point prediction already lands at the current regression
+# resolution; the offset head's job is to sharpen rather than correct).
+# =============================================================================
+
+trainer:
+  devices: [1]
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-YOLO-Scaled-Core-pretrain-varK
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    # Ramp the offset-head weight from 0 -> configured (per-param) lambda_offset
+    # over the first 5% of training steps.  Composes cleanly with the 64/K
+    # base values: callback multiplies each sub-loss's configured
+    # lambda_offset, so the 0→1 ramp × 64/K K-scale stacks correctly.
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.OffsetWarmupCallback
+      init_args:
+        warmup_fraction: 0.05
+        start_factor: 0.0
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      # Widened from [256] → [512] to relieve the shared softmax
+      # bottleneck feeding 1925 output channels.
+      output_head_hidden_layers: [512]
+      output_head_init_scale: 0.01
+      # Force strict FP32 throughout the encoder (disables bf16 autocast).
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 30
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              # Full-range uniform 320 × 15.625 μm — no junk drawer, covers
+              # entire |d0| ≤ 2.5 mm physics range at CKF-competitive
+              # resolution.  Matches bin_hist_d0.pt (regenerated 2026-04-21).
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0                           # 64/66 ≈ 0.97, rounded to 1.0
+              coupling: soft_qfl
+              # Per-track tail upweight w = max(1, |d0| / 30 μm).
+              tail_weight_tau: 0.03
+              # Per-bin class rebalancing (DIR/LDS) — d0 linear bins.
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            # Bin counts anchored at cls-only IQR ≈ SSM regression IQR per
+            # param; see scripts/bin_quantization_stats.py.
+            z0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 512                                  # cls-only IQR ≈ 0.142 mm vs SSM 0.160 mm
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_z0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.125                         # 64/512
+              coupling: soft_qfl
+            phi:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 32                                   # cls-only IQR ≈ 0.60 mrad vs SSM 0.669 mrad
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              delta_anchor: innermost_phi
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 2.0                           # 64/32
+              coupling: soft_qfl
+            theta:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 1024                                 # cls-only IQR ≈ 0.96 mrad vs SSM 0.787 mrad
+              binning: cdf_eta
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_theta_eta.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.0625                        # 64/1024
+              coupling: soft_qfl
+            qop:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 256                                  # cls-only IQR ≈ 0.00226 vs SSM 0.00321
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_qop.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.25                          # 64/256
+              coupling: soft_qfl
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 3.0e-05       # 0.6× the 10 L baseline peak (5e-5).  Deeper stacks
+                       # (3× depth here) want a lower peak LR to avoid
+                       # early-training instability in the deeper residual
+                       # path.  Empirically validated against the baseline
+                       # ssmcls_q7 pretrain recipe.
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 2048
+  num_workers: 16

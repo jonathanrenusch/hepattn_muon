@@ -1,0 +1,187 @@
+# =============================================================================
+# YOLO scaled fine-tune — varK edition
+# Scaled ssm_cls backbone: 30L × dim=192 × d_state=64 (≈16.5 M params)
+# p200_core_finetune, Lion + WSD (Run B default), 4× H100 DDP, 100 epochs
+#
+# Sibling of yolo_all5_scaled_finetune.yaml.  Three deltas carried over
+# from the varK pretrain sibling so the finetune loads the varK pretrained
+# checkpoint cleanly:
+#
+#   1. output_head_hidden_layers: [256] → [512]
+#   2. Per-parameter lambda_offset = 64/K   (d0=1.0, z0=0.125, phi=2.0,
+#      theta=0.0625, qop=0.25).
+#   3. weight: 1.0 across all five params (unchanged).
+#
+# *** Checkpoint-compat requirement ***: varK-pretrain and varK-finetune
+# MUST share identical n_bins, lambda_offset, and output_head_hidden_layers
+# values, or the state_dict load on `output_head.net[-1]` (shape
+# (1925, 512)) will mismatch and fail.  Keep this config and
+# yolo_all5_scaled_pretrain_varK.yaml in lockstep on those three keys.
+#
+# Fine-tune optimiser/schedule:
+#   Run B recipe — Lion continuation + WSD, scaled to global BS=30 000
+#   (per-rank 7500 × 4 DDP).  Peak LR = 0.6× newly-scaled varK pretrain
+#   peak (1.9e-4) = 1.15e-4, matching the Run-B continuity ratio.
+#
+# IMPORTANT — update ``pretrained_ckpt_path`` to the run-id of the
+# yolo_all5_scaled_pretrain_varK.yaml pretrain once it completes.
+# OffsetWarmupCallback is intentionally omitted on fine-tune (the
+# pretrained offset head is already calibrated; ramping its weight from 0
+# would starve it of supervision rather than protect it).
+# =============================================================================
+
+trainer:
+  devices: -1           # 4× H100 DDP
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-YOLO-Scaled-Core-Finetune-varK-B-Lion-WSD
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    # NOTE: OffsetWarmupCallback intentionally omitted — see header.
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  # PLACEHOLDER — update to the actual varK pretrain checkpoint once
+  # yolo_all5_scaled_pretrain_varK.yaml completes.
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/PLACEHOLDER_YOLO_PRETRAIN_VARK_RUN/ckpts/last.ckpt
+  optimizer: Lion
+  lrs_config:
+    # Lion continuation + WSD, scaled to global BS = 7500 × 4 = 30 000.
+    # 0.6× the varK pretrain peak (1.9e-4) = 1.14e-4 ≈ 1.15e-4, same
+    # Run-B continuity ratio as the pre-varK finetune sibling.
+    schedule: wsd
+    initial: 1.15e-05      # 10% of peak (Lion continuation: short warmup)
+    max: 1.15e-04
+    end: 3.8e-06
+    pct_start: 0.02
+    decay_pct: 0.15
+    weight_decay: 1.0e-03  # matches pretrain Lion WD
+    skip_scheduler: false
+
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [512]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 30
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              # Full-range uniform 320 × 15.625 μm — no junk drawer, covers
+              # entire |d0| ≤ 2.5 mm physics range at CKF-competitive
+              # resolution.  Matches bin_hist_d0.pt (regenerated 2026-04-21).
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0                           # 64/66 ≈ 0.97, rounded to 1.0
+              coupling: soft_qfl
+              # Per-track tail upweight w = max(1, |d0| / 30 μm).
+              tail_weight_tau: 0.03
+              # Per-bin class rebalancing (DIR/LDS).  p0 hist works for
+              # p200 finetune (same physics selection on d0).
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            # Bin counts match yolo_all5_scaled_pretrain_varK.yaml EXACTLY —
+            # changing any K here would break the pretrained output_head
+            # state_dict load.
+            z0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 512
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_z0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.125                         # 64/512
+              coupling: soft_qfl
+            phi:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 32
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              delta_anchor: innermost_phi
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 2.0                           # 64/32
+              coupling: soft_qfl
+            theta:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 1024
+              binning: cdf_eta
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_theta_eta.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.0625                        # 64/1024
+              coupling: soft_qfl
+            qop:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 256
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_qop.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.25                          # 64/256
+              coupling: soft_qfl
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_core_finetune
+  load_acts: true
+  # 7500 is the per-rank memory ceiling on H100 for this 30 L backbone;
+  # 4× H100 DDP → global BS = 30 000.
+  batch_size: 7500
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

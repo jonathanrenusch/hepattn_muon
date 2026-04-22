@@ -67,7 +67,7 @@ from torch import Tensor, nn
 from torch.optim import AdamW
 
 from hepattn.models.dense import Dense
-from hepattn.experiments.colliderml_regr.losses import TrackParameterLoss
+from hepattn.experiments.colliderml_regr.losses import MixtureDensityLoss, TrackParameterLoss
 from hepattn.experiments.colliderml_regr.mamba_state import BidirectionalMambaEncoder
 from hepattn.experiments.colliderml_regr.muon import MuonHybrid, split_params_for_muon
 from hepattn.experiments.colliderml_regr.sam import SAM
@@ -661,6 +661,9 @@ class TrackRegressionWrapper(LightningModule):
         for name, value in calibration_metrics.items():
             self.log(f"{stage}/{name}", value, sync_dist=do_sync)
 
+        # MDN component diagnostics (π_k, μ_k, σ_k per mixture component)
+        self._log_mdn_components(outputs["pred"], valid_mask, stage)
+
         # Compute and log per-parameter metrics for all stages.
         # Use predict_physical to add back delta anchors for correct residuals.
         preds = self.model.loss_module.predict_physical(outputs["pred"], targets)
@@ -782,6 +785,69 @@ class TrackRegressionWrapper(LightningModule):
                                 rms * scale,
                                 sync_dist=True,
                             )
+
+    def _log_mdn_components(
+        self,
+        raw: Tensor,
+        valid_mask: Tensor | None,
+        stage: str,
+    ) -> None:
+        """Log per-component MDN diagnostics (mean π, μ, σ, effective K, MAP fraction).
+
+        For every parameter whose loss is a ``MixtureDensityLoss``, record
+        one scalar per component plus two aggregate diagnostics:
+          - ``{stage}/{name}/mdn/pi_{k}``       — batch-mean mixture weight
+          - ``{stage}/{name}/mdn/mu_{k}``       — batch-mean predicted location [physical units]
+          - ``{stage}/{name}/mdn/sigma_{k}``    — batch-mean predicted spread  [physical units]
+          - ``{stage}/{name}/mdn/effective_k``  — ⟨1/Σₖπₖ²⟩, measures how balanced π is
+          - ``{stage}/{name}/mdn/map_frac_{k}`` — fraction of tracks whose MAP component is k
+
+        Watching these during training diagnoses two failure modes:
+          * One component capturing all tracks (`map_frac_{k} → 1`,
+            `effective_k → 1`) → collapse back to single-Gaussian behaviour.
+          * A component going dead (`pi_{k} → 0`, unchanging μ/σ) → K is
+            too large; reduce in the next run.
+        """
+        loss_module = self.model.loss_module
+        if not any(isinstance(sub, MixtureDensityLoss) for sub in loss_module.losses.values()):
+            return
+
+        do_sync = stage != "train"
+        for name, sub_loss in loss_module.losses.items():
+            if not isinstance(sub_loss, MixtureDensityLoss):
+                continue
+            start, end = loss_module.get_output_slice(name)
+            r = raw[..., start:end]
+            if valid_mask is not None:
+                r = r[valid_mask]
+            if r.numel() == 0:
+                continue
+
+            comps = sub_loss.predict_components(r)
+            pi = comps["pi"]        # (N, K)
+            mu = comps["mu"]        # (N, K) physical
+            sigma = comps["sigma"]  # (N, K) physical
+            K = sub_loss.n_components
+
+            for k in range(K):
+                self.log(f"{stage}/{name}/mdn/pi_{k}", pi[..., k].mean(), sync_dist=do_sync)
+                self.log(f"{stage}/{name}/mdn/mu_{k}", mu[..., k].mean(), sync_dist=do_sync)
+                self.log(f"{stage}/{name}/mdn/sigma_{k}", sigma[..., k].mean(), sync_dist=do_sync)
+
+            pi_sq_sum = (pi ** 2).sum(dim=-1).clamp_min(1e-12)
+            self.log(
+                f"{stage}/{name}/mdn/effective_k",
+                (1.0 / pi_sq_sum).mean(),
+                sync_dist=do_sync,
+            )
+
+            k_map = pi.argmax(dim=-1)
+            for k in range(K):
+                self.log(
+                    f"{stage}/{name}/mdn/map_frac_{k}",
+                    (k_map == k).float().mean(),
+                    sync_dist=do_sync,
+                )
 
     # -- train / val / test ------------------------------------------------
 
@@ -931,6 +997,9 @@ class TrackRegressionWrapper(LightningModule):
         )
         for name, value in calibration_metrics.items():
             self.log(f"train/{name}", value, sync_dist=False)
+
+        # MDN component diagnostics (mirrors _shared_step) — no-op when no MDN in play.
+        self._log_mdn_components(outputs["pred"], valid_mask, "train")
 
         # Per-parameter MAE / precision / IQR / RMS logging.
         preds = self.model.loss_module.predict_physical(outputs["pred"], targets)

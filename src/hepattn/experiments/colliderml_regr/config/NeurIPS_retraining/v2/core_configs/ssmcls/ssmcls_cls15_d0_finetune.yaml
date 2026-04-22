@@ -1,0 +1,146 @@
+# =============================================================================
+# SSM-CLS 15L + d0 classifier — FP32 fine-tune on p200_core
+# Pair to ssmcls_cls15_d0_pretrain.yaml.
+#
+# AdamW + OneCycle, peak LR 2x pretrain peak = 7e-5 (NOT 6x — see
+# reference_optimizer_schedule_research_2026_04: 6x blows the Lion basin,
+# 2x is the validated AdamW-switch peak).  wd=0.02 per Lion->AdamW
+# family-switch guidance.
+#
+# Batch size scaled up to 30000 (fine-tune tolerates large BS once
+# pretrained — see CLAUDE.md "Fine-tune BS can be scaled up").  At 4x H100
+# this is 7500/rank, which memory (reference_h100_per_rank_bs_cap) confirms
+# as the measured ceiling for the 30L backbone; 15L has headroom.
+# =============================================================================
+
+trainer:
+  devices: -1
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-CLS15-D0-FP32-Core-finetune
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.OffsetWarmupCallback
+      init_args:
+        warmup_fraction: 0.05
+        start_factor: 0.0
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.GradientSpikeSkip
+      init_args:
+        k: 5.0
+        warmup_steps: 200
+        buffer_size: 500
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 30
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ckpts/PLACEHOLDER_ssmcls_cls15_d0_pretrain.ckpt
+  optimizer: AdamW
+  lrs_config:
+    initial: 1.0e-05
+    max: 7.0e-05          # 2x pretrain peak (3.5e-5) per Lion->AdamW switch recipe.
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 2.0e-02  # AdamW default WD range; 100x Lion pretrain WD on switch.
+    betas: [0.9, 0.95]
+    skip_scheduler: false
+
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 15
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              coupling: soft_qfl
+              lambda_offset: 1.0
+              weight: 0.05
+              tail_weight_tau: 0.03
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_core_finetune
+  load_acts: true
+  batch_size: 30000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

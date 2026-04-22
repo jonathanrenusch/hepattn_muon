@@ -21,9 +21,10 @@
 # chunk_size further (to 4) and/or confirm the installed mamba-ssm version
 # exposes a pure-fp32 path.
 # =============================================================================
+ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/cc938543373e46f7af245a795d2fb20d/ckpts/epoch=009-val_total=0.00921.ckpt
 
 trainer:
-  devices: [1]
+  devices: -1
   max_epochs: 15
   # Keep strict fp32 at the Lightning level AND disable the encoder autocast
   # below, so nothing in the forward path downcasts.

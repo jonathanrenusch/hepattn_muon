@@ -1,0 +1,182 @@
+# =============================================================================
+# YOLO 15L varK — fast-iteration pretrain on p200 kf-matched, large-batch
+# ssm_cls backbone: **15 L** × dim=192 × d_state=64 (~8.3 M params, half
+# of the 30 L varK scaled pretrain).  **Per-rank BS=10 000 × 4× H100 DDP =
+# 40 000 global.**  Lion + OneCycleLR, 50 epochs.
+#
+# Wall-clock target: ~30 min/epoch on 4× H100 (30 L was 1 h/epoch at
+# BS=30 k global; halving depth halves per-layer matmul cost on the
+# 20-hit sequences, and the BS bump from 30 k → 40 k partially absorbs
+# the DDP communication overhead that doesn't scale with depth).  Designed
+# for overnight iteration — 16 epochs in 8 h is realistic.
+#
+# Memory: per-rank BS=10 000 is a conservative bump over the 30 L
+# per-rank ceiling of 7500.  15 L halves activation memory footprint, so
+# we'd have ceiling-room for ~15 000/rank; 10 000 is the user-requested
+# cap with headroom for the widened [512] output head.
+#
+# Dataset: /scratch/colliderml/p200_core_kf_matched_finetune.  100%
+# KF-double-matched → training distribution aligned with DM evaluation
+# metrics from step 0.  See the sibling kfmatched_pretrain.yaml header
+# for rationale.
+#
+# varK recap: see yolo_all5_scaled_pretrain_varK.yaml / the fast
+# single-GPU sibling.  Bin counts + lambda_offset + [512] head unchanged.
+# =============================================================================
+
+trainer:
+  devices: -1                          # 4× H100 DDP
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-YOLO-15L-varK-kfmatched-pretrain-largeBATCH
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.OffsetWarmupCallback
+      init_args:
+        warmup_fraction: 0.05
+        start_factor: 0.0
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [512]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 15                 # halved from 30 for fast iteration
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              # Full-range uniform 320 × 15.625 μm — no junk drawer, covers
+              # entire |d0| ≤ 2.5 mm physics range at CKF-competitive
+              # resolution.  Matches bin_hist_d0.pt (regenerated 2026-04-21).
+              n_bins: 320
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              offset_memory_efficient: true
+              tail_weight_tau: 0.03
+              class_balance_path: config/NeurIPS_retraining/v2/core_configs/splines/bin_hist_d0.pt
+              class_balance_power: 0.5
+              class_balance_clip: [0.1, 10.0]
+            z0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 512
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_z0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.125
+              coupling: soft_qfl
+              offset_memory_efficient: true
+            phi:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 32
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              delta_anchor: innermost_phi
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 2.0
+              coupling: soft_qfl
+              offset_memory_efficient: true
+            theta:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 1024
+              binning: cdf_eta
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_theta_eta.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.0625
+              coupling: soft_qfl
+              offset_memory_efficient: true
+            qop:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 256
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_qop.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 0.25
+              coupling: soft_qfl
+              offset_memory_efficient: true
+
+  optimizer: Lion
+  lrs_config:
+    # √k scaling from ssmcls_q7_pretrain baseline (BS=2048, 1e-5/5e-5/1e-6)
+    # to global BS=40 000.  √(40000/2048) = 4.42×.  Triple scaled
+    # proportionally: 4.4e-5 / 2.2e-4 / 4.4e-6.  If this diverges, step
+    # down to global BS=20k (batch_size: 5000) with LR × 3.12× →
+    # (3.1e-5 / 1.56e-4 / 3.1e-6).  15 L doesn't need the 30 L deep-stack
+    # reduction; baseline triple is the anchor.
+    initial: 4.4e-05
+    max: 2.2e-04
+    end: 4.4e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  # preprocessed_dir: /scratch/colliderml/p200_core_kf_matched_finetune
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  load_acts: true
+  # 10 000 per-rank × 4× H100 DDP → global BS = 40 000.  15 L halves
+  # activation memory vs the 30 L ceiling of 7500/rank, giving comfortable
+  # headroom for the widened [512] output head.
+  batch_size: 12000
+  num_workers: 1
+  streaming: true
+  shard_buffer_size: 50

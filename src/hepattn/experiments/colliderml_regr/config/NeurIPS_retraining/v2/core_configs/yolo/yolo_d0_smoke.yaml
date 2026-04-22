@@ -1,0 +1,151 @@
+# =============================================================================
+# YOLO smoke — all 5 params with BinnedDFLQuantileOffsetLoss
+# Baseline ssmcls_q7 backbone (10L, dim=192, d_state=32)
+# 3 shards of p0_core_pretrain, BS=2048, 5 epochs
+#
+# Purpose: debug the full pipeline end-to-end.  Verifies:
+#   - binned_dfl_quantile plugin wiring (linear for d0, cdf for z0/qop,
+#     cdf_eta for theta, cdf+delta_anchor for phi)
+#   - output_head auto-sizes to 5*(K+Q) = 5*71 + 2 overflow = 357 channels
+#   - QFL-soft coupling forward/backward numerical stability
+#   - checkpoint / val metrics machinery does not break on the new loss
+#
+# Match ssmcls_q7_pretrain.yaml layout exactly so any breakage is
+# attributable to the loss swap, not unrelated config drift.
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 5
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-YOLO-d0-smoke
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      # Force strict FP32 throughout the encoder (disables bf16 autocast).
+      # The fast mamba-ssm CUDA kernel handles fp32 without a meaningful
+      # slowdown on this machine (empirically verified) — gives us the
+      # precision headroom the YOLO binned head was designed to exploit.
+      encoder_autocast_dtype: float32
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 10
+          dim: 192
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 66             # 64 core + 2 overflow
+              binning: linear
+              range_min: -0.5        # core range (overflow catches |d0| > 0.5)
+              range_max: 0.5
+              n_overflow: 2
+              # overflow_pad: default = bin_width_core = 1/64 mm
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+              # Per-track tail upweight w = max(1, |d0| / 30 μm).  Matches
+              # ssmcls_mdn_d0_pretrain.yaml exactly.  Compensates for the
+              # 95%/5% core/tail imbalance that would otherwise pull cls
+              # softmax toward the central bins (Bayesian soft-collapse).
+              tail_weight_tau: 0.03
+            z0:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 64
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_z0.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+            phi:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 64
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_delta_phi.yaml
+              delta_anchor: innermost_phi
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+            theta:
+              type: binned_dfl_quantile
+              # weight: 1.0 across all params — DFL cross-entropy is
+              # ~log(K)-scale for every parameter and the within-bin
+              # pinball offset is in bin-width units (also unit-free),
+              # so the "theta=10, qop=5" rescaling from the quantile
+              # recipe is no longer warranted under DFL.
+              weight: 1.0
+              n_bins: 64
+              binning: cdf_eta
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_theta_eta.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+            qop:
+              type: binned_dfl_quantile
+              weight: 1.0
+              n_bins: 64
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_qop.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              lambda_offset: 1.0
+              coupling: soft_qfl
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 2048
+  num_workers: 8
+  num_train_shards: 3

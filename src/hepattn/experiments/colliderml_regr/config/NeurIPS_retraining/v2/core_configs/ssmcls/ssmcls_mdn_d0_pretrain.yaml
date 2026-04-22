@@ -1,0 +1,161 @@
+# =============================================================================
+# SSM-CLS + Q7 (z0/phi/theta/qop) + Gaussian Mixture Density head for d0
+# FP32 pretrain on p0_core
+# =============================================================================
+# Motivation
+# ----------
+# Sibling of ssmcls_q7_pretrain.yaml.  The only deliberate difference is the d0
+# loss: instead of a 7-quantile pinball regressor, d0 is modelled by a 3-
+# component Gaussian mixture density network (MDN).
+#
+# Context: the d0 truth distribution has 95 % of its mass within ±30 μm,
+# 99 % within ±1 mm.  A single-location head (quantile median, Gaussian μ,
+# spline-CDF midpoint) minimises expected loss by collapsing uncertain
+# predictions onto the mode at 0.  The zero-shot diagnostic on run
+# `ac72e5c9…` (2026-04-21) quantified this as:
+#   - 17.0 % of double-matched tracks with |truth d0| >= 0.05 mm get
+#     predicted at |pred| < 5 μm, vs 0.45 % for ACTS CKF.
+#   - That is an ~38× excess over the CKF-achievable floor.
+# An MDN breaks the collapse architecturally: each component keeps its
+# own μ under uncertainty; the model hedges by redistributing π across
+# components instead of averaging μ toward zero.
+#
+# In addition to the architectural fix we apply a **continuous per-track
+# tail upweighting** (``tail_weight_tau: 0.03``) that multiplies each
+# track's d0 NLL by ``w = max(1, |truth d0| / 30 μm)``.  This restores
+# gradient balance — the ~5 % of tail tracks were previously contributing
+# ~5 % of gradient, which left the MDN's displaced components starved.
+# Cheaper than upsampling, mathematically equivalent on expectation,
+# composes cleanly with the MDN.
+#
+# Hyper-parameters for the d0 head
+# --------------------------------
+#   n_components: 3
+#     prompt (~0), moderate-displaced (~0.25 mm), symmetric.  3 covers the
+#     observed structure; 2 works but gives up the negative-displacement
+#     arm.  Monitor the π mass per component — if one collects < 1 %
+#     consistently, reduce K in a follow-up run.
+#   init_means: [-0.1, 0.0, 0.1]  (in normalised [-1, 1] space,
+#                                  physical d0 = ±0.25, 0 mm)
+#     Spread at init so components don't stack at μ = 0.
+#   sigma_init: -2.0   → softplus(-2) ≈ 0.13 in normalised space
+#                        ≈ 0.33 mm physical — reasonable starting spread.
+#   sigma_floor: 1e-4  (in normalised units)  prevents δ-collapse.
+#   tail_weight_tau: 0.03 mm — physical units, ~ the 95 % boundary of the
+#                              truth distribution.
+#
+# Everything else — backbone, Lion + OneCycle pretrain, dataset, BS, LR —
+# is carried over from ssmcls_q7_pretrain.yaml unchanged so that the only
+# axis under test is the d0 head.  Matched-design ablation.
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 50
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-MDN-D0-FP32-Core-pretrain
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 10
+          dim: 192
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: mixture_density
+              weight: 1.0
+              n_components: 3
+              norm_min: -2.5
+              norm_max: 2.5
+              init_means: [-0.1, 0.0, 0.1]
+              sigma_init: -2.0
+              sigma_floor: 1.0e-4
+              tail_weight_tau: 0.03
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 2048
+  num_workers: 16

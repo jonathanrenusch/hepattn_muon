@@ -383,3 +383,102 @@ class GradientSpikeSkip(Callback):
             logger=True,
             sync_dist=self._sync_dist,
         )
+
+
+class OffsetWarmupCallback(Callback):
+    """Ramp ``lambda_offset`` on every :class:`BinnedDFLQuantileOffsetLoss`
+    from ``start_factor`` up to the target value over the first
+    ``warmup_fraction`` of training steps.
+
+    Defence-in-depth for the scaled YOLO pretrain: during the first few
+    hundred steps the classification softmax is near-uniform, so the
+    QFL-coupled pinball loss drives the offset head against a very noisy
+    target (each bin's "truth offset" is weighted by 1/K).  Starting
+    ``lambda_offset`` near zero and ramping up lets the classifier sharpen
+    before the offset head carries any weight — a standard GFL-style
+    guard that is free when the loss is stable anyway (the warmup is a
+    no-op after the first ``warmup_fraction`` of steps).
+
+    Not needed on the smoke config — empirically verified to train cleanly
+    with ``lambda_offset = 1.0`` from step 0.  Recommended on the scaled
+    pretrain / finetune where a NaN recovery cost is high.
+
+    Parameters
+    ----------
+    warmup_fraction : float
+        Fraction of total training steps over which to ramp.  Default 0.05.
+    start_factor : float
+        Initial multiplier applied to each loss's configured
+        ``lambda_offset``.  Default 0.0 (offset head inactive at step 0).
+
+    Notes
+    -----
+    Mutates ``sub_loss.lambda_offset`` in-place each step.  The original
+    target value is captured at ``on_train_start`` and restored when the
+    ramp completes.  Safe under DDP — the same scalar is applied on every
+    rank because ``trainer.global_step`` is synchronised.
+    """
+
+    def __init__(self, warmup_fraction: float = 0.05, start_factor: float = 0.0):
+        super().__init__()
+        if not (0.0 <= warmup_fraction <= 1.0):
+            raise ValueError(f"warmup_fraction must be in [0, 1], got {warmup_fraction}")
+        if not (0.0 <= start_factor <= 1.0):
+            raise ValueError(f"start_factor must be in [0, 1], got {start_factor}")
+        self.warmup_fraction = float(warmup_fraction)
+        self.start_factor = float(start_factor)
+        self._targets: dict[str, float] = {}
+        self._total_warmup_steps: int | None = None
+
+    def _iter_binned_losses(self, pl_module: LightningModule):
+        """Yield (name, sub_loss) for every BinnedDFLQuantileOffsetLoss in the model."""
+        from hepattn.experiments.colliderml_regr.losses import BinnedDFLQuantileOffsetLoss
+
+        loss_module = getattr(pl_module.model, "loss_module", None)
+        if loss_module is None:
+            return
+        for name, sub in loss_module.losses.items():
+            if isinstance(sub, BinnedDFLQuantileOffsetLoss):
+                yield name, sub
+
+    def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        total_steps = int(trainer.estimated_stepping_batches or 0)
+        self._total_warmup_steps = max(1, int(self.warmup_fraction * total_steps))
+        self._targets = {
+            name: float(sub.lambda_offset)
+            for name, sub in self._iter_binned_losses(pl_module)
+        }
+        if not self._targets:
+            return
+        if trainer.is_global_zero:
+            print(
+                f"[OffsetWarmupCallback] ramping lambda_offset "
+                f"from start_factor={self.start_factor} to target over "
+                f"{self._total_warmup_steps}/{total_steps} steps "
+                f"({self.warmup_fraction:.0%}) for "
+                f"{sorted(self._targets)}"
+            )
+
+    def on_train_batch_start(
+        self, trainer: Trainer, pl_module: LightningModule, batch, batch_idx
+    ) -> None:
+        if not self._targets or self._total_warmup_steps is None:
+            return
+        step = int(trainer.global_step)
+        if step >= self._total_warmup_steps:
+            # Ensure we've landed exactly on the target value — protects
+            # against float drift from the step-by-step interpolation.
+            for name, sub in self._iter_binned_losses(pl_module):
+                if name in self._targets:
+                    sub.lambda_offset = self._targets[name]
+            return
+        # Linear ramp from start_factor → 1.0 over warmup_steps.
+        frac = step / self._total_warmup_steps
+        factor = self.start_factor + (1.0 - self.start_factor) * frac
+        for name, sub in self._iter_binned_losses(pl_module):
+            if name in self._targets:
+                sub.lambda_offset = self._targets[name] * factor
+        # Log the current scale once per ramp step for transparency.
+        if trainer.is_global_zero and step % 50 == 0:
+            pl_module.log("train/lambda_offset_scale", factor,
+                          on_step=True, on_epoch=False, sync_dist=False)
