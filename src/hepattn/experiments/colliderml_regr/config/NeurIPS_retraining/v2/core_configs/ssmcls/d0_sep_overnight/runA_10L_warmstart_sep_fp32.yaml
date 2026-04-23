@@ -1,0 +1,149 @@
+# =============================================================================
+# Run A — 10L SSMCLS, warm-restart from ea2d9fba (all-quantile best, ep 48),
+#         separate d0 branch + DFL-d0, FP32 backbone, DFL weight unthrottled.
+# =============================================================================
+# Premise: the encoder ea2d9fba learned has good features for the four
+# quantile heads (z0/phi/theta/qop); we keep them exactly and graft a
+# parallel d0 branch whose DFL gradient cannot reach the shared pool_head
+# or main output_head.  FP32 encoder removes the bf16-recurrence precision
+# gap on z0/theta/qop (CLAUDE.md issue #2).
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 50
+  # Full FP32 backbone (no bf16 autocast) — user explicitly requested.
+  precision: 32-true
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-10L-sepD0DFL-warm-FP32
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  # Re-declare the base.yaml callback list (LightningCLI lists are
+  # replaced, not merged) + add the per-head trunk-gradient probe so we
+  # can monitor classification-vs-regression gradient imbalance live.
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
+      init_args:
+        probe_every_n_steps: 500
+        include_pool_head: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      # The critical line: "float32" short-circuits torch.amp.autocast in
+      # TrackParameterRegressor.forward (see model.py L413-419), so the
+      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
+      # the selective-scan, and the post-SSM RMSNorm.
+      encoder_autocast_dtype: float32
+      # Separate d0 projection + output head off the shared encoder.
+      separate_d0_head: true
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 10
+          dim: 192
+          d_state: 32
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              n_bins: 436
+              binning: cdf
+              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0_piecewise_24core_12um.yaml
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              coupling: none
+              # weight stays at 1.0 — the separate branch removes the
+              # shared-trunk domination, so we do not need to damp it.
+              weight: 1.0
+              tail_weight_tau: 0.03
+              offset_memory_efficient: true
+            z0:
+              type: quantile
+              weight: 10.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 5.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 1.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  # Warm restart from the all-quantile ref.  The d0 branch has shapes that
+  # do not exist in the source checkpoint; the main output_head shrinks
+  # (35 → 28 output dims).  pretrained_ckpt_strict=false lets the loader
+  # drop the shape-mismatched tensors so the encoder + pool_head + the
+  # four regression-param slices of output_head still load.
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ea2d9fba5fab4dd0bbc095e3246bba0d/ckpts/last.ckpt
+  pretrained_ckpt_strict: false
+
+  optimizer: Lion
+  lrs_config:
+    # Warm-restart LR schedule: peak 0.5× the pretrain peak to preserve the
+    # Lion-trained weight-norm basin (CLAUDE.md "Optimizer / schedule").
+    initial: 5.0e-06
+    max: 2.5e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 2048
+  num_workers: 16

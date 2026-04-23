@@ -230,6 +230,15 @@ class TrackParameterRegressor(nn.Module):
         # NLL (exp(-log_var) amplifies large initial outputs).  Default 1.0
         # is a no-op.
         output_head_init_scale: float = 1.0,
+        # Decouple d0's projection + output head from the main regression
+        # branch.  When True, d0 gets its own pool_head + output_head in
+        # parallel to the regression heads, so DFL-style classification
+        # gradients on d0 do not propagate through the shared pool_head.
+        # The shared encoder still sees d0's gradient (by design — we want
+        # d0 to shape the encoder features), but the shared projection to
+        # the other four heads is untouched.  Requires d0 to be first in
+        # loss_module.parameter_order.
+        separate_d0_head: bool = False,
     ):
         super().__init__()
 
@@ -340,10 +349,58 @@ class TrackParameterRegressor(nn.Module):
         else:  # unreachable — guarded above
             raise ValueError(f"Unknown pool '{pool}'")
 
+        # ---- Separate d0 branch (optional) --------------------------------
+        # When enabled, d0's projection + final head live in a parallel
+        # branch off the shared encoder so classification-style DFL
+        # gradients never touch the shared pool_head / main output_head.
+        self.separate_d0_head = bool(separate_d0_head)
+        if self.separate_d0_head:
+            if pool != "ssm_cls":
+                raise NotImplementedError(
+                    "separate_d0_head is currently implemented only for "
+                    "pool='ssm_cls'.  Shape bookkeeping differs for the "
+                    "other pools."
+                )
+            if loss_module.parameter_order[0] != "d0":
+                raise ValueError(
+                    "separate_d0_head requires 'd0' to be first in "
+                    "loss_module.parameter_order; got "
+                    f"{loss_module.parameter_order}"
+                )
+            d0_start, d0_end = loss_module.get_output_slice("d0")
+            if d0_start != 0:
+                raise ValueError(
+                    "separate_d0_head requires d0 to occupy the leading "
+                    f"output slice; got slice=({d0_start}, {d0_end})"
+                )
+            self._d0_output_dim = d0_end - d0_start
+            self._reg_output_dim = loss_module.total_outputs - self._d0_output_dim
+            # Parallel pool_head for d0 — same spec as the main pool_head.
+            self.d0_pool_head = Dense(
+                input_size=2 * dim,
+                output_size=state_head_output_dim,
+                hidden_layers=state_head_hidden_layers,
+                dropout=state_head_dropout,
+                activation=self._resolve_activation(state_head_activation),
+            )
+            # Parallel output head that emits only d0's slice.
+            self.d0_output_head = Dense(
+                input_size=state_head_output_dim,
+                output_size=self._d0_output_dim,
+                hidden_layers=output_head_hidden_layers,
+                dropout=output_head_dropout,
+                activation=self._resolve_activation(output_head_activation),
+            )
+            main_output_size = self._reg_output_dim
+        else:
+            self._d0_output_dim = 0
+            self._reg_output_dim = loss_module.total_outputs
+            main_output_size = loss_module.total_outputs
+
         # Final output head — no final_activation (linear output for regression)
         self.output_head = Dense(
             input_size=output_head_input_dim,
-            output_size=loss_module.total_outputs,
+            output_size=main_output_size,
             hidden_layers=output_head_hidden_layers,
             dropout=output_head_dropout,
             activation=self._resolve_activation(output_head_activation),
@@ -354,15 +411,21 @@ class TrackParameterRegressor(nn.Module):
         # Critical for Gaussian NLL where large initial outputs push log_var
         # into saturated clamp regions with zero gradient.
         if output_head_init_scale != 1.0:
-            last_layer = self.output_head.net[-1]
-            assert isinstance(last_layer, nn.Linear), (
-                f"output_head_init_scale requires the last layer of output_head "
-                f"to be nn.Linear, got {type(last_layer).__name__}"
-            )
-            with torch.no_grad():
-                last_layer.weight.mul_(output_head_init_scale)
-                if last_layer.bias is not None:
-                    last_layer.bias.zero_()
+            for head in (
+                self.output_head,
+                getattr(self, "d0_output_head", None),
+            ):
+                if head is None:
+                    continue
+                last_layer = head.net[-1]
+                assert isinstance(last_layer, nn.Linear), (
+                    f"output_head_init_scale requires the last layer to be "
+                    f"nn.Linear, got {type(last_layer).__name__}"
+                )
+                with torch.no_grad():
+                    last_layer.weight.mul_(output_head_init_scale)
+                    if last_layer.bias is not None:
+                        last_layer.bias.zero_()
 
     def _normalise(self, x: Tensor) -> Tensor:
         """Min-max normalise features to [0, 1]."""
@@ -443,8 +506,17 @@ class TrackParameterRegressor(nn.Module):
             # ssm_cls / register_token — project through pool_head bottleneck.
             z = self.pool_head(pooled)
 
-        # Final regression output (linear final activation)
-        pred = self.output_head(z)
+        # Final regression output (linear final activation).
+        # Layout: [d0 slice | reg slice].  When separate_d0_head is enabled
+        # d0 is produced by its own parallel branch off `pooled`, so the
+        # DFL gradient on d0 bypasses the shared pool_head + output_head.
+        pred_reg = self.output_head(z)
+        if self.separate_d0_head:
+            z_d0 = self.d0_pool_head(pooled)
+            pred_d0 = self.d0_output_head(z_d0)
+            pred = torch.cat([pred_d0, pred_reg], dim=-1)
+        else:
+            pred = pred_reg
 
         return {"pred": pred, "hidden_state": pooled}
 
@@ -508,6 +580,7 @@ class TrackRegressionWrapper(LightningModule):
         optimizer: Literal["AdamW", "Lion", "MuonHybrid"] = "AdamW",
         name: str = "TrackRegression",
         pretrained_ckpt_path: str | None = None,
+        pretrained_ckpt_strict: bool = True,
         use_sam: bool = False,
         sam_rho: float = 0.05,
         sam_adaptive: bool = False,
@@ -558,11 +631,71 @@ class TrackRegressionWrapper(LightningModule):
             ckpt = torch.load(pretrained_ckpt_path, map_location="cpu", weights_only=False)
             # Lightning checkpoints prefix all keys with "model." (from self.model = model)
             state = {k[len("model."):]: v for k, v in ckpt["state_dict"].items() if k.startswith("model.")}
-            missing, unexpected = self.model.load_state_dict(state, strict=True)
-            if missing or unexpected:
+            # When warm-restarting into a model with different head shapes
+            # (e.g. swapping the loss family or enabling separate_d0_head),
+            # drop tensors whose shapes no longer match so the encoder can
+            # still load.  Heads reinit from scratch.
+            own_state = self.model.state_dict()
+            dropped: list[str] = []
+            sliced: list[str] = []
+            filtered: dict[str, Tensor] = {}
+            # When separate_d0_head=True, the new shared `output_head` emits
+            # only the non-d0 parameters (z0/phi/theta/qop), i.e. it has
+            # `_d0_output_dim` fewer output rows than the checkpoint's
+            # output_head (which was trained with d0 in slot 0).  Instead of
+            # dropping the mismatched weight/bias — which silently re-inits
+            # z0/phi/theta/qop from scratch — slice the leading d0 rows off
+            # and keep the rest.  This preserves the frozen-head invariant
+            # that z0/phi/theta/qop outputs match the baseline checkpoint
+            # byte-for-byte.
+            separate_d0 = bool(getattr(self.model, "separate_d0_head", False))
+            for k, v in state.items():
+                if k not in own_state:
+                    filtered[k] = v
+                    continue
+                own_shape = own_state[k].shape
+                if own_shape == v.shape:
+                    filtered[k] = v
+                    continue
+                # Shape mismatch — try the d0-slice rescue for the final
+                # output_head layer only.  The checkpoint's output_head has
+                # d0 occupying the leading slot; the new shared output_head
+                # drops it, so its row count is smaller by exactly the old
+                # d0 slot width.  All other dims must match identically.
+                if (
+                    separate_d0
+                    and k.startswith("output_head.net.")
+                    and k.endswith((".weight", ".bias"))
+                    and v.shape[1:] == own_shape[1:]
+                    and v.shape[0] > own_shape[0]
+                ):
+                    d0_slot = v.shape[0] - own_shape[0]
+                    filtered[k] = v[d0_slot:].clone()
+                    sliced.append(
+                        f"{k} ({tuple(v.shape)} → {tuple(own_shape)}, "
+                        f"dropped leading {d0_slot} d0 rows)"
+                    )
+                    continue
+                dropped.append(f"{k} ({tuple(v.shape)} → {tuple(own_shape)})")
+            missing, unexpected = self.model.load_state_dict(
+                filtered, strict=pretrained_ckpt_strict
+            )
+            if pretrained_ckpt_strict and (missing or unexpected or dropped):
                 raise RuntimeError(
-                    f"Checkpoint weight mismatch.\nMissing: {missing}\nUnexpected: {unexpected}"
+                    f"Checkpoint weight mismatch.\n"
+                    f"Missing: {missing}\nUnexpected: {unexpected}\n"
+                    f"Shape-dropped: {dropped}"
                 )
+            if sliced:
+                print(f"[fine-tune] Warm restart sliced {len(sliced)} "
+                      f"output_head tensors to drop d0 leading rows: {sliced}")
+            if dropped:
+                print(f"[fine-tune] Warm restart dropped {len(dropped)} "
+                      f"tensors with shape mismatch: {dropped}")
+            if missing:
+                print(f"[fine-tune] Missing keys re-initialised: {missing}")
+            if unexpected:
+                print(f"[fine-tune] Unexpected keys ignored: {unexpected}")
             print(f"[fine-tune] Loaded model weights from {pretrained_ckpt_path}")
 
     def setup(self, stage: str) -> None:

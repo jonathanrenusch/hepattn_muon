@@ -1093,6 +1093,12 @@ class BinnedDFLQuantileOffsetLoss(nn.Module):
         offset_memory_efficient: bool = False,
         reduction: str = "mean",
         monotone_eps: float = 1.0e-6,
+        # When True, ``predict()`` returns the pure classification-posterior
+        # expectation (softmax-weighted bin expectation, no within-bin
+        # regression offset).  Training is unaffected.  Used for the d0-only
+        # frozen-encoder fine-tune (Run E) where we want to read out the
+        # classifier cleanly without the collapse-prone quantile offset.
+        classification_only_predict: bool = False,
     ):
         super().__init__()
         if binning not in self.BINNING_MODES:
@@ -1125,6 +1131,7 @@ class BinnedDFLQuantileOffsetLoss(nn.Module):
         self.offset_memory_efficient = bool(offset_memory_efficient)
         self.reduction = reduction
         self.monotone_eps = float(monotone_eps)
+        self.classification_only_predict = bool(classification_only_predict)
 
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
 
@@ -1364,14 +1371,27 @@ class BinnedDFLQuantileOffsetLoss(nn.Module):
         return self.weight * loss
 
     def predict(self, raw: Tensor) -> Tensor:
-        """Point prediction = softmax-weighted bin expectation + median offset.
+        """Point prediction.
+
+        Default: softmax-weighted bin expectation + median offset (i.e.
+        classification + regression-offset composite).  When
+        ``classification_only_predict=True`` at construction time, returns
+        the pure classification-posterior expectation (no offset) — used
+        for reading out a DFL head as a plain classifier.
 
         ``raw`` shape: ``(N, K + Q)``.  Returns physical ``(N,)``.
         """
         K = self.n_bins
         logits = raw[..., :K]
-        offset_raw = raw[..., K:]
         probs = F.softmax(logits, dim=-1)                                # (N, K)
+
+        if self.classification_only_predict:
+            if self.binning == "linear":
+                return (probs * self.phys_centers).sum(dim=-1)
+            u_expected = (probs * self.u_centers).sum(dim=-1)            # (N,)
+            return self._u_to_physical(u_expected.clamp(0.0, 1.0))
+
+        offset_raw = raw[..., K:]
         ordered = self._ordered_offset(offset_raw)                       # (N, Q)
         median_idx = (self.quantiles - 0.5).abs().argmin()
         median_offset = ordered[..., median_idx]                         # (N,)

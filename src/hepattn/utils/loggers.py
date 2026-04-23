@@ -13,6 +13,14 @@ class MyCometLogger(CometLogger):
 
     This ensures checkpoints, configs, and other artefacts are cleanly
     separated by experiment rather than all landing in one shared folder.
+
+    Also disables comet_ml's auto_param_logging / parse_args / log_graph
+    hooks by default.  Those hooks walk every ``nn.Module`` for
+    hyperparameter-looking attributes (e.g. ``sigma_init``, ``sigma_floor``,
+    spline knot vectors, bin edges) and flood the Comet Hyperparameters
+    tab with loss-submodule buffer names that are not actually run
+    hyperparameters.  We log everything we want explicitly through
+    ``save_hyperparameters`` and ``SaveConfig``.
     """
 
     def __init__(
@@ -21,6 +29,10 @@ class MyCometLogger(CometLogger):
         project_name: str = "colliderml-track-regression",
         offline_directory: str | None = None,
         log_env_details: bool = True,
+        auto_param_logging: bool = False,
+        auto_metric_logging: bool = True,
+        parse_args: bool = False,
+        log_graph: bool = False,
         **kwargs,
     ):
         assert offline_directory is not None, "offline_directory must be specified for MyCometLogger"
@@ -30,6 +42,10 @@ class MyCometLogger(CometLogger):
             project_name=project_name,
             offline_directory=offline_directory,
             log_env_details=log_env_details,
+            auto_param_logging=auto_param_logging,
+            auto_metric_logging=auto_metric_logging,
+            parse_args=parse_args,
+            log_graph=log_graph,
             **kwargs,
         )
 

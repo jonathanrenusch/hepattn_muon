@@ -14,11 +14,15 @@ from lightning import Callback, LightningModule, Trainer
 # the ``encoder_layer_<i>`` label carries the layer index. Everything outside
 # these patterns is aggregated under ``other``.
 _LAYER_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"^(?:model\.)?input_net\."),    "input_net"),
-    (re.compile(r"^(?:model\.)?output_head\."),  "output_head"),
-    (re.compile(r"^(?:model\.)?pool_head\."),    "pool_head"),
-    (re.compile(r"^(?:model\.)?fwd_head\."),     "fwd_head"),
-    (re.compile(r"^(?:model\.)?bwd_head\."),     "bwd_head"),
+    (re.compile(r"^(?:model\.)?input_net\."),       "input_net"),
+    # d0_* patterns must come before output_head/pool_head patterns so the
+    # more specific name wins.
+    (re.compile(r"^(?:model\.)?d0_output_head\."),  "d0_output_head"),
+    (re.compile(r"^(?:model\.)?d0_pool_head\."),    "d0_pool_head"),
+    (re.compile(r"^(?:model\.)?output_head\."),     "output_head"),
+    (re.compile(r"^(?:model\.)?pool_head\."),       "pool_head"),
+    (re.compile(r"^(?:model\.)?fwd_head\."),        "fwd_head"),
+    (re.compile(r"^(?:model\.)?bwd_head\."),        "bwd_head"),
 ]
 _ENCODER_LAYER_RE = re.compile(r"^(?:model\.)?encoder\.layers\.(\d+)\.")
 _ENCODER_OTHER_RE = re.compile(r"^(?:model\.)?encoder\.")

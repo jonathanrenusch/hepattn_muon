@@ -316,8 +316,12 @@ pixi run python -m hepattn.experiments.colliderml_regr.evaluate_tail_diagnostics
   --output-dir $OUTDIR
 ```
 Output subdirs: `all_selected/`, `double_matched/`, `acts_baseline_comparison/`,
-`double_matched_primary_d0/`, `double_matched_secondary_d0/`. For publishable
-plots copy the whole dir into `/shared/tracking/logs/<contextual-name>/`.
+`double_matched_primary_d0/`, `double_matched_secondary_d0/`.
+
+**Default eval output location: `/shared/tracking/logs/<contextual-name>/`** —
+write all new evaluation plot dirs directly here (confirmed 2026-04-22). This
+is the top-level `logs/` next to `hepattn_muon/`, not the Comet-adjacent
+`src/logs/comet_offline/`.
 
 **Convention for `<contextual-name>`**: encode architecture, loss family,
 pretrain-or-finetune, dataset, run-hash-prefix, epoch, and any caveat. E.g.
@@ -325,11 +329,32 @@ pretrain-or-finetune, dataset, run-hash-prefix, epoch, and any caveat. E.g.
 
 ## Current results — SSM vs ACTS CKF
 
-Zero-shot inference on p200 (200-pileup) from the `ssm_q7` (state pool,
-`ac72e5c9…`, epoch 49) and `ssmcls_q7` (CLS pool, `ea2d9fba5fab4dd0bbc095e3246bba0d`,
-epoch 48) p0-pretrained checkpoints. Core-selection + DM subset,
-**6,591,752 tracks** (identical for both). CLS source:
-`/shared/tracking/logs/ssmcls_q7_pretrain_p200_zeroshot_ea2d9fba_epoch48/double_matched/residual_statistics.txt`.
+Zero-shot inference on p200 (200-pileup). Core-selection + DM subset,
+**6,591,752 tracks**.
+
+**Current best** (headline row `SSM-CLS`, updated 2026-04-23): run
+`fc8015a6eb20402ba8fc0935cfbae8a6`, epoch 21 — warm-restart from the
+`ea2d9fba5fab4dd0bbc095e3246bba0d` ep48 CLS-pool ssmcls_q7 checkpoint, with
+the encoder + shared `input_net` / `pool_head` / `output_head` **frozen** via
+`D0BranchOnlyFreeze` (z0/φ/θ/qop weights byte-identical to ea2d9fba),
+`encoder_autocast_dtype: float32` (full fp32 backbone inference), and a
+freshly-grafted separate d0 branch (`d0_pool_head` + `d0_output_head`) trained
+under `binned_dfl_quantile` with 436 CDF bins + 7 quantile offsets. The
+z0/φ/θ/qop numbers therefore isolate the **fp32-inference-at-zero-retraining-cost
+gain** (same weights as ea2d9fba, just no bf16 autocast around the
+selective-scan), while d0 is the DFL-composite readout from the new branch.
+Source: `/shared/tracking/logs/ssmcls_d0onlyFrozen_clsonly_fc8015a6_epoch21/double_matched/residual_statistics.txt`.
+
+For reference, the prior `SSM-state` row is the `ac72e5c9…` ep49 zero-shot p200
+(state pool, bf16 encoder), kept for the state-vs-CLS readout comparison.
+
+**d0 prediction path caveat (2026-04-23):** in the current config the d0 point
+estimate written to `test_predictions.h5` is the **composite** softmax-weighted
+bin-expectation + median-quantile offset (`BinnedDFLQuantileOffsetLoss.predict`
+with `classification_only_predict=False`, the default). It is NOT a
+pure-classification readout — the regression-offset row still contributes. To
+read out the DFL head as a plain classifier, pass
+`classification_only_predict=True` to the loss constructor.
 
 Three complementary metric families are reported: raw standard deviation
 (tail-dominated, reflects overall performance including outliers), IQR / 1.349
@@ -342,51 +367,59 @@ independent of tails), and iterative 3σ-clipped RMS (the physicist-standard
 | | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
 |---|---|---|---|---|---|
 | SSM-state | 0.070 | 0.879 | 2.99 | 2.21 | 0.00522 |
-| SSM-CLS | 0.0696 | 0.845 | 2.96 | 2.15 | 0.00501 |
+| SSM-CLS (fc8015a6, fp32 + d0-branch) | 0.0780 | 0.8342 | 2.946 | 2.116 | 0.00496 |
 | CKF | 0.209 | 1.652 | 6.28 | 2.83 | 0.00586 |
-| **CLS/CKF** | **0.33** | **0.51** | **0.47** | **0.76** | **0.85** |
+| **CLS/CKF** | **0.37** | **0.51** | **0.47** | **0.75** | **0.85** |
 
 **IQR / 1.349 (robust σ, no clipping):**
 
 | | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
 |---|---|---|---|---|---|
 | SSM-state | 0.0129 | 0.160 | 0.669 | 0.787 | 0.00321 |
-| SSM-CLS | 0.0128 | 0.155 | 0.710 | 0.765 | 0.00299 |
+| SSM-CLS (fc8015a6, fp32 + d0-branch) | 0.01374 | 0.1336 | 0.6739 | 0.7261 | 0.00292 |
 | CKF | 0.0599 | 0.113 | 1.877 | 0.700 | 0.00290 |
-| **CLS/CKF** | **0.21** | **1.38** | **0.38** | **1.09** | **1.03** |
+| **CLS/CKF** | **0.23** | **1.19** | **0.36** | **1.04** | **1.01** |
 
 **Iterative 3σ-clipped RMS (physicist core resolution):**
 
 | | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
 |---|---|---|---|---|---|
 | SSM-state | 0.0123 | 0.214 | 0.661 | 0.905 | 0.00368 |
-| SSM-CLS | 0.0123 | 0.207 | 0.700 | 0.878 | 0.00344 |
+| SSM-CLS (fc8015a6, fp32 + d0-branch) | 0.01303 | 0.1906 | 0.6646 | 0.8324 | 0.00338 |
 | CKF | 0.0657 | 0.188 | 2.111 | 0.802 | 0.00344 |
-| **CLS/CKF** | **0.19** | **1.10** | **0.33** | **1.09** | **1.00** |
+| **CLS/CKF** | **0.20** | **1.01** | **0.31** | **1.04** | **0.98** |
 
 ### Interpretation
 
-The picture splits cleanly in two:
+The picture still splits cleanly in two — but the **fp32 inference collapses
+most of the residual core-resolution gap**, for free:
 
-- **Tail regime (raw std):** SSM wins on all five parameters, 1.2×–3× better.
+- **Tail regime (raw std):** SSM wins on all five parameters, 1.3×–3× better.
   The SSM captures non-Gaussian scattering structure that a linear Kalman
   filter cannot model.
-- **Core regime (IQR, clipped RMS):** SSM wins dramatically on `d0` and `φ`
-  (3-5× better), and loses on `z0`, `θ`, `q/p` — though by smaller margins with
-  CLS. These three parameters depend on long-range integration along the full
-  track; CKF is near its Cramér–Rao bound there and is hard to beat with an SSM
-  that accumulates bf16 round-off through the recurrence.
+- **Core regime (IQR, clipped RMS):** SSM dominates `d0` and `φ` (3–5× better),
+  and now **ties CKF on `z0`, `θ`, `q/p`** (ratios 1.01, 1.04, 0.98 at
+  iter-3σ RMS). The z0/θ/qop gap that previously read 1.10/1.09/1.00 at bf16
+  was largely a **bf16-selective-scan precision ceiling**, not a
+  Cramér–Rao-bound-proximity ceiling; flipping `encoder_autocast_dtype: float32`
+  at zero retraining cost removes it. Per-parameter fp32 inference deltas vs
+  the bf16 ea2d9fba ep48 baseline: z0 iter-RMS −7.9 %, φ −5.1 %, θ −5.2 %,
+  qop −1.7 %. IQR deltas: z0 −13.8 %, φ −5.1 %, θ −5.1 %, qop −2.3 %. The
+  qop core now **beats CKF** (0.00338 vs 0.00344).
 
-**CLS vs state (zero-shot p200 confirmation, 2026-04-21):** CLS gives slight
-improvements on nearly every metric — raw std: d0 −0.6 %, z0 −3.9 %, φ −1.1 %,
-θ −2.7 %, qop −4.0 %; 3σ-clipped RMS: z0 −3.3 %, θ −3.0 %, qop −6.5 %, d0
-≈ same (0.0123). The one regression is φ core (both IQR +6 % and clipped RMS
-+6 %), possibly because CLS loses the per-hit locality that direct
-recurrent-state read-out preserves for the innermost-layer-dominated azimuth
-estimate. On `qop` the CLS now **matches CKF exactly** at the 3σ-clipped RMS
-(0.00344 vs 0.00344) — the first SSM variant to close that parameter's core
-gap. The overall ~3–5 % gain matches the pretrain-val +5 % signal from 2026-04-20
-and validates `ssmcls_q7` as the backbone for future scaling work.
+**d0 at ep21 (ssmcls_q7 separate d0 branch, DFL-composite readout):** d0
+iter-RMS 0.01303 mm is slightly worse than the ref ea2d9fba ep48 all-quantile
+d0 (0.0123 mm, ~6 % wider), and raw std is ~12 % wider (0.0780 vs 0.0696). The
+separate-branch architecture removes the gradient-magnitude dominance of DFL
+on the shared trunk (see Open Issue #3) but at ep21 has not yet recovered the
+d0 precision the original quantile-only head achieved — training is ongoing.
+
+**Net:** the fc8015a6 warm-start is Pareto-better on 4/5 parameters (z0, φ, θ,
+qop) and slightly worse on d0 vs the prior headline ea2d9fba ep48. The
+**fp32-at-inference win is the single largest recorded precision improvement
+in this study that required no retraining**; keep `encoder_autocast_dtype:
+float32` as the default evaluation path for any future headline numbers
+produced from bf16-trained checkpoints.
 
 ## Current open issues (2026-04-20)
 
@@ -461,6 +494,127 @@ if it's cheap.
 **Not recommended:** zero-inflated classifier for "is-beamspot". The d0
 distribution is smooth-peaked, not physically bimodal — a hard threshold
 would be arbitrary and introduce a discontinuity.
+
+**Status of the "binned DFL (classification-style) d0 head" candidate (run
+`6cf94ec3fbba42d5a333494d3923377e`, SSMCLS + d0=`binned_dfl_quantile` 420
+bins + z0/phi/theta/qop=continuous quantile, epoch 9, zero-shot p200):
+fails decisively, and the mechanism is gradient-magnitude dominance on
+the shared trunk, not directional conflict.**
+
+Zero-shot p200 DM iter-3σ RMS (epoch 9 vs the all-quantile SSMCLS ref
+`ea2d9fba5fab4dd0bbc095e3246bba0d` ep 48):
+
+| | d0 [mm] | z0 [mm] | φ [mrad] | θ [mrad] | q/p [1/GeV] |
+|---|---|---|---|---|---|
+| DFL-d0 (6cf94ec3, ep 9) | 0.0161 | **1.172** | **2.734** | **2.721** | **0.00781** |
+| all-quantile (ea2d9fba, ep 48) | 0.0123 | 0.207 | 0.700 | 0.878 | 0.00344 |
+| ACTS CKF | 0.0657 | 0.188 | 2.111 | 0.802 | 0.00344 |
+
+d0 also shows a 16 μm mean bias (ref: 5×10⁻⁵ mm) — DFL head is not
+centred. Epoch-9 is not a fully fair comparison with ep-48, but the other
+four parameters should be within striking distance of the ref at that
+point of pretraining and are factors of 2–6 worse.
+
+**Gradient-conflict analysis on the shared trunk** (encoder + pool_head,
+excluding `output_head`; 20 minibatches × BS 2048 on p200):
+
+Mean cosine of d0's trunk gradient with each regression head's:
+
+| ckpt | trunk params | d0↔z0 | d0↔φ | d0↔θ | d0↔qop |
+|---|---|---|---|---|---|
+| DFL 4 M (6cf94ec3 ep 9, 8 L) | 4.20 M | −0.005 | +0.020 | +0.005 | +0.014 |
+| DFL 15 M mixed (d2357297 ep 9, 15 L) | 8.28 M | −0.02 | +0.20 | +0.00 | **+0.73** |
+| all-DFL 15 M (573ffffc ep 30, all 5 heads DFL) | 8.28 M | −0.012 | −0.019 | −0.003 | +0.005 |
+| all-quantile ref (ea2d9fba ep 48, 10 L) | 5.33 M | +0.035 | **+0.218** | +0.056 | +0.022 |
+
+Median per-batch trunk-gradient norms:
+
+| ckpt | ‖g_d0‖ | ‖g_z0‖ | ‖g_φ‖ | ‖g_θ‖ | ‖g_qop‖ | d0 / mean(others) |
+|---|---|---|---|---|---|---|
+| DFL 4 M (6cf94ec3 ep 9, d0.weight=0.05) | ~7.0 | 0.09 | 0.22 | 0.55 | 0.30 | ~24× |
+| DFL 15 M mixed (d2357297 ep 9, d0.weight=0.05) | ~60 | 1.55 | 0.86 | 1.47 | 0.44 | ~55× |
+| all-DFL 15 M (573ffffc ep 30, all weight=1.0) | **~1150** | 8 | 4.7 | 7.5 | 10 | **~150×** |
+| all-quantile ref (ea2d9fba ep 48) | 0.035 | 0.016 | 0.020 | 0.062 | 0.051 | ~0.95× |
+
+**Scale-dependence note (2026-04-23):** doubling the trunk capacity (4 M → 8 M)
+*increased* the d0/others gradient-norm ratio from 24× to 55×. The DFL
+cross-entropy gradient grows with the richness of the trunk it backprops
+through, while the continuous quantile losses don't — so scaling up the
+model alone does **not** self-correct the imbalance. At 15 M the
+d0↔qop cosine also rose to +0.73 (shared innermost-layer curvature/momentum
+signal becoming explicit in the representation), i.e. there is genuine
+cross-task geometric alignment at scale — but the magnitude dominance
+wipes it out in practice: 98 % of every trunk update is pure DFL-d0.
+This is why d2357297 is not seeing the quantile heads recover as training
+progresses and will not recover by epoch 50 without an intervention.
+
+**All-DFL ablation (573ffffc, 50-epoch full pretrain):** pushes every head
+to `binned_dfl_quantile` with varying bin counts (d0 320, z0 512, φ 32,
+θ 1024, qop 256) and weight 1.0 across the board. Two conclusions:
+
+1. **Bin count is not the magnitude driver.** θ at 1024 bins produces
+   ‖g‖≈7.5; φ at 32 bins produces ‖g‖≈4.7; d0 at 320 bins produces
+   ‖g‖≈1150. Target-distribution kurtosis (d0 has kurtosis ~84, 95 % mass
+   within |d0|≤0.031 mm) drives the CE loss-per-sample, not `n_bins`.
+   "Match bin counts across heads" is not a fix.
+2. **Turning every head into DFL destroys the cross-head cosine
+   alignments.** In the mixed run d0↔qop carries the shared innermost-
+   layer curvature signal at +0.73; in the all-DFL run it collapses to
+   +0.005. All cross-task cosines except z0↔θ (+0.23, geometric polar
+   coupling) drop to ≤|0.02|. Each DFL head carves its own feature
+   partition aligned with its own output-bin grid; the physics-driven
+   shared representation the all-quantile baseline builds is lost.
+
+Taken together the three DFL runs + the all-quantile ref point to the
+same mechanism under three scales and two mixing ratios: **DFL heads on
+a shared trunk produce unbounded-magnitude gradients aligned with
+output-bin separability rather than with physical task direction**, and
+the shared encoder is whatever is left over after d0's CE wins the pull.
+This is why scalar weight tuning is not a principled fix (it dampens
+magnitude but preserves the orthogonal direction) and why a shared-trunk
++ separate-d0-branch architecture is the mechanism-correct fix: it
+removes the CE from the shared encoder's gradient stream entirely.
+
+**Scale-dependence note (2026-04-23):** doubling the trunk capacity (4 M → 8 M)
+*increased* the d0/others gradient-norm ratio from 24× to 55×. The DFL
+cross-entropy gradient grows with the richness of the trunk it backprops
+through, while the continuous quantile losses don't — so scaling up the
+model alone does **not** self-correct the imbalance. At 15 M the
+d0↔qop cosine also rose to +0.73 (shared innermost-layer curvature/momentum
+signal becoming explicit in the representation), i.e. there is genuine
+cross-task geometric alignment at scale — but the magnitude dominance
+wipes it out in practice: 98 % of every trunk update is pure DFL-d0.
+This is why d2357297 is not seeing the quantile heads recover as training
+progresses and will not recover by epoch 50 without an intervention.
+
+Interpretation: the DFL head is not *fighting* the regression heads on
+direction (cosines are ~0, not negative — there is no PCGrad-style
+anti-alignment). Instead, the 420-bin cross-entropy + pinball coupling
+produces a trunk gradient whose magnitude is ~200× the ref's d0 gradient
+and ~24× the mean of the other heads' gradients on the same trunk, even
+after `weight: 0.05` on d0 in YAML. With sum aggregation the trunk is
+being steered ~entirely for d0-bin discrimination in a direction that is
+~orthogonal to what the regression heads need (in the ref, d0↔φ are
+cos +0.22 — a real geometric signal from shared innermost-hit features;
+that alignment collapses to +0.02 under DFL). The regression heads are
+then free-riding on an encoder whose features are wrong for them,
+explaining the 2–6× RMS regression.
+
+**Verdict: do not pursue DFL-d0 with a shared trunk in its current form.**
+If DFL-d0 is retried for the d0-collapse fix, make one of:
+(a) move to a separate d0 branch (own pool_head) so the DFL gradient does
+not touch the encoder the regression heads share, (b) normalise per-head
+gradients by a running EMA of their trunk-gradient norm (GradNorm-lite)
+so every head contributes comparable trunk pull, or (c) drop the d0 `weight`
+by another 10–30× (to ~1e-3) and verify the other heads' ep-9 metrics
+recover toward the all-quantile ref. Options (a) and (b) are
+mechanism-correct; (c) is the cheapest sanity check.
+
+Analysis artefacts:
+- eval plots: `/shared/tracking/logs/ssmcls_dfl_d0_zeroshot_6cf94ec3_epoch9/{all_selected,double_matched}/`
+- DFL-run gradient plots + `summary.txt`: `/shared/tracking/logs/ssmcls_dfl_d0_zeroshot_6cf94ec3_epoch9/grad_cos/`
+- ref-run gradient plots + `summary.txt`: `/shared/tracking/logs/ssmcls_q7_ref_ea2d9fba_epoch48/grad_cos/`
+- script: [scripts/gradient_cosine_analysis.py](scripts/gradient_cosine_analysis.py)
 
 **4. Fine-tuning is not closing the gap.** The original OneCycle + AdamW +
 6× LR jump recipe "blew the pretrained basin". An A/B/C sweep under WSD

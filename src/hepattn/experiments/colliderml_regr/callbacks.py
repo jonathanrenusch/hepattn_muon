@@ -224,6 +224,68 @@ class MambaBackboneFreeze(BaseFinetuning):
             )
 
 
+class D0BranchOnlyFreeze(BaseFinetuning):
+    """Freeze everything except the separate d0 branch — forever.
+
+    Used by the "safety net" run (d0-only fine-tune): we warm-restart
+    from an all-quantile baseline whose z0/phi/theta/qop performance we
+    want to preserve exactly, and graft a new `d0_pool_head` +
+    `d0_output_head` (the ``separate_d0_head`` path) that is the ONLY
+    trainable part of the network.  Because the shared encoder is
+    frozen, the other four heads produce byte-identical outputs to the
+    baseline for the whole run; we cannot regress them by construction.
+
+    Frozen for the entire run (no unfreeze):
+        - ``model.encoder``
+        - ``model.input_net``
+        - ``model.pool_head`` / ``fwd_head`` / ``bwd_head``
+        - ``model.output_head``
+        - loss_module buffers (already non-trainable)
+
+    Trainable:
+        - ``model.d0_pool_head``
+        - ``model.d0_output_head``
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def freeze_before_training(self, pl_module: LightningModule) -> None:  # type: ignore[override]
+        model = pl_module.model
+        frozen_modules: list[torch.nn.Module] = [
+            model.encoder,
+            model.input_net,
+            model.output_head,
+        ]
+        for attr in ("pool_head", "fwd_head", "bwd_head"):
+            mod = getattr(model, attr, None)
+            if isinstance(mod, torch.nn.Module):
+                frozen_modules.append(mod)
+        for mod in frozen_modules:
+            self.freeze(mod, train_bn=False)
+        if getattr(pl_module.trainer, "is_global_zero", True):
+            trainable = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+            frozen = sum(
+                p.numel() for p in model.parameters() if not p.requires_grad
+            )
+            print(
+                f"[D0BranchOnlyFreeze] frozen {frozen / 1e6:.3f} M params; "
+                f"trainable (d0 branch only) {trainable / 1e6:.3f} M."
+            )
+
+    def finetune_function(  # type: ignore[override]
+        self,
+        pl_module: LightningModule,
+        current_epoch: int,
+        optimizer,
+    ) -> None:
+        # No unfreeze — the whole point of this run is that the rest of
+        # the network NEVER updates so the baseline numbers are locked in.
+        return
+
+
 class MinimalGpuMonitor(Callback):
     """Log only coarse GPU utilization and memory utilization metrics.
 
