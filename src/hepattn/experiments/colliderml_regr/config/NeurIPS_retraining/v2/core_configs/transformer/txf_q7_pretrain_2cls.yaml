@@ -1,21 +1,29 @@
 # =============================================================================
-# Run C — 20L / d_state=64 SSMCLS, FROM SCRATCH, separate d0 branch.
+# Transformer (flash-attn2 + 2 register tokens) + Q7 — FP32 pretrain on p0_core
 # =============================================================================
-# Depth-first scale-up (CLAUDE.md "Scaling" — prefer `num_layers` primary,
-# `d_state` secondary).  20 layers × d_state 64 is the first point on the
-# scaling ladder that stresses both axes simultaneously.  From-scratch so
-# the encoder can learn features aligned with the separate-branch geometry
-# from step 0, rather than adapting a 10L basin.  Full fp32 backbone.
+# Sibling of txf_q7_pretrain.yaml.  Single change: num_cls_tokens=2 in the
+# encoder, so the pool readout becomes (B, 2*dim) — matching the
+# bidirectional Mamba-2 CLS-pool readout dim and removing the
+# 1-vs-2 register-token asymmetry between the two baselines.  The model's
+# register_token branch reads ``encoder.pool_dim`` so pool_head input dim
+# automatically tracks num_cls_tokens (no model.py YAML changes needed).
+#
+# Pool_head therefore changes from Linear(dim, state_head_output_dim) to
+# Linear(2*dim, state_head_output_dim) under the inherited base config.
+# Output_head and everything downstream are untouched.
+#
+# Recipe (Lion + OneCycle + same peak LR + same num_layers/dim) is kept
+# byte-identical to txf_q7_pretrain.yaml so the only configuration delta
+# is the register-token count — this is the comparison the paper reports
+# when controlling for readout-token count. 
 # =============================================================================
-
 trainer:
-  devices: [2]
+  devices: [3]
   max_epochs: 50
-  precision: 32-true
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-20L-ds64-sepD0DFL-scratch-FP32
+      name: TRK-v2-TXF-Q7-FP32-Core-pretrain-2cls
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -24,10 +32,6 @@ trainer:
       init_args:
         log_every_n_steps: 50
         log_parameter_stats: false
-    - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
-      init_args:
-        probe_every_n_steps: 500
-        include_pool_head: true
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
         log_every_n_steps: 50
@@ -54,49 +58,41 @@ trainer:
 model:
   model:
     init_args:
-      pool: ssm_cls
       dim: 192
+      pool: register_token
       input_net_hidden_layers: [192]
       output_head_hidden_layers: [256]
       output_head_init_scale: 0.01
-      # The critical line: "float32" short-circuits torch.amp.autocast in
-      # TrackParameterRegressor.forward (see model.py L413-419), so the
-      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
-      # the selective-scan, and the post-SSM RMSNorm.
-      encoder_autocast_dtype: float32
-      separate_d0_head: true
       encoder:
-        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        class_path: hepattn.experiments.colliderml_regr.transformer_encoder.EncoderWithCLS
         init_args:
-          num_layers: 20
           dim: 192
-          d_state: 64
-          d_conv: 4
-          expand: 2
-          headdim: 32
-          ngroups: 1
-          chunk_size: 16
+          num_cls_tokens: 2
+          num_layers: 12
+          attn_type: flash-varlen
           norm: RMSNorm
-          dropout: 0.0
+          value_residual: false
+          qkv_norm: true
+          layer_scale: 1.0e-5
+          drop_path: 0.05
+          attn_kwargs:
+            num_heads: 6
+          dense_kwargs:
+            hidden_dim_scale: 4
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: binned_dfl_quantile
-              n_bins: 436
-              binning: cdf
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0_piecewise_24core_12um.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-              coupling: none
-              classification_only_predict: true
+              type: quantile
               weight: 1.0
-              tail_weight_tau: 0.03
-              offset_memory_efficient: true
+              norm_min: -2.5
+              norm_max: 2.5
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             z0:
               type: quantile
-              weight: 10.0
+              weight: 1.0
               norm_min: -200.0
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
@@ -106,13 +102,13 @@ model:
               beta: 0.01
             theta:
               type: quantile_eta
-              weight: 5.0
+              weight: 10.0
               norm_min: -3.0
               norm_max: 3.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             qop:
               type: quantile
-              weight: 1.0
+              weight: 5.0
               norm_min: -2.0
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]

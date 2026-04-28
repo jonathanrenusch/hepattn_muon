@@ -90,6 +90,7 @@ model:
               spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0_piecewise_24core_12um.yaml
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
               coupling: none
+              classification_only_predict: true
               weight: 1.0
               tail_weight_tau: 0.03
               offset_memory_efficient: true

@@ -1,0 +1,49 @@
+# =============================================================================
+# Scaling sweep — Run 1: base arch (10 L / dim=192 / d_state=32).
+# Everything architectural is inherited from scaling/base.yaml. This config
+# pins only the loss (5-param quantile, identical to ssmcls_q7_pretrain.yaml)
+# plus per-run device and logger name. No warm-start — trains from scratch
+# so that all 5 scaling runs share the same starting point.
+# =============================================================================
+trainer:
+  devices: [0]
+  logger:
+    init_args:
+      name: TRK-v2-SSMCLS-scaling-run1-base-fp32
+
+model:
+  model:
+    init_args:
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: quantile
+              weight: 1.0
+              norm_min: -2.5
+              norm_max: 2.5
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]

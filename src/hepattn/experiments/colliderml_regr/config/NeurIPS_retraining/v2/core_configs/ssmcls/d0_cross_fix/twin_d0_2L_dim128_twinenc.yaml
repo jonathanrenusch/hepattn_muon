@@ -1,0 +1,161 @@
+# =============================================================================
+# Twin-encoder d0 classifier.  Two range-specialised encoders + a router,
+# teacher-forced, linear binning, hard cross-entropy, tail-upsampled.
+# =============================================================================
+# Motivation: on a single shared encoder the DFL classifier's 100x-dominant
+# gradient collapses the regression heads (CLAUDE.md Open Issue #3), and
+# even a single classifier with a 60-um / 2.5-mm range range inherits the
+# physical-mode attractor (the d0 cross on the heatmap).  The fix is to
+# physically separate the two problems:
+#
+#   Encoder_inner (2L, dim=128, d_state=16) --> 32-bin cls over +/-30 um
+#   Encoder_outer (2L, dim=128, d_state=16) --> 420-bin cls over |d0|>30 um tail
+#   Router(cat(cls_inner.detach(), cls_outer.detach())) --> binary is_tail logits
+#
+# Loss (RangeSplitClassificationLoss):
+#   L_inner  = CE(inner_logits, inner_bin(truth)) * (|truth|<=30um)
+#   L_outer  = CE(outer_logits, outer_bin(truth)) * (|truth| >30um)
+#   L_router = CE(router_logits, is_tail)                              # all tracks
+#
+# Teacher forcing: each encoder only receives gradient updates on tracks
+# in its range.  The router is supervised directly by the truth |d0|>30um
+# label — stop-grad on its CLS-token inputs means its gradient never
+# disturbs the encoders.
+#
+# Tail upsampling: the non-streaming DataLoader uses a WeightedRandomSampler
+# (weight 19 for tail, 1 for core) so every 30k batch contains ~15k tail
+# tracks instead of ~1.5k.  The outer encoder effectively sees 10x more
+# gradient steps per epoch on tail structure.  The router sees the
+# upsampled prior; at inference the natural 95/5 prior reasserts itself.
+#
+# Linear binning, no spline, no soft target — classifier softmax naturally
+# smears across adjacent bins at the ~12 um detector resolution scale.
+# =============================================================================
+
+trainer:
+  devices: [3]
+  max_epochs: 25
+  precision: bf16-mixed
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-twinD0-2L-dim128-twinenc-fromscratch
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 25
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 25
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 25
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 25
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    # Use the new twin-encoder class (instead of the default
+    # TrackParameterRegressor).
+    class_path: hepattn.experiments.colliderml_regr.model.TwinEncoderD0Classifier
+    init_args:
+      input_dim: 12
+      dim: 128
+      encoder_autocast_dtype: bfloat16
+      # Shared input embedding (Fourier + Dense).
+      input_net_hidden_layers: [128]
+      # Per-encoder pool heads (2*dim -> pool_head_output_dim).
+      pool_head_output_dim: 128
+      pool_head_hidden_layers: [128]
+      # Per-head classification output + router.
+      output_head_hidden_layers: [128]
+      output_head_init_scale: 0.01
+      router_hidden_layers: [128]
+      # Fourier + normalisation (inherit from base.yaml input-field layout).
+      fourier_scales: [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+      fourier_base: 2
+      norm_min: [-1031.0, -1031.0, -3026.0, 31.0, -3.1416, 0.027, 31.0, 16.0, 2.0, 1.0, 0.0, -4.3]
+      norm_max: [1031.0, 1031.0, 3026.0, 1032.0, 3.1416, 3.114, 3185.0, 30.0, 16.0, 3360.0, 8.0, 4.3]
+      input_fields: [x, y, z, r, phi_hit, theta_hit, s, volume_id, layer_id, surface_id, detector, eta_hit]
+      # Two encoders, same architecture spec.
+      encoder_inner:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 2
+          dim: 128
+          d_state: 16
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      encoder_outer:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 2
+          dim: 128
+          d_state: 16
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0]
+          config:
+            d0:
+              type: range_split_classification
+              k_inner: 32
+              k_outer: 420
+              inner_half_mm: 0.030
+              outer_half_mm: 2.5
+              split_mm: 0.030
+              weight_router: 1.0
+              weight_inner: 1.0
+              weight_outer: 1.0
+              weight: 1.0
+
+  pretrained_ckpt_path: null
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 30000
+  num_workers: 16
+  # Tail upsampling: 19x weight on |truth d0|>30um tracks brings the
+  # batch-level tail fraction from ~5% to ~50% (95*1 / (95*1+5*19) = 0.5).
+  # Only active because threshold_mm > 0 and weight != 1.
+  tail_upsample_threshold_mm: 0.030
+  tail_upsample_weight: 19.0

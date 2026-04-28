@@ -64,10 +64,14 @@ class EncoderWithCLS(nn.Module):
         self,
         dim: int,
         cls_init_scale: float = 0.02,
+        num_cls_tokens: int = 1,
         **encoder_kwargs: Any,
     ) -> None:
         super().__init__()
+        if num_cls_tokens < 1:
+            raise ValueError(f"num_cls_tokens must be >= 1; got {num_cls_tokens}")
         self.dim = dim
+        self.num_cls_tokens = int(num_cls_tokens)
 
         # The inner Encoder must not own a register token — we manage the
         # CLS ourselves so we can read it out cleanly.  Silently drop the
@@ -75,13 +79,21 @@ class EncoderWithCLS(nn.Module):
         encoder_kwargs.pop("num_register_tokens", None)
 
         self.encoder = Encoder(dim=dim, **encoder_kwargs)
-        self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * cls_init_scale)
+        # (1, num_cls_tokens, dim) — broadcasts to batch in forward.
+        self.cls_token = nn.Parameter(
+            torch.randn(1, self.num_cls_tokens, dim) * cls_init_scale
+        )
 
         # Final RMSNorm on the encoder output.  The inner Encoder uses
         # pre-norm layers (norm → attn/ffn → residual) but has no final
         # norm, so the residual stream magnitude grows with depth.
         # Normalising before CLS extraction stabilises the regression head.
         self.final_norm = nn.RMSNorm(dim)
+
+    @property
+    def pool_dim(self) -> int:
+        """Dimension of the concatenated CLS readout: ``num_cls_tokens * dim``."""
+        return self.num_cls_tokens * self.dim
 
     def forward(
         self,
@@ -125,16 +137,16 @@ class EncoderWithCLS(nn.Module):
             if kv_mask is not None:
                 kv_mask = torch.gather(kv_mask, -1, x_sort_idx)
 
-        # Prepend the learned CLS token.
+        # Prepend the learned CLS tokens (one or more).
         cls_tok = self.cls_token.expand(B, -1, -1).to(dtype=x.dtype)
         x_aug = torch.cat([cls_tok, x], dim=1)
 
-        # Extend the mask with a ``True`` for the CLS position so the CLS
-        # participates in attention.
+        # Extend the mask with ``True`` for each CLS position so all CLS
+        # tokens participate in attention.
         kv_mask_aug: Tensor | None = None
         if kv_mask is not None:
             cls_mask = torch.ones(
-                (B, 1), dtype=kv_mask.dtype, device=kv_mask.device
+                (B, self.num_cls_tokens), dtype=kv_mask.dtype, device=kv_mask.device
             )
             kv_mask_aug = torch.cat([cls_mask, kv_mask], dim=1)
 
@@ -150,9 +162,15 @@ class EncoderWithCLS(nn.Module):
         # LayerNorm so the residual stream magnitude grows with depth.
         seq_out = self.final_norm(seq_out)
 
-        # Split CLS and hit outputs.
-        cls_out = seq_out[:, 0, :]         # (B, D)
-        hit_out = seq_out[:, 1:, :]        # (B, N, D)
+        # Split CLS and hit outputs.  Concatenate the CLS rows into a
+        # single readout vector of shape (B, num_cls_tokens * D), matching
+        # the convention used by BidirectionalMambaCLSEncoder when
+        # num_cls_tokens > 1 (one register per "side").  For
+        # num_cls_tokens == 1 this collapses to (B, D), preserving exact
+        # backward compatibility with prior 1-register checkpoints.
+        cls_rows = seq_out[:, : self.num_cls_tokens, :]    # (B, K, D)
+        cls_out = cls_rows.reshape(B, self.num_cls_tokens * self.dim)
+        hit_out = seq_out[:, self.num_cls_tokens :, :]     # (B, N, D)
 
         # Un-sort the hit output back to the original input order.
         if x_sort_idx is not None:

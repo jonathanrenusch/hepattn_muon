@@ -1,21 +1,27 @@
 # =============================================================================
-# Run C — 20L / d_state=64 SSMCLS, FROM SCRATCH, separate d0 branch.
+# Run B (ssmcls) — Lion-continuation + WSD fine-tune on p200_core, fp32 encoder.
 # =============================================================================
-# Depth-first scale-up (CLAUDE.md "Scaling" — prefer `num_layers` primary,
-# `d_state` secondary).  20 layers × d_state 64 is the first point on the
-# scaling ladder that stresses both axes simultaneously.  From-scratch so
-# the encoder can learn features aligned with the separate-branch geometry
-# from step 0, rather than adapting a 10L basin.  Full fp32 backbone.
+# Pair to ssmcls_q7_finetune_muon_wsd_fp32.yaml (Run C) and
+# ssmcls_q7_finetune_A_adamw_wsd_fp32.yaml (Run A): same architecture,
+# checkpoint, schedule shape, dataset, batch size, epoch budget — only the
+# optimizer family / LR / WD differs.
+# Mirrors ssm/ssm_q7_finetune_B_lion_wsd.yaml on the CLS backbone.
+# Tests whether keeping the optimizer family fixed (Lion pretrain → Lion
+# fine-tune) preserves the weight-norm regime better than switching to
+# AdamW or to Muon hybrid.
 # =============================================================================
 
 trainer:
-  devices: [2]
+  devices: [2, 3]
   max_epochs: 50
   precision: 32-true
+  gradient_clip_val: 1.0
+  reload_dataloaders_every_n_epochs: 1
+  benchmark: true
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-20L-ds64-sepD0DFL-scratch-FP32
+      name: TRK-v2-SSMCLS-Q7-B-Lion-WSD-FP32-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -24,10 +30,6 @@ trainer:
       init_args:
         log_every_n_steps: 50
         log_parameter_stats: false
-    - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
-      init_args:
-        probe_every_n_steps: 500
-        include_pool_head: true
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
         log_every_n_steps: 50
@@ -45,13 +47,26 @@ trainer:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/total
-        patience: 50
+        patience: 30
         min_delta: 0.0
         mode: min
         verbose: true
         check_on_train_epoch_end: false
 
 model:
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ea2d9fba5fab4dd0bbc095e3246bba0d/ckpts/epoch=048-val_total=0.00685.ckpt
+  optimizer: Lion
+  lrs_config:
+    schedule: wsd
+    initial: 3.0e-06       # 10% of peak
+    max: 3.0e-05           # 0.6× pretrain peak (5e-5); BS 22k well past Lion's critical batch
+    end: 1.0e-06
+    pct_start: 0.02        # 2% warmup
+    decay_pct: 0.15        # 15% cosine cooldown
+    weight_decay: 1.0e-03  # matches pretrain Lion WD
+    skip_scheduler: false
+    # betas omitted → Lion default (0.9, 0.99)
+
   model:
     init_args:
       pool: ssm_cls
@@ -59,18 +74,13 @@ model:
       input_net_hidden_layers: [192]
       output_head_hidden_layers: [256]
       output_head_init_scale: 0.01
-      # The critical line: "float32" short-circuits torch.amp.autocast in
-      # TrackParameterRegressor.forward (see model.py L413-419), so the
-      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
-      # the selective-scan, and the post-SSM RMSNorm.
       encoder_autocast_dtype: float32
-      separate_d0_head: true
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 20
+          num_layers: 10
           dim: 192
-          d_state: 64
+          d_state: 32
           d_conv: 4
           expand: 2
           headdim: 32
@@ -84,29 +94,24 @@ model:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: binned_dfl_quantile
-              n_bins: 436
-              binning: cdf
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0_piecewise_24core_12um.yaml
+              type: quantile
+              weight: 0.1
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-              coupling: none
-              classification_only_predict: true
-              weight: 1.0
-              tail_weight_tau: 0.03
-              offset_memory_efficient: true
             z0:
               type: quantile
-              weight: 10.0
+              weight: 1.0
               norm_min: -200.0
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
               type: circular
-              weight: 1.0
+              weight: 0.1
               beta: 0.01
             theta:
               type: quantile_eta
-              weight: 5.0
+              weight: 1.0
               norm_min: -3.0
               norm_max: 3.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
@@ -117,16 +122,11 @@ model:
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
 
-  optimizer: Lion
-  lrs_config:
-    initial: 1.0e-05
-    max: 5.0e-05
-    end: 1.0e-06
-    pct_start: 0.10
-    weight_decay: 1.0e-03
-    skip_scheduler: false
-
 data:
-  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
-  batch_size: 2048
-  num_workers: 16
+  preprocessed_dir: /scratch/colliderml/p200_core_kf_matched_finetune
+  load_acts: true
+  batch_size: 20000
+  num_workers: 1
+  pin_memory: true
+  streaming: true
+  shard_buffer_size: 50

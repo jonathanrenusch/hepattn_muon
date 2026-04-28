@@ -1,0 +1,74 @@
+# =============================================================================
+# Scaling sweep — Run 1 variant: unbottleneck pool_head.
+# =============================================================================
+# Sibling of run1_base_fp32.yaml. Identical architecture and loss, single
+# change: remove the pool_head dim-squeeze.
+#
+# In scaling/base.yaml the pool_head falls back to the model __init__
+# defaults (state_head_output_dim=256, hidden_layers=0, dropout=0.1), so the
+# actual projection was Linear(384, 256) with dropout — a 384→256 squeeze
+# feeding into output_head Linear(256,256)→Linear(256,30). Plus 0.1 dropout
+# that doesn't match the rest of the stack (everywhere else dropout=0.0).
+#
+# This config pins:
+#   - state_head_output_dim: 384           = 2*dim, no dim reduction
+#   - state_head_hidden_layers: 0          single Linear(384, 384)
+#   - state_head_dropout: 0.0              matches the rest of the stack
+#
+# Result: pool_head becomes Linear(384, 384) — preserves the trained
+# projection on the CLS→output boundary (kept for architectural consistency
+# with the ssm_state path's fwd_head/bwd_head, and as a harmless-at-fp32
+# Jacobian between the encoder and output_head), but removes all capacity
+# loss. output_head now sees the full 384-dim CLS summary.
+#
+# Motivation: at encoder_autocast_dtype=float32 the original
+# bf16-underflow justification for a pool_head bottleneck is gone, and
+# the 384→256 squeeze is plausibly costing precision — especially on
+# z0/theta/qop where core resolution is already near the CKF floor.
+# Clean single-axis ablation vs run1_base_fp32.yaml.
+# =============================================================================
+trainer:
+  devices: [2]
+  logger:
+    init_args:
+      name: TRK-v2-SSMCLS-scaling-run1-base-fp32-widepool
+
+model:
+  model:
+    init_args:
+      state_head_output_dim: 384
+      state_head_hidden_layers: 0
+      state_head_dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: quantile
+              weight: 1.0
+              norm_min: -2.5
+              norm_max: 2.5
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]

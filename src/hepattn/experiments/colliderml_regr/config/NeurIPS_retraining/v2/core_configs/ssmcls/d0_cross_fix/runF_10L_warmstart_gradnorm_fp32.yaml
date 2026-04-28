@@ -1,21 +1,32 @@
 # =============================================================================
-# Run C — 20L / d_state=64 SSMCLS, FROM SCRATCH, separate d0 branch.
+# Run F — 10L SSMCLS, warm-restart from ea2d9fba (ep48), separate d0 branch +
+#         DFL-d0 + GradNorm-lite on the d0 branch's shared-trunk gradient,
+#         FP32 backbone, full encoder trainable.
 # =============================================================================
-# Depth-first scale-up (CLAUDE.md "Scaling" — prefer `num_layers` primary,
-# `d_state` secondary).  20 layers × d_state 64 is the first point on the
-# scaling ladder that stresses both axes simultaneously.  From-scratch so
-# the encoder can learn features aligned with the separate-branch geometry
-# from step 0, rather than adapting a 10L basin.  Full fp32 backbone.
+# Premise (CLAUDE.md Open Issue #3): on the warm-restart runA the DFL
+# gradient that flows back through `d0_pool_head` into the shared encoder's
+# `pooled` output is ~24-150x the magnitude of the continuous regression
+# heads' trunk gradients.  This empirically destroys z0/phi/theta/qop at
+# both 8M and 15M trunk sizes (see CLAUDE.md gradient-cosine + trunk-norm
+# tables).  Run F dampens that gradient on the encoder side by a fixed
+# scalar `d0_grad_scale=0.01` (one-shot matched magnitude, no EMA
+# bookkeeping); forward is untouched so the d0 branch still sees the full
+# encoder output at inference.  If z0/phi/theta/qop converge normally AND
+# the d0 cross lifts under live DFL, the shared-trunk-with-rescale
+# architecture is viable.  If d0 still collapses, we've shown that even
+# with gradient access the shared features can't be reshaped for tail
+# discrimination — and capacity needs to be dedicated (runH/I tiny d0
+# standalone).
 # =============================================================================
 
 trainer:
-  devices: [2]
+  devices: [1]
   max_epochs: 50
   precision: 32-true
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-20L-ds64-sepD0DFL-scratch-FP32
+      name: TRK-v2-SSMCLS-10L-sepD0DFL-gradnorm001-warm-FP32
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -24,6 +35,8 @@ trainer:
       init_args:
         log_every_n_steps: 50
         log_parameter_stats: false
+    # Keep the per-head trunk-grad probe — watching whether the rescale
+    # actually matches d0's magnitude to the other four is the key diagnostic.
     - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
       init_args:
         probe_every_n_steps: 500
@@ -58,19 +71,24 @@ model:
       dim: 192
       input_net_hidden_layers: [192]
       output_head_hidden_layers: [256]
-      output_head_init_scale: 0.01
-      # The critical line: "float32" short-circuits torch.amp.autocast in
-      # TrackParameterRegressor.forward (see model.py L413-419), so the
-      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
-      # the selective-scan, and the post-SSM RMSNorm.
+      output_head_init_scale: 0.0005
       encoder_autocast_dtype: float32
       separate_d0_head: true
+      # GradNorm-lite: scale d0's contribution to the shared-encoder gradient
+      # by 1/100.  Matches the ~100x magnitude gap observed in the
+      # d2357297 (15M trunk) run; picked as a conservative starting point.
+      # Direction of the d0 gradient is preserved (the +0.73 d0<->qop
+      # alignment observed at 15M), only magnitude is capped.  The d0
+      # branch's own params (d0_pool_head, d0_output_head) receive the full
+      # gradient — it's only the backprop into the shared encoder that is
+      # dampened.
+      d0_grad_scale: 0.01
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 20
+          num_layers: 10
           dim: 192
-          d_state: 64
+          d_state: 32
           d_conv: 4
           expand: 2
           headdim: 32
@@ -117,10 +135,13 @@ model:
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
 
+  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ea2d9fba5fab4dd0bbc095e3246bba0d/ckpts/last.ckpt
+  pretrained_ckpt_strict: false
+
   optimizer: Lion
   lrs_config:
-    initial: 1.0e-05
-    max: 5.0e-05
+    initial: 5.0e-06
+    max: 2.5e-05
     end: 1.0e-06
     pct_start: 0.10
     weight_decay: 1.0e-03
@@ -128,5 +149,5 @@ model:
 
 data:
   preprocessed_dir: /scratch/colliderml/p0_core_pretrain
-  batch_size: 2048
+  batch_size: 15000
   num_workers: 16

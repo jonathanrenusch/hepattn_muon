@@ -40,6 +40,8 @@ numerical value.
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 
@@ -153,6 +155,19 @@ class BidirectionalMambaCLSEncoder(nn.Module):
         See :class:`BidirectionalMambaLayer`.
     cls_init_scale : float
         Standard deviation of the CLS-token initialisation.
+    residual_depth_init : bool
+        When True, rescale every ``out_proj.weight`` (forward and backward
+        Mamba-2 of every layer, intermediate and final) by ``1/sqrt(2 *
+        num_layers)`` after construction. This is the standard
+        residual-depth init prescription (one factor of 1/sqrt(N_residuals)
+        on the projection that writes back into the residual stream) so
+        that the variance accumulated across depth is approximately
+        constant. Each :class:`BidirectionalMambaLayer` contributes one
+        residual-stream addition (the gated merge of forward+backward),
+        and the residual is applied at *both* forward and backward
+        out_projs through the gate, so the canonical 1/sqrt(2N) factor is
+        applied to both. Off by default to preserve checkpoint
+        reproducibility on existing runs.
     """
 
     def __init__(
@@ -168,6 +183,7 @@ class BidirectionalMambaCLSEncoder(nn.Module):
         norm: str = "LayerNorm",
         dropout: float = 0.0,
         cls_init_scale: float = 0.02,
+        residual_depth_init: bool = False,
     ):
         super().__init__()
         assert num_layers >= 1, "Need at least one layer"
@@ -213,6 +229,18 @@ class BidirectionalMambaCLSEncoder(nn.Module):
         # outputs (ungated, no residual) and bypass ``final_norm`` above.
         # Without this, their unconstrained magnitude causes gradient spikes.
         self.cls_norm = nn.RMSNorm(dim)
+
+        # Residual-depth init rescaling on out_proj. Applied AFTER all
+        # submodules are constructed so it overrides the Mamba2 default
+        # init for these specific tensors.
+        if residual_depth_init:
+            scale = 1.0 / math.sqrt(2.0 * num_layers)
+            with torch.no_grad():
+                for layer in self.layers:
+                    layer.forward_mamba.out_proj.weight.mul_(scale)
+                    layer.backward_mamba.out_proj.weight.mul_(scale)
+                self.final_layer.forward_mamba.out_proj.weight.mul_(scale)
+                self.final_layer.backward_mamba.out_proj.weight.mul_(scale)
 
     @property
     def pool_dim(self) -> int:

@@ -318,10 +318,13 @@ pixi run python -m hepattn.experiments.colliderml_regr.evaluate_tail_diagnostics
 Output subdirs: `all_selected/`, `double_matched/`, `acts_baseline_comparison/`,
 `double_matched_primary_d0/`, `double_matched_secondary_d0/`.
 
-**Default eval output location: `/shared/tracking/logs/<contextual-name>/`** —
-write all new evaluation plot dirs directly here (confirmed 2026-04-22). This
-is the top-level `logs/` next to `hepattn_muon/`, not the Comet-adjacent
-`src/logs/comet_offline/`.
+**Default eval output location: `/shared/tracking/logs_Neurips/<contextual-name>/`**
+— write all new evaluation plot dirs here for NeurIPS-relevant analyses
+(updated 2026-04-24). This is a sibling of `/shared/tracking/logs/` (the prior
+default, which still holds legacy eval artefacts referenced earlier in this
+file). For d0-specific analyses use `/shared/tracking/logs_Neurips/d0/<run-name>/`
+so all d0 NeurIPS plots live under one tree. Do **not** write to the
+Comet-adjacent `src/logs/comet_offline/` for plots.
 
 **Convention for `<contextual-name>`**: encode architecture, loss family,
 pretrain-or-finetune, dataset, run-hash-prefix, epoch, and any caveat. E.g.
@@ -491,6 +494,36 @@ sufficient on its own (per PI-review evidence above) — but no run in the
 logs directly tests it yet (`65c08d6d…` kept the spline on d0). Queue one
 if it's cheap.
 
+**Range-split + upsample is the d0-cross fix (validated 2026-04-25, NEW
+HEADLINE for the d0 collapse problem).** Config:
+[ssmcls/d0_cross_fix/tiny_d0_4L_dim128_rangesplit_upsample.yaml](config/NeurIPS_retraining/v2/core_configs/ssmcls/d0_cross_fix/tiny_d0_4L_dim128_rangesplit_upsample.yaml)
+(run `da4a769796454b0f961eb9d3839094a1` last.ckpt, evaluated zero-shot p200
+DM, 6.59 M tracks). The recipe splits the d0 target into core/tail bands
+and upsamples the secondary (|d0| ≳ 30 µm) tracks ~19×, so the optimiser
+cannot trivially default to the beamspot mode. Compared head-to-head
+against the other two overnight separate-d0 recipes:
+
+| run | core iter-3σ RMS [µm] | horiz. collapse rate, |truth|≥30 µm (P(|pred|<5 µm)) | vertical scatter on primaries (P(|pred|≥10 µm | |truth|<13 µm)) |
+|---|---|---|---|
+| twinD0 2a22ec77 (twin-encoder) | 32 | **57.9 %** at [30, 100) µm — collapse unfixed | 27.1 % (well below CKF 85.8 %) |
+| tinyD0 211ebaac (uniform-500) | 41 | 0.2 % at [30, 100) µm — looks great | **99.5 %** — over-corrects, scatters every primary |
+| **tinyD0 da4a7697 (rangesplit + upsample19)** | **49** | **6.4 %** at [30, 100) µm — **9× lower than twinD0**, ~CKF level | **83.2 %** (≈CKF 85.8 %, no over-correction) |
+| ACTS CKF reference | 65.7 | 4.3 % at [30, 100) µm | 85.8 % |
+
+**Why this is the headline despite the worst core RMS of the three:**
+the d0-cross artefact (CLAUDE.md "Open Issue #3") is the
+NeurIPS-blocker, not core RMS — twinD0 buys 17 µm of core but still
+collapses 58 % of secondary tracks to zero (worse than the
+ac72e5c9 baseline's 19.7 % from CLAUDE.md). uniform-500 fixes the
+horizontal band but pays for it with a uniform-target prior that
+over-disperses primaries. **Only the rangesplit+upsample recipe
+fixes the cross without trading it for a primary-scatter pathology**
+— horizontal-band rate ~at CKF and vertical-scatter rate ~at CKF. It
+is also the recipe that should be carried forward as the d0 head for
+the headline composite SSM-CLS, not the shared-trunk fc8015a6 DFL
+branch (which sits at 13 µm core but inherits the un-fixed cross).
+Plots: [/shared/tracking/logs_Neurips/d0/tinyD0_4L_dim128_rangesplit_upsample19_fromscratch_da4a7697/](../../../../../../../../shared/tracking/logs_Neurips/d0/tinyD0_4L_dim128_rangesplit_upsample19_fromscratch_da4a7697/).
+
 **Not recommended:** zero-inflated classifier for "is-beamspot". The d0
 distribution is smooth-peaked, not physically bimodal — a hard threshold
 would be arbitrary and introduce a discontinuity.
@@ -609,6 +642,25 @@ so every head contributes comparable trunk pull, or (c) drop the d0 `weight`
 by another 10–30× (to ~1e-3) and verify the other heads' ep-9 metrics
 recover toward the all-quantile ref. Options (a) and (b) are
 mechanism-correct; (c) is the cheapest sanity check.
+
+**Validated d0_grad_scale value (2026-04-26): 0.0005 works in practice.**
+Implemented as `_GradScale` in [model.py](model.py) — autograd Identity-fwd /
+multiply-bwd applied between the encoder's pooled output and `d0_pool_head`,
+so d0's gradient on its **own** branch params (`d0_pool_head`,
+`d0_output_head`) is full-strength while its gradient on the **shared
+encoder** is multiplied by `d0_grad_scale`. At 0.0005, only 0.05 % of the
+d0 gradient reaches the shared trunk — effectively isolating d0 from the
+trunk on the encoder side. Counter-intuitive but validated: d0 is empirically
+very easy for the model to learn given the available innermost-hit
+features, so it does not need many shared-trunk updates to converge — most
+of its precision comes from the d0-only branch and the d0_pool_head /
+d0_output_head specialising on the kurtotic distribution. Aggressive
+attenuation here turns out to be the right operating point for keeping
+z0/φ/θ/qop's shared-trunk updates uncontaminated. Used in
+[run1_widepool_warmstart_sepd0_rangesplit_upsample19_fp32.yaml](config/NeurIPS_retraining/v2/core_configs/ssmcls/scaling/run1_widepool_warmstart_sepd0_rangesplit_upsample19_fp32.yaml)
+and its `_residinit` sibling. Treat 0.0005 as the calibrated default for any
+shared-trunk + separate-d0-branch architecture going forward; only revisit
+upward if d0 metrics regress without a corresponding gain elsewhere.
 
 Analysis artefacts:
 - eval plots: `/shared/tracking/logs/ssmcls_dfl_d0_zeroshot_6cf94ec3_epoch9/{all_selected,double_matched}/`

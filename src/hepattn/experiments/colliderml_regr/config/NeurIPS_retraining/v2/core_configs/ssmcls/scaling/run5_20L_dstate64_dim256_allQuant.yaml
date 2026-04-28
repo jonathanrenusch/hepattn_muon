@@ -1,0 +1,64 @@
+# =============================================================================
+# Scaling sweep — Run 5: 20 L, d_state=64, dim=256. 5-param quantile loss
+# (keeps d0). Trains from scratch.
+# Diff vs scaling/base.yaml: top-level dim 192→256, input_net_hidden_layers
+# [192]→[256], encoder num_layers 10→20, encoder dim 192→256, d_state 32→64;
+# loss_module set to the 5-param quantile.
+# =============================================================================
+trainer:
+  devices: [1]
+  logger:
+    init_args:
+      name: TRK-v2-SSMCLS-scaling-run5-20L-dstate64-dim256-allQuant
+
+model:
+  model:
+    init_args:
+      dim: 256
+      input_net_hidden_layers: [256]
+      encoder:
+        init_args:
+          num_layers: 20
+          dim: 256
+          d_state: 64
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              type: quantile
+              weight: 1.0
+              norm_min: -2.5
+              norm_max: 2.5
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 1.0
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 10.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 5.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+  # Small learning rate adjustment for stability on this larger model — otherwise identical to base.
+  lrs_config:
+    initial: 1.0e-05
+    max: 3.5e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false

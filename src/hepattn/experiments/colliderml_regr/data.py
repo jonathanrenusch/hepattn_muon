@@ -23,7 +23,62 @@ import torch
 import torch.distributed as dist
 from lightning import LightningDataModule
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Sampler
+
+
+class _StratifiedTailSampler(Sampler[int]):
+    """Two-group stratified sampler: a fixed fraction of each epoch's draws
+    comes from the 'tail' index group, the rest from the 'core' group.
+
+    Replacement for ``WeightedRandomSampler`` that avoids ``torch.multinomial``'s
+    2^24 category limit.  Indices are sampled uniformly within each group
+    using ``numpy.random.integers``, which has no such cap.  Draws are with
+    replacement (matches WeightedRandomSampler semantics).
+
+    Parameters
+    ----------
+    tail_indices, core_indices : np.ndarray[int64]
+        Global indices into the underlying dataset.
+    num_samples : int
+        Total draws per epoch (typically ``len(dataset)``).
+    target_tail_fraction : float
+        Fraction of each draw coming from the tail group.  0.5 balances
+        a heavily imbalanced dataset; values outside [0, 1] are clamped.
+    seed : int
+        Base seed; per-epoch state is seed + epoch_idx.
+    """
+
+    def __init__(
+        self,
+        tail_indices: np.ndarray,
+        core_indices: np.ndarray,
+        num_samples: int,
+        target_tail_fraction: float,
+        seed: int = 42,
+    ):
+        self.tail_indices = np.asarray(tail_indices, dtype=np.int64)
+        self.core_indices = np.asarray(core_indices, dtype=np.int64)
+        self.num_samples = int(num_samples)
+        self.target_tail_fraction = float(max(0.0, min(1.0, target_tail_fraction)))
+        self.seed = int(seed)
+        self._epoch = 0
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self._epoch)
+        self._epoch += 1
+        n_tail = int(round(self.num_samples * self.target_tail_fraction))
+        n_core = self.num_samples - n_tail
+        parts = []
+        if n_tail > 0 and len(self.tail_indices) > 0:
+            parts.append(self.tail_indices[rng.integers(0, len(self.tail_indices), size=n_tail)])
+        if n_core > 0 and len(self.core_indices) > 0:
+            parts.append(self.core_indices[rng.integers(0, len(self.core_indices), size=n_core)])
+        out = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
+        rng.shuffle(out)
+        return iter(out.tolist())
+
+    def __len__(self):
+        return self.num_samples
 
 
 # ============================================================================
@@ -479,6 +534,8 @@ class ColliderMLRegrDataModule(LightningDataModule):
         streaming: bool = False,
         shard_buffer_size: int = 8,
         prefetch_factor: int | None = None,
+        tail_upsample_threshold_mm: float = 0.0,
+        tail_upsample_weight: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -492,6 +549,17 @@ class ColliderMLRegrDataModule(LightningDataModule):
         self.streaming = streaming
         self.shard_buffer_size = shard_buffer_size
         self.prefetch_factor = prefetch_factor
+        # Tail upsampling (d0 based): when threshold_mm > 0 and weight != 1,
+        # the train DataLoader uses a _StratifiedTailSampler that draws a
+        # fixed fraction of each epoch from the "tail" group (|truth d0| >
+        # threshold_mm).  The effective tail fraction is derived from the
+        # natural class counts and the requested weight:
+        #     target_frac = w * n_tail / (w * n_tail + n_core).
+        # With natural tail fraction ~5% and weight 19 this yields ~0.5.
+        # Only active for the non-streaming Dataset path.
+        self.tail_upsample_threshold_mm = float(tail_upsample_threshold_mm)
+        self.tail_upsample_weight = float(tail_upsample_weight)
+        self._tail_sampler: _StratifiedTailSampler | None = None
 
         self._train_ds: ColliderMLTrackDataset | ColliderMLStreamingDataset | None = None
         self._val_ds: ColliderMLTrackDataset | None = None
@@ -539,6 +607,43 @@ class ColliderMLRegrDataModule(LightningDataModule):
                 self._train_ds = ColliderMLTrackDataset(
                     self.preprocessed_dir, train_shards, load_acts=False,
                 )
+                # Build a stratified tail sampler if tail upsampling is on.
+                if (
+                    self.tail_upsample_threshold_mm > 0.0
+                    and self.tail_upsample_weight != 1.0
+                ):
+                    d0_pieces: list[np.ndarray] = []
+                    for si in train_shards:
+                        t = np.load(
+                            self.preprocessed_dir / f"shard_{si:04d}"
+                            / "selected_tracks" / "track_targets.npy",
+                            mmap_mode="r",
+                        )
+                        d0_pieces.append(np.asarray(t[:, 0], dtype=np.float32))
+                    d0_train = np.concatenate(d0_pieces, axis=0)
+                    is_tail = np.abs(d0_train) > self.tail_upsample_threshold_mm
+                    tail_idx = np.nonzero(is_tail)[0].astype(np.int64)
+                    core_idx = np.nonzero(~is_tail)[0].astype(np.int64)
+                    n_tail = int(len(tail_idx))
+                    n_core = int(len(core_idx))
+                    eff_tail_frac = (
+                        self.tail_upsample_weight * n_tail
+                        / (self.tail_upsample_weight * n_tail + n_core)
+                    ) if (n_tail + n_core) > 0 else 0.0
+                    self._tail_sampler = _StratifiedTailSampler(
+                        tail_indices=tail_idx,
+                        core_indices=core_idx,
+                        num_samples=len(d0_train),
+                        target_tail_fraction=eff_tail_frac,
+                    )
+                    print(
+                        f"[DataModule] stratified tail sampler active: threshold "
+                        f"{self.tail_upsample_threshold_mm*1e3:.1f} um, "
+                        f"weight {self.tail_upsample_weight:g} — raw tail "
+                        f"fraction {n_tail/len(d0_train)*100:.2f}% → "
+                        f"effective {eff_tail_frac*100:.2f}% "
+                        f"({n_tail:,} tail / {n_core:,} core)"
+                    )
             self._val_ds = ColliderMLTrackDataset(
                 self.preprocessed_dir, val_shards, load_acts=self.load_acts,
             )
@@ -598,13 +703,17 @@ class ColliderMLRegrDataModule(LightningDataModule):
 
         dl_kwargs = dict(
             batch_size=self.batch_size,
-            shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_tracks,
             drop_last=True,
             persistent_workers=self.num_workers > 0,
         )
+        if self._tail_sampler is not None:
+            dl_kwargs["sampler"] = self._tail_sampler
+            dl_kwargs["shuffle"] = False  # cannot combine shuffle + sampler
+        else:
+            dl_kwargs["shuffle"] = True
         if self.prefetch_factor is not None and self.num_workers > 0:
             dl_kwargs["prefetch_factor"] = self.prefetch_factor
         return DataLoader(self._train_ds, **dl_kwargs)

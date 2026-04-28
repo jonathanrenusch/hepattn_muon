@@ -1,0 +1,216 @@
+# =============================================================================
+# Scaling sweep — Run 1 widepool + separate-d0 RANGE-SPLIT branch, FP32 warm.
+# =============================================================================
+# Composition:
+#
+#   * Backbone           : 15 L SSMCLS, dim=192, d_state=64 — scaled up from
+#                          the run1 widepool baseline (10 L, d_state=32) so
+#                          the trunk has the capacity to serve the d0 cls
+#                          branch *and* the four continuous regression heads
+#                          without one starving the other.
+#   * Encoder precision  : full fp32 — encoder_autocast_dtype: float32.  This
+#                          is why we can also drop the post-pool projection:
+#                          the bf16-stability rationale that motivated
+#                          `pool_head` is gone.
+#   * Pool projection    : DISABLED on both the main and the d0 branch via
+#                          `disable_main_pool_head: true`.  Both pool_head
+#                          and d0_pool_head become `nn.Identity`; output
+#                          heads consume the raw (B, 2*dim) CLS concat.
+#   * d0 branch          : separate_d0_head=true, RANGE-SPLIT classifier
+#                          (24-bin inner cls + 420-bin outer cls + 2-way
+#                          router) with `inner_route_threshold: 0.7`.  This
+#                          is the recipe validated by run da4a7697 to
+#                          actually fix the d0 cross (CLAUDE.md Open Issue
+#                          #3) at ~CKF parity on both collapse modes.  It
+#                          replaces runF's binned_dfl_quantile branch.
+#   * Tail upsampling    : tail_upsample_threshold_mm=0.030,
+#                          tail_upsample_weight=19  — same DataLoader-level
+#                          WeightedRandomSampler that gave da4a7697 its
+#                          balanced batches.  This is the implementation
+#                          that already lives in data.py:537+ and is
+#                          orthogonal to which loss the d0 branch uses.
+#   * Main loss          : 4-param (z0, phi, theta, qop) — d0 is moved to
+#                          the separate branch.  Weights inherited from
+#                          run1_base_fp32_widepool, just with d0 entry
+#                          stripped.
+#   * Warm start         : pretrained_ckpt_strict: false, loading the
+#                          encoder/input_net from
+#                          3ee6ba3f (scaling-run2 15L d_state=64 noD0,
+#                          val/total = 0.00766 at ep20).  Source already has
+#                          d0 stripped from the main loss, so the 4-param
+#                          regression head shape lines up directly.
+#                          d0_pool_head + d0_output_head are freshly
+#                          initialised since the source has no separate
+#                          d0 branch.  Strict=false is required because the
+#                          source's main pool_head is Linear(384,256) and
+#                          here pool_head=Identity.
+#   * Batch size         : 30 000  (fp32, single H100 — same as runF).
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 50
+  precision: 32-true
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-scaling-run1-widepool-warmstart-sepD0rangesplit-upsample19-fp32
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 50
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 50
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 50
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 192
+      input_net_hidden_layers: [192]
+      output_head_hidden_layers: [256]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: float32
+      # Separate d0 branch + Identity pool projections (fp32 → no need for
+      # gradient attenuation between encoder and heads).
+      separate_d0_head: true
+      disable_main_pool_head: true
+      # GradNorm-lite — kept ON, conservative starting point.  Range-split
+      # CE is split across 3 sub-CE losses (24-bin inner + 420-bin outer +
+      # 2-bin router) so its loss-per-sample is milder than runF's single
+      # 436-way DFL on a kurtotic CDF.  But it is still a CE family
+      # competing with continuous quantile losses on the SHARED encoder
+      # trunk — runF's empirical 24–150× magnitude gap on shared-trunk
+      # gradients (CLAUDE.md gradient-cosine table) was the lesson.
+      # 0.05 is a conservative middle ground between runF's 0.01 (DFL
+      # worst case) and 1.0 (no scaling).  Forward path is untouched so
+      # the d0 branch still sees the full encoder output at inference;
+      # only the gradient that flows into the *shared* encoder is
+      # dampened.  The d0 branch's own params (d0_output_head — and
+      # d0_pool_head when not Identity) receive the full gradient.
+      d0_grad_scale: 0.0005
+      # Scaled encoder: 15 L × d_state 64, dim 192 — the user's "more
+      # complexity to handle all the tasks" upgrade.  Warm-started from
+      # an existing scaling-run-2 (15L d_state=64 noD0) checkpoint so we
+      # don't pay the from-scratch pretrain cost.
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 15
+          dim: 192
+          d_state: 64
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          # d0 first → separate-branch contract (model.py asserts
+          # parameter_order[0] == "d0").
+          parameter_order: [d0, z0, phi, theta, qop]
+          config:
+            d0:
+              # Validated d0-cross fix (run da4a7697, CLAUDE.md headline).
+              # Identical settings to tiny_d0_4L_dim128_rangesplit_upsample.yaml.
+              type: range_split_classification
+              k_inner: 24
+              k_outer: 420
+              inner_half_mm: 0.030
+              outer_half_mm: 2.5
+              split_mm: 0.030
+              weight_router: 1.0
+              weight_inner: 1.0
+              weight_outer: 1.0
+              weight: 0.1
+              inner_route_threshold: 0.8
+            z0:
+              type: quantile
+              weight: 1.0
+              norm_min: -200.0
+              norm_max: 200.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            phi:
+              type: circular
+              weight: 0.1
+              beta: 0.01
+            theta:
+              type: quantile_eta
+              weight: 1.0
+              norm_min: -3.0
+              norm_max: 3.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+            qop:
+              type: quantile
+              weight: 1.0
+              norm_min: -2.0
+              norm_max: 2.0
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  # Warm-start from the run1_base_fp32_widepool checkpoint.  Strict=False is
+  # mandatory: the source ckpt has no d0_pool_head / d0_output_head keys
+  # (those are freshly initialised here), and its main pool_head was a
+  # Linear(384,384) which we replace with Identity (load_state_dict will
+  # skip it under strict=False).  output_head shape changes from 30-d
+  # (5×7-quantile) to 23-d (4 params: 7+1+7+7 + 1 phi-circular = 23 — but
+  # model rebuilds output_head from total_outputs - d0_output_dim so the
+  # actual shape comes out of the loss module; strict=false drops the
+  # mismatched output_head weights, which is the right thing for warm
+  # start).
+  # Warm-start from scaling-run2 15L/d_state=64/noD0 — the only existing
+  # ckpt in logs that already matches the target encoder shape AND
+  # already has d0 stripped from its main loss (so the 4-param output
+  # head shape lines up too).  Best-checkpoint val/total = 0.00766 at
+  # ep20.  strict=false because: (a) source has Linear(384,256)
+  # pool_head → we replace with Identity, (b) source has no
+  # d0_output_head / d0_pool_head — both freshly initialised here.
+  # pretrained_ckpt_path: 
+  pretrained_ckpt_strict: false
+
+  optimizer: Lion
+  # Conservative warm-start LR — match runF's recipe so the fp32 widepool
+  # encoder is not blown out of the basin while the new d0 branch warms up.
+  lrs_config:
+    initial: 5.0e-06
+    max: 4.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 2048
+  num_workers: 16
+  # Tail upsampling (DataLoader-level WeightedRandomSampler — already
+  # implemented in data.py, see L537+).  weight 19 on |truth d0|>30 µm
+  # tracks gives ~50/50 core/tail batches, mirroring run da4a7697.
+  tail_upsample_threshold_mm: 0.030
+  tail_upsample_weight: 19.0

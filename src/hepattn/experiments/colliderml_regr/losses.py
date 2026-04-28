@@ -1540,7 +1540,202 @@ LOSS_REGISTRY: dict[str, type] = {
     "cosine_phi": CosinePhiLoss,
     "mixture_density": MixtureDensityLoss,
     "binned_dfl_quantile": BinnedDFLQuantileOffsetLoss,
+    # "range_split_classification" registered below after the class is defined
 }
+
+
+# ============================================================================
+# Range-split classification loss (router + inner-range cls + outer-range cls)
+# ============================================================================
+
+
+class RangeSplitClassificationLoss(nn.Module):
+    """Three-head split classifier for heavy-tailed d0.
+
+    Output layout per sample: ``(N, K_inner + K_outer + 2)``
+        [ inner_logits (K_inner) | outer_logits (K_outer) | router_logits (2) ]
+
+    Routing label (binary): ``|target| > split_mm``.  0 → inner (core);
+    1 → outer (tail).
+
+    Training losses (sum, all weighted):
+      - router CE on every sample
+      - inner head CE on samples with is_tail==0 only (mask 0 elsewhere)
+      - outer head CE on samples with is_tail==1 only
+
+    Inference ``predict(raw)``: argmax router → use that head's
+    bin-expectation in physical units.
+
+    Both inner and outer heads use **linear** binning — uniform in
+    physical d0 over their respective ranges.  Inner: ``[-inner_half_mm,
+    +inner_half_mm]`` with ``K_inner`` uniform bins.  Outer: two uniform
+    grids, ``[-outer_half_mm, -inner_half_mm]`` and
+    ``[+inner_half_mm, +outer_half_mm]``, each with ``K_outer // 2`` bins
+    (so ``K_outer`` must be even).  Targets exactly on the boundary go to
+    the outer head (strict inequality on is_tail).
+
+    Parameters
+    ----------
+    k_inner, k_outer : int
+        Number of linear bins for the inner and outer classifiers.
+    inner_half_mm : float
+        Half-width of the inner (core) range.
+    outer_half_mm : float
+        Half-width of the outer (tail) range.  Samples outside this get
+        clamped to the edge bin during training.
+    split_mm : float | None
+        |target| threshold for router label.  Defaults to inner_half_mm.
+    weight_router, weight_inner, weight_outer : float
+        Per-head loss weights.
+    inner_route_threshold : float
+        Inference-time asymmetric routing.  Only commit to the INNER head
+        when ``softmax(router)[inner] > inner_route_threshold``.  Anything
+        below that defaults to the OUTER head.  ``0.5`` recovers plain
+        argmax routing; raise (e.g. ``0.8``) to bias unconfident routes
+        toward the wider outer head — makes the failure mode "clipped at
+        the 30 um boundary" instead of "crushed to 0".  Can be tuned post-
+        hoc on an existing checkpoint (it is only used in ``predict()``).
+    reduction : str
+        ``"mean"`` or ``"none"``.
+    """
+
+    def __init__(
+        self,
+        k_inner: int = 24,
+        k_outer: int = 420,
+        inner_half_mm: float = 0.030,
+        outer_half_mm: float = 2.5,
+        split_mm: float | None = None,
+        weight_router: float = 1.0,
+        weight_inner: float = 1.0,
+        weight_outer: float = 1.0,
+        weight: float = 1.0,  # outer scalar loss_module weight
+        inner_route_threshold: float = 0.5,
+        reduction: str = "mean",
+    ):
+        super().__init__()
+        if k_outer % 2 != 0:
+            raise ValueError(f"k_outer must be even (split into two equal sides); got {k_outer}")
+        self.k_inner = int(k_inner)
+        self.k_outer = int(k_outer)
+        self.k_outer_side = self.k_outer // 2
+        self.inner_half_mm = float(inner_half_mm)
+        self.outer_half_mm = float(outer_half_mm)
+        self.split_mm = float(split_mm) if split_mm is not None else self.inner_half_mm
+        self.weight_router = float(weight_router)
+        self.weight_inner = float(weight_inner)
+        self.weight_outer = float(weight_outer)
+        self.weight = float(weight)
+        if not 0.0 <= float(inner_route_threshold) <= 1.0:
+            raise ValueError(
+                f"inner_route_threshold must be in [0,1]; got {inner_route_threshold}"
+            )
+        self.inner_route_threshold = float(inner_route_threshold)
+        self.reduction = reduction
+
+        # Precompute bin centers (physical mm) for each head.  Used in predict().
+        inner_edges = torch.linspace(-self.inner_half_mm, self.inner_half_mm, self.k_inner + 1)
+        inner_centers = 0.5 * (inner_edges[:-1] + inner_edges[1:])
+        self.register_buffer("inner_centers", inner_centers)
+
+        left_edges = torch.linspace(-self.outer_half_mm, -self.inner_half_mm, self.k_outer_side + 1)
+        right_edges = torch.linspace(self.inner_half_mm, self.outer_half_mm, self.k_outer_side + 1)
+        left_centers = 0.5 * (left_edges[:-1] + left_edges[1:])
+        right_centers = 0.5 * (right_edges[:-1] + right_edges[1:])
+        outer_centers = torch.cat([left_centers, right_centers])  # shape (K_outer,)
+        self.register_buffer("outer_centers", outer_centers)
+
+    @property
+    def num_outputs(self) -> int:
+        return self.k_inner + self.k_outer + 2
+
+    def _assign_inner_bin(self, target: Tensor) -> Tensor:
+        # Uniform bin index in [0, K_inner-1] over [-inner_half, inner_half].
+        u = (target + self.inner_half_mm) / (2 * self.inner_half_mm)  # 0..1
+        idx = (u * self.k_inner).long().clamp(0, self.k_inner - 1)
+        return idx
+
+    def _assign_outer_bin(self, target: Tensor) -> Tensor:
+        # Target is outside [-inner_half, inner_half].  Map to [0, K_outer-1]:
+        # left side first (K_outer_side bins), then right side.
+        is_left = target < 0
+        # Left: u in [0,1] over [-outer_half, -inner_half]
+        u_left = (target + self.outer_half_mm) / (self.outer_half_mm - self.inner_half_mm)
+        idx_left = (u_left * self.k_outer_side).long().clamp(0, self.k_outer_side - 1)
+        # Right: u in [0,1] over [inner_half, outer_half]
+        u_right = (target - self.inner_half_mm) / (self.outer_half_mm - self.inner_half_mm)
+        idx_right = (u_right * self.k_outer_side).long().clamp(0, self.k_outer_side - 1) + self.k_outer_side
+        return torch.where(is_left, idx_left, idx_right)
+
+    def forward(self, pred: Tensor, target: Tensor, sample_weights: Tensor | None = None) -> Tensor:
+        K_i, K_o = self.k_inner, self.k_outer
+        inner_logits = pred[..., :K_i]
+        outer_logits = pred[..., K_i:K_i + K_o]
+        router_logits = pred[..., K_i + K_o:K_i + K_o + 2]
+
+        is_tail = (target.abs() > self.split_mm).long()  # (N,)
+
+        # Router CE — always on
+        l_router = F.cross_entropy(router_logits, is_tail, reduction="none")
+
+        # Inner CE — masked to core tracks
+        inner_bin = self._assign_inner_bin(target.clamp(-self.inner_half_mm, self.inner_half_mm))
+        l_inner_all = F.cross_entropy(inner_logits, inner_bin, reduction="none")
+        l_inner = l_inner_all * (is_tail == 0).float()
+
+        # Outer CE — masked to tail tracks.  For core tracks pass a dummy bin
+        # (index 0) through the loss to keep shape consistent; the is_tail
+        # mask zeros it out.
+        outer_bin = torch.where(
+            is_tail == 1,
+            self._assign_outer_bin(target),
+            torch.zeros_like(is_tail),
+        )
+        l_outer_all = F.cross_entropy(outer_logits, outer_bin, reduction="none")
+        l_outer = l_outer_all * (is_tail == 1).float()
+
+        per_sample = (
+            self.weight_router * l_router
+            + self.weight_inner * l_inner
+            + self.weight_outer * l_outer
+        )
+
+        if sample_weights is not None:
+            per_sample = per_sample * sample_weights
+
+        if self.reduction == "mean":
+            return per_sample.mean() * self.weight
+        return per_sample * self.weight
+
+    def predict(self, raw: Tensor) -> Tensor:
+        """Asymmetric-threshold router → bin-expectation of the selected head.
+
+        Uses ``softmax(router)[inner] > inner_route_threshold`` as the
+        gate.  Default ``0.5`` recovers plain argmax routing.  Raising it
+        (e.g. 0.8) biases unconfident routes toward the OUTER head — the
+        outer head asked about a core track returns ~30 um (clipped at
+        its edge bin, bounded error), whereas the inner head asked about
+        a tail track returns ~0 (crushed to the mode, unbounded error).
+        On a d0 measurement the former is almost always the preferable
+        failure mode.
+        """
+        K_i, K_o = self.k_inner, self.k_outer
+        inner_logits = raw[..., :K_i]
+        outer_logits = raw[..., K_i:K_i + K_o]
+        router_logits = raw[..., K_i + K_o:K_i + K_o + 2]
+
+        inner_probs = F.softmax(inner_logits, dim=-1)
+        outer_probs = F.softmax(outer_logits, dim=-1)
+        inner_pred = (inner_probs * self.inner_centers).sum(dim=-1)
+        outer_pred = (outer_probs * self.outer_centers).sum(dim=-1)
+
+        router_probs = F.softmax(router_logits, dim=-1)  # (N, 2)
+        p_inner = router_probs[..., 0]
+        use_inner = p_inner > self.inner_route_threshold  # bool (N,)
+        return torch.where(use_inner, inner_pred, outer_pred)
+
+
+LOSS_REGISTRY["range_split_classification"] = RangeSplitClassificationLoss
 
 
 # ============================================================================

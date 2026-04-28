@@ -131,11 +131,17 @@ class RegressionPredictionWriter(Callback):
         quantile_preds: dict[str, Tensor] | None = outputs.get("quantile_preds")
 
         for name in ["d0", "z0", "phi", "theta", "qop"]:
+            # Always write the truth target when available (useful even for
+            # params the model doesn't predict — downstream analyses may need
+            # theta for eta binning etc.).  Only write preds for params this
+            # model actually emits.
+            if name in targets:
+                t = targets[name].detach().float().cpu().numpy().ravel()
+                self._append_1d(self.file["targets"], name, t)
+            if name not in preds:
+                continue
             p = preds[name].detach().float().cpu().numpy().ravel()
-            t = targets[name].detach().float().cpu().numpy().ravel()
-
             self._append_1d(self.file["preds"], name, p)
-            self._append_1d(self.file["targets"], name, t)
 
             # Write quantile predictions if available and multi-dimensional
             if (

@@ -1,0 +1,147 @@
+
+  Tiny d0 standalone — SSM-CLS 4L dim128 + 3-head range-split + tail upsample
+  ============================================================================
+  Config: tiny_d0_4L_dim128_rangesplit_upsample.yaml
+  Variant of: tiny_d0_4L_dim128_rangesplit.yaml (adds DataLoader tail upsample
+  + inner_route_threshold=0.7 for asymmetric inference routing)
+
+  DataLoader (p0_core_pretrain):
+    WeightedRandomSampler — weight=19 for |truth d0|>30um, weight=1 for core.
+    Batch mix: ~50/50 core/tail (vs natural ~95/5).
+    BS=30000, num_workers=16.
+
+  Input: Raw detector hits (B tracks x N hits x F features), N<=20, mean~12-13
+         [x, y, z, r, phi_hit, theta_hit, s, vol_id, layer_id, surf_id,
+          detector, innermost_phi, ...]
+
+         +------------------------------------------------------+
+         |            Min-Max Normalization  [0, 1]             |
+         +------------------------------------------------------+
+                                  |
+                                  v
+         +------------------------------------------------------+
+         |         Fourier Feature Encoding (7 scales)          |
+         |         F feats x 7 scales x 2 (sin/cos) + F         |
+         +------------------------------------------------------+
+                                  |
+                                  v
+         +------------------------------------------------------+
+         |           Input Net  (Dense MLP, SiLU)               |
+         |          Linear(F_ff,128) -> SiLU -> Linear(128,128) |
+         +------------------------------------------------------+
+                                  |
+                     (B, N, 128)  v
+         +------------------------------------------------------+
+         |  Prepend fwd-CLS + append bwd-CLS learned tokens     |
+         |  seq -> (B, N+2, 128)                                |
+         +------------------------------------------------------+
+                                  |
+                                  v
+  ================================================================
+  ||  BidirectionalMambaCLSEncoder  (num_layers = 4)            ||
+  ||                                                            ||
+  ||  Per layer: BidirectionalMambaLayer (RMSNorm, dropout=0)   ||
+  ||  +------------------------------------------------------+  ||
+  ||  |                                                      |  ||
+  ||  |  x --> RMSNorm --+--> Mamba2 (fwd scan) ----+        |  ||
+  ||  |  |               |                           |       |  ||
+  ||  |  |               +--> Mamba2 (bwd scan) -+   |       |  ||
+  ||  |  |                    (sequence reversed)|   |       |  ||
+  ||  |  |                                       v   v       |  ||
+  ||  |  |          gate = sigmoid(Linear(norm(x)))          |  ||
+  ||  |  |          out  = gate*fwd + (1-gate)*bwd           |  ||
+  ||  |  |                          |                        |  ||
+  ||  |  +---------- residual skip -+                        |  ||
+  ||  +------------------------------------------------------+  ||
+  ||                          x 4                               ||
+  ||                                                            ||
+  ||  Final BidirectionalMambaCLSFinalLayer                     ||
+  ||    - extracts CLS token from both termini of the           ||
+  ||      GATED + RESIDUALISED output (not raw scan out)        ||
+  ||    - fwd_cls: (B, 128)   bwd_cls: (B, 128)                 ||
+  ||    - concat -> (B, 256)                                    ||
+  ||                                                            ||
+  ||  Final RMSNorm(256)                                        ||
+  ||                                                            ||
+  ||  Mamba-2 config: dim=128, d_state=16, expand=2,            ||
+  ||                  headdim=32, ngroups=1, d_conv=4,          ||
+  ||                  chunk_size=16  (kernel minimum)           ||
+  ||  Internal SSM dim: 128 * 2 = 256                           ||
+  ||  SSM heads       : 256 / 32 = 8                            ||
+  ||  Autocast        : bfloat16                                ||
+  ================================================================
+                                  |
+                      (B, 256)    v    (2 CLS tokens concatenated)
+         +------------------------------------------------------+
+         |           pool_head  (Dense MLP, SiLU)               |
+         |   Linear(256,128) -> SiLU -> Linear(128,128)         |
+         |   (gradient bottleneck matching ssm_state path)      |
+         +------------------------------------------------------+
+                                  |
+                      (B, 128)    v
+         +------------------------------------------------------+
+         |          output_head  (Dense MLP, SiLU)              |
+         |   Linear(128,128) -> SiLU -> Linear(128, 446)        |
+         |   output_head_init_scale = 0.01                      |
+         +------------------------------------------------------+
+                                  |
+                      (B, 446)    v    = 24 + 420 + 2
+  ================================================================
+  ||        RangeSplitClassificationLoss  (d0 only)             ||
+  ||                                                            ||
+  ||   slice   [0:24]          [24:444]          [444:446]      ||
+  ||             |                 |                 |          ||
+  ||             v                 v                 v          ||
+  ||   +---------------+  +---------------+  +---------------+  ||
+  ||   |  Inner head   |  |  Outer head   |  |  Router       |  ||
+  ||   |  24 bins      |  |  420 bins     |  |  2 logits     |  ||
+  ||   |  +/- 0.030 mm |  |  +/- 2.5 mm   |  |  (inner|outer)|  ||
+  ||   |               |  | (symmetric,   |  |               |  ||
+  ||   |               |  |  210 per side,|  |               |  ||
+  ||   |               |  |  excludes     |  |               |  ||
+  ||   |               |  |  inner core)  |  |               |  ||
+  ||   +---------------+  +---------------+  +---------------+  ||
+  ||                                                            ||
+  ||  Training loss (sum, weight=1.0 each; outer module w=1.0): ||
+  ||    L = w_r * CE(router, is_tail)                           ||
+  ||      + w_i * CE(inner_logits, inner_bin)  [on core tracks] ||
+  ||      + w_o * CE(outer_logits, outer_bin)  [on tail tracks] ||
+  ||    split threshold: |truth d0| >= split_mm (0.030 mm) -> tail
+  ||                                                            ||
+  ||  Inference (predict):                                      ||
+  ||    p_inner = softmax(router)[0]                            ||
+  ||    if p_inner > inner_route_threshold (0.7):               ||
+  ||        d0_hat = softmax(inner) . inner_centers             ||
+  ||    else:                                                   ||
+  ||        d0_hat = softmax(outer) . outer_centers             ||
+  ||    (asymmetric threshold: uncertain -> outer head, so      ||
+  ||     failure = ~30um clip, not crushed-to-0)                ||
+  ================================================================
+                                  |
+                                  v
+            Output: d0 (mm) per-track point estimate
+                    + full bin posteriors for UQ
+
+  ======================== Training setup ========================
+
+  Optimizer        : Lion
+  Weight decay     : 1e-3
+  Schedule         : OneCycle  pct_start=0.10
+                       initial = 1.0e-05
+                       peak    = 5.0e-05
+                       end     = 1.0e-06
+  Precision        : bf16-mixed  (encoder autocast bfloat16)
+  Epochs           : 25          EarlyStop patience=25 on val/total
+  Device           : 1x H100 (trainer.devices=[2])
+  From-scratch     : pretrained_ckpt_path = null
+
+  Tail upsample    : threshold 0.030 mm, weight 19 -> ~50/50 batch mix
+  Data             : /scratch/colliderml/p0_core_pretrain
+
+  ======================== Diagnostic intent =====================
+
+  Single-axis ablation vs rangesplit run 97f8a4a8 (which showed a
+  residual d0=0 cross). Tests whether the cross comes from router
+  bias under natural 95/5 class imbalance rather than from the
+  3-head architecture. If cross lifts here, single-encoder range-split
+  is sufficient and the twin-encoder variant is not needed.

@@ -1,0 +1,143 @@
+
+  SSM-CLS Q7 — FP32 pretrain on p0_core
+  ======================================
+  Config: ssmcls_q7_pretrain.yaml   (+ v2/core_configs/base.yaml)
+  Baseline CLS-pool backbone for the v2 study (10 L, dim=192).
+
+  Input: Raw detector hits (B tracks x N hits x 12 features), N<=20, mean~12-13
+         [x, y, z, r, phi_hit, theta_hit, s,
+          volume_id, layer_id, surface_id, detector, eta_hit]
+
+         +------------------------------------------------------+
+         |            Min-Max Normalization  [0, 1]             |
+         |       (per-feature bounds from base.yaml)            |
+         +------------------------------------------------------+
+                                  |
+                                  v
+         +------------------------------------------------------+
+         |       Fourier Feature Encoding (11 scales, base=2)   |
+         |           12 feats x 11 scales x 2 (sin/cos)         |
+         +------------------------------------------------------+
+                                  |
+                                  v
+         +------------------------------------------------------+
+         |           Input Net  (Dense MLP, SiLU)               |
+         |          Linear(F_ff,192) -> SiLU -> Linear(192,192) |
+         +------------------------------------------------------+
+                                  |
+                     (B, N, 192)  v    (hits sorted by s before encoder)
+         +------------------------------------------------------+
+         |  Prepend fwd-CLS + append bwd-CLS learned tokens     |
+         |  seq -> (B, N+2, 192)                                |
+         +------------------------------------------------------+
+                                  |
+                                  v
+  ================================================================
+  ||  BidirectionalMambaCLSEncoder  (num_layers = 10)           ||
+  ||                                                            ||
+  ||  Per layer: BidirectionalMambaLayer (RMSNorm, dropout=0)   ||
+  ||  +------------------------------------------------------+  ||
+  ||  |                                                      |  ||
+  ||  |  x --> RMSNorm --+--> Mamba2 (fwd scan) ----+        |  ||
+  ||  |  |               |                           |       |  ||
+  ||  |  |               +--> Mamba2 (bwd scan) -+   |       |  ||
+  ||  |  |                    (sequence reversed)|   |       |  ||
+  ||  |  |                                       v   v       |  ||
+  ||  |  |          gate = sigmoid(Linear(norm(x)))          |  ||
+  ||  |  |          out  = gate*fwd + (1-gate)*bwd           |  ||
+  ||  |  |                          |                        |  ||
+  ||  |  +---------- residual skip -+                        |  ||
+  ||  +------------------------------------------------------+  ||
+  ||                         x 10                               ||
+  ||                                                            ||
+  ||  Final BidirectionalMambaCLSFinalLayer                     ||
+  ||    - extracts CLS token from both termini of the           ||
+  ||      GATED + RESIDUALISED output (not raw scan out)        ||
+  ||    - fwd_cls: (B, 192)   bwd_cls: (B, 192)                 ||
+  ||    - concat -> (B, 384)                                    ||
+  ||                                                            ||
+  ||  Final RMSNorm(384)                                        ||
+  ||                                                            ||
+  ||  Mamba-2 config: dim=192, d_state=32, expand=2,            ||
+  ||                  headdim=32, ngroups=1, d_conv=4,          ||
+  ||                  chunk_size=16  (kernel minimum)           ||
+  ||  Internal SSM dim: 192 * 2 = 384                           ||
+  ||  SSM heads       : 384 / 32 = 12                           ||
+  ||  Precision       : Lightning fp32; encoder wrapped in      ||
+  ||                    bf16 autocast (Mamba-2 kernel req't)    ||
+  ================================================================
+                                  |
+                      (B, 384)    v    (2 CLS tokens concatenated)
+         +------------------------------------------------------+
+         |           pool_head  (Dense MLP, SiLU)               |
+         |   Linear(384,192) -> SiLU -> Linear(192,128)         |
+         |   (gradient bottleneck before bf16 encoder backward; ||
+         |    mirrors ssm_state's fwd_head/bwd_head pattern)    |
+         +------------------------------------------------------+
+                                  |
+                      (B, 128)    v
+         +------------------------------------------------------+
+         |          output_head  (Dense MLP, SiLU)              |
+         |   Linear(128,256) -> SiLU -> Linear(256, 30)         |
+         |   output_head_init_scale = 0.01                      |
+         +------------------------------------------------------+
+                                  |
+                       (B, 30)    v
+  ================================================================
+  ||        TrackParameterLoss  (parameter_order below)         ||
+  ||                                                            ||
+  ||   slice   [0:7]  [7:14] [14:16] [16:23] [23:30]            ||
+  ||             |       |      |       |       |               ||
+  ||             v       v      v       v       v               ||
+  ||   +-----+ +-----+ +-----+ +------+ +------+                ||
+  ||   | d0  | | z0  | | phi | |theta | | qop  |                ||
+  ||   |  Q7 | |  Q7 | | circ| | Q7   | |  Q7  |                ||
+  ||   | w=1 | | w=1 | | w=1 | | eta  | | w=5  |                ||
+  ||   |     | |     | |beta | | w=10 | |      |                ||
+  ||   |norm | |norm | |=.01 | |norm  | |norm  |                ||
+  ||   |+-2.5| |+-200| | (2: | |+-3.0 | |+-2.0 | (mm / rad /    ||
+  ||   |  mm | | mm  | |sin, | |(eta) | |1/GeV)|  normalisation)||
+  ||   |     | |     | | cos)| |      | |      |                ||
+  ||   +-----+ +-----+ +-----+ +------+ +------+                ||
+  ||                                                            ||
+  ||  Quantiles (Q7): [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]   ||
+  ||  phi: Huber(sin(pred-true), cos(pred-true)-1), smoothL1    ||
+  ||       beta=0.01 -> decoded via atan2                       ||
+  ||  theta: quantile in eta-space (eta = -ln tan(theta/2))     ||
+  ||  Aggregation: weighted SUM of per-parameter losses         ||
+  ================================================================
+                                  |
+                                  v
+        Output: {d0, z0, phi, theta, q/p} per-track predictions
+                + full 7-quantile uncertainty bands on d0/z0/theta/qop
+
+  ======================== Training setup ========================
+
+  Optimizer        : Lion
+  Weight decay     : 1e-3
+  Schedule         : OneCycle  pct_start=0.10
+                       initial = 1.0e-05
+                       peak    = 5.0e-05
+                       end     = 1.0e-06
+  Precision        : 32-true (bf16 autocast only inside encoder)
+  Gradient clip    : 1.0
+  Epochs           : 50        EarlyStop patience=50 on val/total
+  Device           : 1x H100 (trainer.devices=[0])
+  Resume from ckpt : 3fc8acb5/epoch=015-val_total=0.01108.ckpt
+
+  Data             : /scratch/colliderml/p0_core_pretrain
+                     batch_size 2048, num_workers 16
+                     load_acts=true on val loader -> DM metrics active
+                     train loader hard-coded load_acts=False (free for train)
+
+  ========================== Notes ===============================
+
+  Stability fixes applied (do not regress):
+   * CLS extracted from gated+residualised output (mamba_cls.py)
+     -> same gate + residual path as hit tokens.
+   * pool_head Dense bottleneck (Linear(2*dim, state_head_output_dim))
+     -> prevents raw encoder-output gradients entering bf16 backward
+     at ~7x higher magnitude.
+   * output_head_init_scale = 0.01 keeps initial predictions near 0.
+   * Encoder dropout = 0.0 (matches the working ssm_q7 config).
+   * GradientSpikeSkip removed (root-cause fix in place).

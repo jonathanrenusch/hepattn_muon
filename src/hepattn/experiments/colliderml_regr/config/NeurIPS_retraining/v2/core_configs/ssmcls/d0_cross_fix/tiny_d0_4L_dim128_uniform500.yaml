@@ -1,0 +1,140 @@
+# =============================================================================
+# Tiny d0 classifier trained on a d0-UNIFORM-DOWNSAMPLED p200 dataset.
+# 500 linear bins over the full +/-2.5 mm range, pure classification.
+# =============================================================================
+# Premise: the d0 cross collapses because 95% of tracks live in 1% of the
+# physical range, so any loss the classifier writes spends 95% of its
+# gradient on the mode.  The range-split / upsample variants try to fix
+# this on the loss side.  This config attacks it on the DATA side: we
+# resample the training distribution itself to be ~uniform in d0, so
+# every bin the classifier has to learn gets comparable gradient signal.
+#
+# Data:  /scratch/colliderml/p200_core_finetune_uniform_d0
+#        (built by scripts/downsample_uniform_d0.py — ~12M tracks at ~5%
+#        of the natural 240M, ~24k tracks per bin out of 500 bins across
+#        +/-2.5 mm.)
+#
+# Model: single-encoder tiny SSMCLS, 4L / dim=128 / d_state=16.  No
+#        separate heads, no router, no spline, no offset.  Just 500
+#        linear classification bins from -2.5 mm to +2.5 mm.
+#
+# Why this should work even on 5% of the data:
+#   - The natural tail-end bins (|d0| > 1 mm) each have <24k natural
+#     tracks.  The uniform downsample KEEPS ALL OF THEM (accept_prob=1
+#     in under-populated bins).  Those tracks were there in the 95%
+#     the other experiments train on; this experiment just stops the
+#     core from burying them.
+#   - The inner bins (|d0| < 30 um) each have ~1M natural tracks; we
+#     keep ~24k of them, which is plenty for a 500-bin classifier to
+#     learn the sharp core peak.
+#   - 12M tracks across 500 bins ~ 24k tracks/bin is orders of magnitude
+#     more than needed to converge a single-bin classifier.
+# =============================================================================
+
+trainer:
+  devices: [0]
+  max_epochs: 25
+  precision: bf16-mixed
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-tinyD0-4L-dim128-uniform500-fromscratch
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 25
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 25
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 25
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 25
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 128
+      input_net_hidden_layers: [128]
+      state_head_output_dim: 128
+      state_head_hidden_layers: [128]
+      output_head_hidden_layers: [128]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: bfloat16
+      separate_d0_head: false
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 4
+          dim: 128
+          d_state: 16
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0]
+          config:
+            d0:
+              type: binned_dfl_quantile
+              # 500 LINEAR bins from -2.5 mm to +2.5 mm.  No spline, no
+              # soft target — classifier softmax naturally smears across
+              # adjacent bins at the detector-resolution scale.
+              n_bins: 500
+              binning: linear
+              range_min: -2.5
+              range_max: 2.5
+              n_overflow: 0
+              # quantiles list is required by the loss constructor but the
+              # Q=7 offset rows get no gradient (coupling: none) and are
+              # ignored at inference (classification_only_predict: true).
+              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+              coupling: none
+              classification_only_predict: true
+              weight: 1.0
+              # The downsampled dataset is already ~uniform in d0, so the
+              # target-magnitude tail upweighting is unnecessary.  Leave at 0.
+              tail_weight_tau: 0.0
+              offset_memory_efficient: true
+
+  pretrained_ckpt_path: null
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p200_core_finetune_uniform_d0
+  batch_size: 30000
+  num_workers: 16
+  # No tail upsampling — the dataset is already balanced.

@@ -1,21 +1,41 @@
 # =============================================================================
-# Run C — 20L / d_state=64 SSMCLS, FROM SCRATCH, separate d0 branch.
+# Sibling of run1_widepool_warmstart_sepd0_rangesplit_upsample19_fp32.yaml.
 # =============================================================================
-# Depth-first scale-up (CLAUDE.md "Scaling" — prefer `num_layers` primary,
-# `d_state` secondary).  20 layers × d_state 64 is the first point on the
-# scaling ladder that stresses both axes simultaneously.  From-scratch so
-# the encoder can learn features aligned with the separate-branch geometry
-# from step 0, rather than adapting a 10L basin.  Full fp32 backbone.
+# Two single-axis additions on top of the parent config — everything else is
+# byte-identical:
+#
+#   1. encoder.residual_depth_init=true — rescale every Mamba2 out_proj.weight
+#      by 1/sqrt(2*num_layers) at init so accumulated residual variance does
+#      not grow with depth. CLAUDE.md Open Issue #1 prescription, addresses
+#      the depth-driven late-training output_head grad-spike pattern observed
+#      in run5 (and avoided cleanly in run1 baseline).
+#
+#   2. GradientLoggerCallback: log_output_head_per_dim=true with the slice
+#      mapping for the SEPARATE-D0 main output_head (4 params, 23 dims —
+#      d0 lives on a separate branch and is not in this readout):
+#          z0     [0, 7]
+#          phi    [7, 9]
+#          theta  [9, 16]
+#          qop    [16, 23]
+#      Lets us attribute any output_head grad spike to the responsible
+#      parameter — useful here because the d0 branch's gradient still
+#      reaches the encoder (at 0.0005 attenuation), and isolating which
+#      of the 4 continuous heads carries the late-training spike is the
+#      first step in deciding whether d0_grad_scale needs further tuning.
+#
+# d0_grad_scale, separate_d0_head, range-split d0 loss, fp32 encoder,
+# disable_main_pool_head, warm-start path, LR schedule, tail upsampling
+# are all unchanged from the parent.
 # =============================================================================
 
 trainer:
-  devices: [2]
+  devices: [0]
   max_epochs: 50
   precision: 32-true
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-20L-ds64-sepD0DFL-scratch-FP32
+      name: TRK-v2-SSMCLS-scaling-run1-widepool-warmstart-sepD0rangesplit-upsample19-fp32-residinit
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -24,10 +44,15 @@ trainer:
       init_args:
         log_every_n_steps: 50
         log_parameter_stats: false
-    - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
-      init_args:
-        probe_every_n_steps: 500
-        include_pool_head: true
+        log_layer_stats: true
+        log_output_head_per_dim: true
+        # NB: d0 is on the separate branch — main output_head produces only
+        # the 23 outputs for [z0, phi, theta, qop].
+        output_head_param_groups:
+          z0:    [0, 7]
+          phi:   [7, 9]
+          theta: [9, 16]
+          qop:   [16, 23]
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
         log_every_n_steps: 50
@@ -59,16 +84,14 @@ model:
       input_net_hidden_layers: [192]
       output_head_hidden_layers: [256]
       output_head_init_scale: 0.01
-      # The critical line: "float32" short-circuits torch.amp.autocast in
-      # TrackParameterRegressor.forward (see model.py L413-419), so the
-      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
-      # the selective-scan, and the post-SSM RMSNorm.
       encoder_autocast_dtype: float32
       separate_d0_head: true
+      disable_main_pool_head: true
+      d0_grad_scale: 0.0005
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 20
+          num_layers: 15
           dim: 192
           d_state: 64
           d_conv: 4
@@ -78,35 +101,37 @@ model:
           chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
+          residual_depth_init: true
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: binned_dfl_quantile
-              n_bins: 436
-              binning: cdf
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0_piecewise_24core_12um.yaml
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-              coupling: none
-              classification_only_predict: true
-              weight: 1.0
-              tail_weight_tau: 0.03
-              offset_memory_efficient: true
+              type: range_split_classification
+              k_inner: 24
+              k_outer: 420
+              inner_half_mm: 0.030
+              outer_half_mm: 2.5
+              split_mm: 0.030
+              weight_router: 1.0
+              weight_inner: 1.0
+              weight_outer: 1.0
+              weight: 0.1
+              inner_route_threshold: 0.8
             z0:
               type: quantile
-              weight: 10.0
+              weight: 1.0
               norm_min: -200.0
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
               type: circular
-              weight: 1.0
+              weight: 0.1
               beta: 0.01
             theta:
               type: quantile_eta
-              weight: 5.0
+              weight: 1.0
               norm_min: -3.0
               norm_max: 3.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
@@ -117,10 +142,12 @@ model:
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
 
+  pretrained_ckpt_strict: false
+
   optimizer: Lion
   lrs_config:
-    initial: 1.0e-05
-    max: 5.0e-05
+    initial: 5.0e-06
+    max: 4.0e-05
     end: 1.0e-06
     pct_start: 0.10
     weight_decay: 1.0e-03
@@ -130,3 +157,5 @@ data:
   preprocessed_dir: /scratch/colliderml/p0_core_pretrain
   batch_size: 2048
   num_workers: 16
+  tail_upsample_threshold_mm: 0.030
+  tail_upsample_weight: 19.0

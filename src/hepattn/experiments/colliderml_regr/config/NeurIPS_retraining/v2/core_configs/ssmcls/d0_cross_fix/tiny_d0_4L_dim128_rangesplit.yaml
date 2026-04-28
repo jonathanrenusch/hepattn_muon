@@ -1,0 +1,125 @@
+# =============================================================================
+# Tiny d0 standalone — 3-head range-split classifier ("kill the cross"):
+#   Head 1: 24-bin linear classifier over +/-30 um core
+#   Head 2: 420-bin linear classifier over +/-2.5 mm tail (210 per side)
+#   Head 3: binary router (0 = inner, 1 = outer)
+# =============================================================================
+# Hypothesis: the d0 cross is a *single-head* failure mode.  One classifier
+# asked to emit posterior mass across a distribution with 95% mass in
+# +/-30 um and 5% in +/-2.5 mm gets pulled toward the mode bin for tail
+# tracks (softmax entropy concentrates where truth density is highest).
+# Splitting the problem into two classifiers with non-overlapping physical
+# ranges + a router removes this incentive: the inner head NEVER sees tail
+# tracks, the outer head NEVER sees core tracks, and the router is an
+# isolated binary problem with a clean +/-30 um boundary.
+#
+# Loss (new `range_split_classification` type, losses.py):
+#   - router CE on every track (binary is_tail label from |target|>30um)
+#   - inner CE on core tracks only (tail masked to 0 weight)
+#   - outer CE on tail tracks only (core masked to 0 weight)
+# At inference: argmax router -> use that head's bin-expectation.
+#
+# Encoder is identical to the other tiny configs (4L, dim=128, d_state=16,
+# same Fourier input encoding — so merging with the 5-head regressor at
+# inference remains straightforward).  Large batch (30k) to bring in ~1500
+# tail tracks per batch at 5% tail fraction.
+# =============================================================================
+
+trainer:
+  devices: [3]
+  max_epochs: 25
+  precision: bf16-mixed
+  logger:
+    class_path: hepattn.utils.loggers.MyCometLogger
+    init_args:
+      name: TRK-v2-SSMCLS-tinyD0-4L-dim128-rangesplit-fromscratch
+      project_name: colliderml-track-regression
+      offline_directory: logs/comet_offline
+  callbacks:
+    - class_path: hepattn.callbacks.InferenceTimer
+    - class_path: hepattn.callbacks.GradientLoggerCallback
+      init_args:
+        log_every_n_steps: 25
+        log_parameter_stats: false
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
+      init_args:
+        log_every_n_steps: 25
+    - class_path: hepattn.callbacks.SaveConfig
+    - class_path: hepattn.callbacks.Checkpoint
+      init_args:
+        monitor: val/total
+        mode: min
+        verbose: true
+    - class_path: hepattn.experiments.colliderml_regr.callbacks.RegressionPredictionWriter
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 25
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/total
+        patience: 25
+        min_delta: 0.0
+        mode: min
+        verbose: true
+        check_on_train_epoch_end: false
+
+model:
+  model:
+    init_args:
+      pool: ssm_cls
+      dim: 128
+      input_net_hidden_layers: [128]
+      state_head_output_dim: 128
+      state_head_hidden_layers: [128]
+      output_head_hidden_layers: [128]
+      output_head_init_scale: 0.01
+      encoder_autocast_dtype: bfloat16
+      separate_d0_head: false
+      encoder:
+        class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
+        init_args:
+          num_layers: 4
+          dim: 128
+          d_state: 16
+          d_conv: 4
+          expand: 2
+          headdim: 32
+          ngroups: 1
+          chunk_size: 16
+          norm: RMSNorm
+          dropout: 0.0
+      loss_module:
+        class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
+        init_args:
+          parameter_order: [d0]
+          config:
+            d0:
+              type: range_split_classification
+              k_inner: 24
+              k_outer: 420
+              inner_half_mm: 0.030
+              outer_half_mm: 2.5
+              # split_mm defaults to inner_half_mm; overriding explicitly
+              # here so the boundary between inner and outer is documented.
+              split_mm: 0.030
+              weight_router: 1.0
+              weight_inner: 1.0
+              weight_outer: 1.0
+              weight: 1.0
+
+  pretrained_ckpt_path: null
+
+  optimizer: Lion
+  lrs_config:
+    initial: 1.0e-05
+    max: 5.0e-05
+    end: 1.0e-06
+    pct_start: 0.10
+    weight_decay: 1.0e-03
+    skip_scheduler: false
+
+data:
+  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
+  batch_size: 30000
+  num_workers: 16

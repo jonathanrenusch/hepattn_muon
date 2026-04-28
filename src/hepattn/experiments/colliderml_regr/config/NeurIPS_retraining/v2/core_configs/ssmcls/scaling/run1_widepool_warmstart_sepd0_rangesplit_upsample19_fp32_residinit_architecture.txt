@@ -1,0 +1,174 @@
+
+  SSM-CLS 15L / dim=192 / d_state=64 + separate-d0 range-split + fp32
+  ====================================================================
+  Config: run1_widepool_warmstart_sepd0_rangesplit_upsample19_fp32_residinit.yaml
+  Sibling architecture of run1_widepool_warmstart_sepd0_rangesplit_upsample19_fp32.yaml
+  with two additions: encoder.residual_depth_init=true, and per-output-dim
+  gradient logging on the 4-param main output_head.
+
+  DataLoader (p0_core_pretrain, BS=2048):
+    WeightedRandomSampler — weight=19 for |truth d0|>30 um, weight=1 for core.
+    Effective batch tail fraction ~50% vs natural ~5%.
+
+  Input: Raw detector hits  (B, N, 12)   N<=20, mean ~12-13
+         [x, y, z, r, phi_hit, theta_hit, s,
+          volume_id, layer_id, surface_id, detector, eta_hit]
+
+         +-----------------------------------------------+
+         |        Min-Max Normalization  [0, 1]          |
+         +-----------------------------------------------+
+                              |
+                              v
+         +-----------------------------------------------+
+         |    Fourier Feature Encoding (11 scales)       |
+         |        12 feats x 11 scales x 2 (sin/cos)     |
+         +-----------------------------------------------+
+                              |
+                              v
+         +-----------------------------------------------+
+         |        Input Net  (Dense MLP, SiLU)           |
+         |   Linear(F_ff,192) -> SiLU -> Linear(192,192) |
+         +-----------------------------------------------+
+                              |
+                  (B, N, 192) v
+         +-----------------------------------------------+
+         |   Prepend cls_bwd  +  append cls_fwd          |
+         |   seq -> (B, N+2, 192)                        |
+         +-----------------------------------------------+
+                              |
+                              v
+  =========================================================================
+  ||  BidirectionalMambaCLSEncoder  (num_layers = 15)                    ||
+  ||                                                                     ||
+  ||  Per layer: BidirectionalMambaLayer (RMSNorm, dropout=0)            ||
+  ||    x --> RMSNorm --+--> Mamba2 (fwd scan) --+                       ||
+  ||                    +--> Mamba2 (bwd scan) --+                       ||
+  ||                                gate=sigmoid(Linear(norm(x)))        ||
+  ||                                out  = gate*fwd + (1-gate)*bwd       ||
+  ||                                                                     ||
+  ||  Final BidirectionalMambaCLSFinalLayer                              ||
+  ||    extracts CLS tokens from gated+residualised output               ||
+  ||                                                                     ||
+  ||  Final RMSNorm(192)                                                 ||
+  ||                                                                     ||
+  ||  Mamba-2 config: dim=192, d_state=64, expand=2,                     ||
+  ||                  headdim=32, ngroups=1, d_conv=4,                   ||
+  ||                  chunk_size=16                                      ||
+  ||  Internal SSM dim: 192 * 2 = 384                                    ||
+  ||  SSM heads       : 384 / 32 = 12                                    ||
+  ||                                                                     ||
+  ||  residual_depth_init = true                                         ||
+  ||    out_proj.weight scaled by 1/sqrt(2*15) ~= 0.183 at init,         ||
+  ||    keeps activation variance ~constant across depth.                ||
+  ||                                                                     ||
+  ||  encoder_autocast_dtype = float32   (no bf16 in selective scan)     ||
+  =========================================================================
+                              |
+                  (B, 384)    v   (cls_fwd, cls_bwd) concat
+                              |
+        +=====================+======================+
+        |                                            |
+        v   FORWARD PATH IDENTITY                    |   FORWARD PATH IDENTITY
+        |                                            v
+        |                              +---------------------------+
+        |                              |    _GradScale (autograd)  |
+        |                              |  fwd:  identity           |
+        |                              |  bwd:  multiply by 0.0005 |
+        |                              |  -> attenuates d0 branch's|
+        |                              |     grad on shared encoder|
+        |                              +---------------------------+
+        |                                            |
+        v                                            v
+  +-----------------+                      +-----------------+
+  |   pool_head     |                      | d0_pool_head    |
+  |  = Identity     |                      |  = Identity     |
+  |  (B, 384)       |                      |  (B, 384)       |
+  |  disable_main   |                      |  separate_d0    |
+  |  _pool_head=T   |                      |  _head=T        |
+  +-----------------+                      +-----------------+
+        |                                            |
+        v   (B, 384)                                 v   (B, 384)
+  +------------------------+              +-----------------------------+
+  | output_head            |              | d0_output_head              |
+  | (Dense MLP, SiLU)      |              | (Dense MLP, SiLU)           |
+  | Linear(384, 256)       |              | Linear(384, 256)            |
+  |  -> SiLU               |              |  -> SiLU                    |
+  | Linear(256,  23)       |              | Linear(256, 446)            |
+  | output_head_init_scale |              |   = k_inner + k_outer + 2   |
+  | = 0.01                 |              |   = 24 + 420 + 2            |
+  +------------------------+              +-----------------------------+
+        |                                            |
+        v   (B, 23)                                  v   (B, 446)
+  ===========================               ===================================
+  || 4-param Q7 main loss  ||               || RangeSplit (d0 only)          ||
+  ||                       ||               ||                               ||
+  ||  z0    [0:7]   Q7     ||               ||  inner   [0  :24 ]  24 bins   ||
+  ||         w=1.0         ||               ||                  +-30 um core ||
+  ||  phi   [7:9]   circ   ||               ||  outer   [24 :444]  420 bins  ||
+  ||         w=0.1         ||               ||                  +-2.5 mm     ||
+  ||  theta [9:16]  Q7-eta ||               ||  router  [444:446]  2 logits  ||
+  ||         w=1.0         ||               ||                               ||
+  ||  qop   [16:23] Q7     ||               ||  weights router/in/out = 1.0  ||
+  ||         w=1.0         ||               ||  module weight     = 0.1      ||
+  ||                       ||               ||  inner_route_thr   = 0.8      ||
+  ||  Aggregation: SUM     ||               ||  (asymmetric: uncertain ->    ||
+  ||                       ||               ||   outer head, ~30um clip      ||
+  ||                       ||               ||   instead of crushed-to-0)    ||
+  ===========================               ===================================
+        |                                            |
+        v                                            v
+        +=============== val/total =================+
+
+  ==================== Training setup ====================
+
+  Optimizer        : Lion
+  Weight decay     : 1e-3
+  Schedule         : OneCycle  pct_start=0.10
+                       initial = 5.0e-06
+                       peak    = 4.0e-05    (1/sqrt(15/10) * 5e-5,
+                                             by-the-book at 15 L)
+                       end     = 1.0e-06
+  Precision        : Lightning 32-true; encoder fp32 (no bf16 autocast)
+  Gradient clip    : 1.0  (inherited from base.yaml)
+  Epochs           : 50    EarlyStop patience=50 on val/total
+  Device           : 1x H100  (trainer.devices=[0])
+  Warm start       : pretrained_ckpt_strict=false
+                     pretrained_ckpt_path: <to be set>
+                       source: scaling-run2 15L d_state=64 noD0
+                       (3ee6ba3f, val/total=0.00766 at ep20)
+                     skipped on load: main pool_head (Linear in source ->
+                       Identity here), output_head (5*7=30-d in source ->
+                       23-d here), d0_pool_head + d0_output_head
+                       (freshly initialised — not in source).
+
+  ==================== Logging ====================
+
+  GradientLoggerCallback  log_every_n_steps=50
+    grad/global_norm,  grad/avg_abs,  grad/max_abs
+    grad/<group>/{norm,avg_abs,max_abs}  for input_net, pool_head,
+      d0_pool_head, output_head, d0_output_head, encoder_layer_<i>,
+      encoder_other, other.
+    grad/output_head/dim_<i>/max_abs        per row (23 series)
+    grad/output_head/{z0,phi,theta,qop}/{max_abs, norm}   per parameter
+
+  ==================== What this config tests ====================
+
+  * separate-d0 architecture (DFL/CE-style branch off the shared encoder)
+    + d0_grad_scale=0.0005 (effectively isolates d0 from shared trunk
+    gradient updates) + range-split classifier
+        ----> the validated d0-cross fix (run da4a7697 was tiny version)
+    delivered at scaled capacity (15 L / d_state=64) with proper
+    fp32 + residual-depth init regularization.
+
+  * pool_head removed entirely (Identity) — both branches consume the
+    raw (B, 384) CLS concat, no learned squeeze, no impedance match
+    (not needed under fp32).
+
+  * Loss balance: d0 and phi de-weighted to 0.1 (already strong heads);
+    z0/theta/qop equal-weighted at 1.0 (lets z0/theta/qop steer trunk
+    capacity toward where the core-resolution gap still lives).
+
+  * Per-parameter grad logging tells us whether late-training
+    output_head spikes are concentrated on a single physics parameter
+    -> first-step diagnostic for whether d0_grad_scale=0.0005 needs
+    tuning (still too leaky?  too aggressive?).

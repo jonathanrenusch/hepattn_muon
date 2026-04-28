@@ -47,6 +47,8 @@ class GradientLoggerCallback(Callback):
         log_every_n_steps: int = 50,
         log_parameter_stats: bool = False,
         log_layer_stats: bool = True,
+        log_output_head_per_dim: bool = False,
+        output_head_param_groups: dict[str, list[int]] | None = None,
     ):
         """Log gradient statistics during training.
 
@@ -72,16 +74,95 @@ class GradientLoggerCallback(Callback):
             log_layer_stats: aggregate grads per submodule group as described
                 above. On by default so deeper networks come with per-layer
                 visibility out of the box.
+            log_output_head_per_dim: also log per-row gradient ``max_abs`` of
+                the output_head's final readout Linear weight (one series
+                per output dim). The readout is identified as the 2-D weight
+                in the ``output_head`` namespace with the smallest first
+                dim (= num_outputs). Off by default; useful for tracing
+                which output dim is responsible for late-training gradient
+                spikes.
+            output_head_param_groups: optional mapping ``{label: [start,
+                end]}`` (half-open row index slices over the readout) used
+                to aggregate per-row stats into per-parameter series logged
+                under ``grad/output_head/<label>/{max_abs,norm}``. Only
+                consulted when ``log_output_head_per_dim`` is True.
         """
         self.log_every_n_steps = log_every_n_steps
         self.log_parameter_stats = log_parameter_stats
         self.log_layer_stats = log_layer_stats
+        self.log_output_head_per_dim = log_output_head_per_dim
+        # Optional mapping {param_name: [start, end]} (half-open) over the
+        # output_head readout's row index. Logged as
+        # ``grad/output_head/<param>/{max_abs,norm}`` aggregated over rows
+        # in the slice.
+        self.output_head_param_groups = output_head_param_groups
         self._sync_dist = False
 
     def setup(self, trainer: Trainer, module: LightningModule, stage: str) -> None:
         if trainer.fast_dev_run or stage != "fit":
             return
         self._sync_dist = len(trainer.device_ids) > 1
+
+    def _find_output_head_readout(self, pl_module):
+        """Locate the output_head's final readout Linear weight (the one with
+        the smallest first-dim 2D weight under the output_head namespace).
+        Returns (param, readout_first_dim) or (None, None) if not found.
+        """
+        readout = None
+        for name, param in pl_module.named_parameters():
+            if param.grad is None:
+                continue
+            # Match top-level output_head (not d0_output_head, which has its
+            # own grouping).
+            if not (re.match(r"^(?:model\.)?output_head\.", name)):
+                continue
+            if param.dim() != 2:
+                continue
+            # The final readout has the *smallest* first dim
+            # (num_outputs, e.g. 30 for Q7), the hidden Linears have
+            # first-dim = hidden_size which is larger.
+            if readout is None or param.shape[0] < readout.shape[0]:
+                readout = param
+        return readout
+
+    def _log_output_head_per_dim(self, pl_module):
+        readout = self._find_output_head_readout(pl_module)
+        if readout is None or readout.grad is None:
+            return
+        grad_abs = readout.grad.detach().abs()
+        per_row_max = grad_abs.amax(dim=1)  # (num_outputs,)
+        per_row_norm = readout.grad.detach().norm(2, dim=1)  # (num_outputs,)
+        n_out = per_row_max.numel()
+
+        # Always log per-row max_abs (one series per output dim).
+        for i in range(n_out):
+            pl_module.log(
+                f"grad/output_head/dim_{i:02d}/max_abs", per_row_max[i].item(),
+                on_step=True, on_epoch=False, logger=True,
+                sync_dist=self._sync_dist,
+            )
+
+        # If a parameter-group mapping is supplied, also aggregate over each
+        # group (max of max_abs, sum of norm-squared as group norm).
+        if self.output_head_param_groups is not None:
+            for label, span in self.output_head_param_groups.items():
+                if len(span) != 2:
+                    continue
+                start, end = int(span[0]), int(span[1])
+                if start < 0 or end > n_out or start >= end:
+                    continue
+                rows_max = per_row_max[start:end].max().item()
+                rows_norm_sq = (per_row_norm[start:end] ** 2).sum().item()
+                pl_module.log(
+                    f"grad/output_head/{label}/max_abs", rows_max,
+                    on_step=True, on_epoch=False, logger=True,
+                    sync_dist=self._sync_dist,
+                )
+                pl_module.log(
+                    f"grad/output_head/{label}/norm", math.sqrt(rows_norm_sq),
+                    on_step=True, on_epoch=False, logger=True,
+                    sync_dist=self._sync_dist,
+                )
 
     def on_after_backward(self, trainer, pl_module):
         if self.log_every_n_steps <= 0:
@@ -155,6 +236,9 @@ class GradientLoggerCallback(Callback):
             on_step=True, on_epoch=False, logger=True,
             sync_dist=self._sync_dist,
         )
+
+        if self.log_output_head_per_dim:
+            self._log_output_head_per_dim(pl_module)
 
         if not self.log_layer_stats:
             return

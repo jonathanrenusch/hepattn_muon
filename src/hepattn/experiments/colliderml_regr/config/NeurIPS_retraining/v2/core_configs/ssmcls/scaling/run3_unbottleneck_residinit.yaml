@@ -1,33 +1,30 @@
 # =============================================================================
-# Run C — 20L / d_state=64 SSMCLS, FROM SCRATCH, separate d0 branch.
+# Scaling sweep — Run 3 unbottlenecked + residual-depth init.
 # =============================================================================
-# Depth-first scale-up (CLAUDE.md "Scaling" — prefer `num_layers` primary,
-# `d_state` secondary).  20 layers × d_state 64 is the first point on the
-# scaling ladder that stresses both axes simultaneously.  From-scratch so
-# the encoder can learn features aligned with the separate-branch geometry
-# from step 0, rather than adapting a 10L basin.  Full fp32 backbone.
+# Architectural sibling of run3_15L_dstate64_allQuant.yaml
+# (15 L / dim=192 / d_state=64). See run1_unbottleneck_residinit.yaml header
+# for the full motivation; deltas vs that file are encoder size only
+# (15 L, d_state=64).
 # =============================================================================
-
 trainer:
-  devices: [2]
-  max_epochs: 50
-  precision: 32-true
+  devices: [0]
   logger:
-    class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-20L-ds64-sepD0DFL-scratch-FP32
-      project_name: colliderml-track-regression
-      offline_directory: logs/comet_offline
+      name: TRK-v2-SSMCLS-scaling-run3-unbottleneck-residinit
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
     - class_path: hepattn.callbacks.GradientLoggerCallback
       init_args:
         log_every_n_steps: 50
         log_parameter_stats: false
-    - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
-      init_args:
-        probe_every_n_steps: 500
-        include_pool_head: true
+        log_layer_stats: true
+        log_output_head_per_dim: true
+        output_head_param_groups:
+          d0: [0, 7]
+          z0: [7, 14]
+          phi: [14, 16]
+          theta: [16, 23]
+          qop: [23, 30]
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
         log_every_n_steps: 50
@@ -54,21 +51,13 @@ trainer:
 model:
   model:
     init_args:
-      pool: ssm_cls
-      dim: 192
-      input_net_hidden_layers: [192]
-      output_head_hidden_layers: [256]
-      output_head_init_scale: 0.01
-      # The critical line: "float32" short-circuits torch.amp.autocast in
-      # TrackParameterRegressor.forward (see model.py L413-419), so the
-      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
-      # the selective-scan, and the post-SSM RMSNorm.
-      encoder_autocast_dtype: float32
-      separate_d0_head: true
+      state_head_output_dim: 384
+      state_head_hidden_layers: 0
+      state_head_dropout: 0.0
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 20
+          num_layers: 15
           dim: 192
           d_state: 64
           d_conv: 4
@@ -78,35 +67,31 @@ model:
           chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
+          residual_depth_init: true
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
           parameter_order: [d0, z0, phi, theta, qop]
           config:
             d0:
-              type: binned_dfl_quantile
-              n_bins: 436
-              binning: cdf
-              spline_config: config/NeurIPS_retraining/v2/core_configs/splines/spline_d0_piecewise_24core_12um.yaml
+              type: quantile
+              weight: 0.1
+              norm_min: -2.5
+              norm_max: 2.5
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-              coupling: none
-              classification_only_predict: true
-              weight: 1.0
-              tail_weight_tau: 0.03
-              offset_memory_efficient: true
             z0:
               type: quantile
-              weight: 10.0
+              weight: 1.0
               norm_min: -200.0
               norm_max: 200.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
             phi:
               type: circular
-              weight: 1.0
+              weight: 0.1
               beta: 0.01
             theta:
               type: quantile_eta
-              weight: 5.0
+              weight: 1.0
               norm_min: -3.0
               norm_max: 3.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
@@ -116,17 +101,14 @@ model:
               norm_min: -2.0
               norm_max: 2.0
               quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-
-  optimizer: Lion
+  # Peak LR scaled from the run1 baseline (5.0e-5 at 10 L) by
+  # 1/sqrt(15/10) = 0.816 -> 4.08e-5, rounded to 4.0e-5. Paired with the
+  # residual-depth init rescaling so the per-step update magnitude is
+  # comparable to run1 across the residual stack.
   lrs_config:
     initial: 1.0e-05
-    max: 5.0e-05
+    max: 4.0e-05
     end: 1.0e-06
     pct_start: 0.10
     weight_decay: 1.0e-03
     skip_scheduler: false
-
-data:
-  preprocessed_dir: /scratch/colliderml/p0_core_pretrain
-  batch_size: 2048
-  num_workers: 16

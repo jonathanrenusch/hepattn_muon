@@ -1,36 +1,45 @@
 # =============================================================================
-# Run C — 20L / d_state=64 SSMCLS, FROM SCRATCH, separate d0 branch.
+# Tiny d0-only classifier (pure classification, no offset)
 # =============================================================================
-# Depth-first scale-up (CLAUDE.md "Scaling" — prefer `num_layers` primary,
-# `d_state` secondary).  20 layers × d_state 64 is the first point on the
-# scaling ladder that stresses both axes simultaneously.  From-scratch so
-# the encoder can learn features aligned with the separate-branch geometry
-# from step 0, rather than adapting a 10L basin.  Full fp32 backbone.
+# Dedicated ~1M-param model that trains ONLY on d0 (single head).  Same
+# Fourier input encoding as the big regressor (inherited from base.yaml)
+# so merging with a separately-trained 5-head model at inference time is
+# straightforward — identical hit-feature normalisation and embedding.
+# Rationale (2026-04-23, CLAUDE.md Open Issue #3): the DFL d0 gradient is
+# ~100x the magnitude of the continuous regression heads', and scaling the
+# shared trunk from 4M→15M made the ratio worse (24x→150x).  A dedicated
+# small d0-only encoder pays the full DFL gradient budget into ~0.7M
+# parameters that only exist for this task — no conflict to resolve.
+#
+# Architecture: ssm_cls pool, 4L Mamba-2, dim=128, d_state=16.
+# Loss: binned_dfl_quantile with coupling=none (no offset training) +
+#       classification_only_predict=true (pure cls at inference).
+# Binning: 436 bins via spline_d0_piecewise_24core_12um (the same spline
+#          the big runs use — user asked for "16 in center" but we need a
+#          new spline file to get exactly that; 24/12um is the closest
+#          existing variant.  TODO: regenerate spline with 16 core bins if
+#          wanted.)
 # =============================================================================
 
 trainer:
   devices: [2]
-  max_epochs: 50
-  precision: 32-true
+  max_epochs: 25
+  precision: bf16-mixed
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-20L-ds64-sepD0DFL-scratch-FP32
+      name: TRK-v2-SSMCLS-tinyD0-4L-dim128-cls-fromscratch
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
     - class_path: hepattn.callbacks.InferenceTimer
     - class_path: hepattn.callbacks.GradientLoggerCallback
       init_args:
-        log_every_n_steps: 50
+        log_every_n_steps: 25
         log_parameter_stats: false
-    - class_path: hepattn.experiments.colliderml_regr.per_head_grad_logger.PerHeadTrunkGradLogger
-      init_args:
-        probe_every_n_steps: 500
-        include_pool_head: true
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
-        log_every_n_steps: 50
+        log_every_n_steps: 25
     - class_path: hepattn.callbacks.SaveConfig
     - class_path: hepattn.callbacks.Checkpoint
       init_args:
@@ -41,11 +50,11 @@ trainer:
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
-        refresh_rate: 50
+        refresh_rate: 25
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/total
-        patience: 50
+        patience: 25
         min_delta: 0.0
         mode: min
         verbose: true
@@ -55,22 +64,22 @@ model:
   model:
     init_args:
       pool: ssm_cls
-      dim: 192
-      input_net_hidden_layers: [192]
-      output_head_hidden_layers: [256]
+      dim: 128
+      input_net_hidden_layers: [128]
+      # Thin pool_head to not blow the parameter budget; single head means
+      # no separate_d0_head needed — d0 IS the head.
+      state_head_output_dim: 128
+      state_head_hidden_layers: [128]
+      output_head_hidden_layers: [128]
       output_head_init_scale: 0.01
-      # The critical line: "float32" short-circuits torch.amp.autocast in
-      # TrackParameterRegressor.forward (see model.py L413-419), so the
-      # encoder and every op inside it stays in fp32 — A_log, dt_bias, D,
-      # the selective-scan, and the post-SSM RMSNorm.
-      encoder_autocast_dtype: float32
-      separate_d0_head: true
+      encoder_autocast_dtype: bfloat16
+      separate_d0_head: false
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 20
-          dim: 192
-          d_state: 64
+          num_layers: 4
+          dim: 128
+          d_state: 16
           d_conv: 4
           expand: 2
           headdim: 32
@@ -81,7 +90,9 @@ model:
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:
-          parameter_order: [d0, z0, phi, theta, qop]
+          # Single-param training.  RegressionPredictionWriter was patched
+          # to skip missing params so this works cleanly.
+          parameter_order: [d0]
           config:
             d0:
               type: binned_dfl_quantile
@@ -94,28 +105,9 @@ model:
               weight: 1.0
               tail_weight_tau: 0.03
               offset_memory_efficient: true
-            z0:
-              type: quantile
-              weight: 10.0
-              norm_min: -200.0
-              norm_max: 200.0
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-            phi:
-              type: circular
-              weight: 1.0
-              beta: 0.01
-            theta:
-              type: quantile_eta
-              weight: 5.0
-              norm_min: -3.0
-              norm_max: 3.0
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-            qop:
-              type: quantile
-              weight: 1.0
-              norm_min: -2.0
-              norm_max: 2.0
-              quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+
+  # From-scratch — no warm-restart.  This is a structurally different model.
+  pretrained_ckpt_path: null
 
   optimizer: Lion
   lrs_config:
@@ -128,5 +120,5 @@ model:
 
 data:
   preprocessed_dir: /scratch/colliderml/p0_core_pretrain
-  batch_size: 2048
+  batch_size: 30000  # ramped from 4096 — tail tracks scale linearly with batch
   num_workers: 16

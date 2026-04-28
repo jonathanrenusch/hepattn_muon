@@ -73,6 +73,24 @@ from hepattn.experiments.colliderml_regr.muon import MuonHybrid, split_params_fo
 from hepattn.experiments.colliderml_regr.sam import SAM
 
 
+class _GradScale(torch.autograd.Function):
+    """Identity in forward, scalar multiply in backward.
+
+    Used to dampen the d0 branch's gradient contribution on the shared
+    encoder's ``pooled`` output so the DFL cross-entropy does not dominate
+    the shared trunk update (see ``TrackParameterRegressor.d0_grad_scale``).
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor, scale: float) -> Tensor:
+        ctx.scale = float(scale)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor):
+        return grad_out * ctx.scale, None
+
+
 # ============================================================================
 # Fourier encoding
 # ============================================================================
@@ -239,6 +257,26 @@ class TrackParameterRegressor(nn.Module):
         # the other four heads is untouched.  Requires d0 to be first in
         # loss_module.parameter_order.
         separate_d0_head: bool = False,
+        # When separate_d0_head=True, multiply the gradient that flows from
+        # the d0 branch back into the shared encoder's pooled output by this
+        # scalar.  Forward pass is unaffected.  Set < 1.0 to dampen DFL's
+        # dominance on the shared trunk (CLAUDE.md Open Issue #3: d0's
+        # cross-entropy trunk gradient is empirically 24-150x the continuous
+        # regression heads'); matches the "GradNorm-lite" fix option (b)
+        # without the EMA bookkeeping.  Default 1.0 is a no-op.
+        d0_grad_scale: float = 1.0,
+        # Bypass the post-pool projection (`pool_head` and, when
+        # ``separate_d0_head`` is also enabled, ``d0_pool_head``).  These
+        # Dense projections were originally introduced to attenuate large
+        # bf16 gradients flowing from the encoder into the regression heads
+        # (see `_pool_head` history).  Under ``encoder_autocast_dtype: float32``
+        # that justification is gone and the projection only adds capacity
+        # loss between the SSM-CLS pooled summary and the output heads.  When
+        # ``True``, both pool projections are replaced by ``nn.Identity()``
+        # and the output heads consume the raw pooled vector ((B, 2*dim) for
+        # ssm_cls, (B, dim) for register_token).  No effect for
+        # pool='ssm_state' since that path already has no shared pool_head.
+        disable_main_pool_head: bool = False,
     ):
         super().__init__()
 
@@ -325,27 +363,40 @@ class TrackParameterRegressor(nn.Module):
             self.per_dir_dim = None
             self.fwd_head = None
             self.bwd_head = None
-            self.pool_head = Dense(
-                input_size=2 * dim,
-                output_size=state_head_output_dim,
-                hidden_layers=state_head_hidden_layers,
-                dropout=state_head_dropout,
-                activation=self._resolve_activation(state_head_activation),
-            )
-            output_head_input_dim = state_head_output_dim
+            if disable_main_pool_head:
+                self.pool_head = nn.Identity()
+                output_head_input_dim = 2 * dim
+            else:
+                self.pool_head = Dense(
+                    input_size=2 * dim,
+                    output_size=state_head_output_dim,
+                    hidden_layers=state_head_hidden_layers,
+                    dropout=state_head_dropout,
+                    activation=self._resolve_activation(state_head_activation),
+                )
+                output_head_input_dim = state_head_output_dim
         elif pool == "register_token":
-            # Single learned register token → (B, dim).
+            # One or more learned register tokens.  The encoder optionally
+            # exposes ``pool_dim`` = num_register_tokens * dim
+            # (``EncoderWithCLS`` does so).  Fall back to ``dim`` for
+            # encoders that don't expose it — preserves the original
+            # 1-register behaviour for any legacy encoder.
             self.per_dir_dim = None
             self.fwd_head = None
             self.bwd_head = None
-            self.pool_head = Dense(
-                input_size=dim,
-                output_size=state_head_output_dim,
-                hidden_layers=state_head_hidden_layers,
-                dropout=state_head_dropout,
-                activation=self._resolve_activation(state_head_activation),
-            )
-            output_head_input_dim = state_head_output_dim
+            pool_in_dim = int(getattr(encoder, "pool_dim", dim))
+            if disable_main_pool_head:
+                self.pool_head = nn.Identity()
+                output_head_input_dim = pool_in_dim
+            else:
+                self.pool_head = Dense(
+                    input_size=pool_in_dim,
+                    output_size=state_head_output_dim,
+                    hidden_layers=state_head_hidden_layers,
+                    dropout=state_head_dropout,
+                    activation=self._resolve_activation(state_head_activation),
+                )
+                output_head_input_dim = state_head_output_dim
         else:  # unreachable — guarded above
             raise ValueError(f"Unknown pool '{pool}'")
 
@@ -354,6 +405,7 @@ class TrackParameterRegressor(nn.Module):
         # branch off the shared encoder so classification-style DFL
         # gradients never touch the shared pool_head / main output_head.
         self.separate_d0_head = bool(separate_d0_head)
+        self.d0_grad_scale = float(d0_grad_scale)
         if self.separate_d0_head:
             if pool != "ssm_cls":
                 raise NotImplementedError(
@@ -376,16 +428,24 @@ class TrackParameterRegressor(nn.Module):
             self._d0_output_dim = d0_end - d0_start
             self._reg_output_dim = loss_module.total_outputs - self._d0_output_dim
             # Parallel pool_head for d0 — same spec as the main pool_head.
-            self.d0_pool_head = Dense(
-                input_size=2 * dim,
-                output_size=state_head_output_dim,
-                hidden_layers=state_head_hidden_layers,
-                dropout=state_head_dropout,
-                activation=self._resolve_activation(state_head_activation),
-            )
+            # When `disable_main_pool_head` is True, also bypass this one for
+            # consistency: the d0 branch under fp32 training does not need
+            # the bf16 gradient-attenuation projection either.
+            if disable_main_pool_head:
+                self.d0_pool_head = nn.Identity()
+                d0_output_head_input_dim = 2 * dim
+            else:
+                self.d0_pool_head = Dense(
+                    input_size=2 * dim,
+                    output_size=state_head_output_dim,
+                    hidden_layers=state_head_hidden_layers,
+                    dropout=state_head_dropout,
+                    activation=self._resolve_activation(state_head_activation),
+                )
+                d0_output_head_input_dim = state_head_output_dim
             # Parallel output head that emits only d0's slice.
             self.d0_output_head = Dense(
-                input_size=state_head_output_dim,
+                input_size=d0_output_head_input_dim,
                 output_size=self._d0_output_dim,
                 hidden_layers=output_head_hidden_layers,
                 dropout=output_head_dropout,
@@ -512,7 +572,11 @@ class TrackParameterRegressor(nn.Module):
         # DFL gradient on d0 bypasses the shared pool_head + output_head.
         pred_reg = self.output_head(z)
         if self.separate_d0_head:
-            z_d0 = self.d0_pool_head(pooled)
+            if self.d0_grad_scale != 1.0:
+                pooled_for_d0 = _GradScale.apply(pooled, self.d0_grad_scale)
+            else:
+                pooled_for_d0 = pooled
+            z_d0 = self.d0_pool_head(pooled_for_d0)
             pred_d0 = self.d0_output_head(z_d0)
             pred = torch.cat([pred_d0, pred_reg], dim=-1)
         else:
@@ -554,6 +618,242 @@ class TrackParameterRegressor(nn.Module):
 
 
 # ============================================================================
+# Twin-encoder d0 classifier (separate encoders for core / tail + router)
+# ============================================================================
+
+
+class TwinEncoderD0Classifier(nn.Module):
+    """Two encoders × two range-specialised classifier heads + a router.
+
+    Architecture
+    ------------
+    input_net (shared)
+      │
+      ├─► encoder_inner → pooled_inner (B, 2·dim) ─► pool_head_inner ─► inner_output_head (K_inner classes)
+      │
+      ├─► encoder_outer → pooled_outer (B, 2·dim) ─► pool_head_outer ─► outer_output_head (K_outer classes)
+      │
+      └─► router_head( cat(pooled_inner.detach(), pooled_outer.detach()) ) ─► (B, 2) binary logits
+
+    Output layout of ``pred`` matches
+    :class:`RangeSplitClassificationLoss`: ``[K_inner | K_outer | 2]`` so the
+    same loss handles mask-based teacher forcing + argmax routing at
+    inference.  Stop-grad on the router input means DFL-classifier gradients
+    never reach either encoder through the router path — the router is
+    trained purely by its own supervised binary CE on ``|truth_d0| > split``.
+
+    Parameters
+    ----------
+    encoder_inner, encoder_outer : nn.Module
+        Two ``BidirectionalMambaCLSEncoder`` instances; each must have
+        ``pool == 'ssm_cls'`` semantics (pool returns ``(B, 2·dim)``).
+    loss_module : TrackParameterLoss
+        Must have exactly one parameter ``d0`` configured with
+        ``type: range_split_classification``.  The k_inner / k_outer there
+        determine the head widths here.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        dim: int,
+        encoder_inner: nn.Module,
+        encoder_outer: nn.Module,
+        loss_module: TrackParameterLoss,
+        # Input embedding
+        input_net_hidden_layers: int | list[int] | None = 0,
+        input_net_dropout: float = 0.0,
+        input_net_activation: str = "SiLU",
+        # Per-encoder pool/head sizing
+        pool_head_output_dim: int = 128,
+        pool_head_hidden_layers: int | list[int] | None = 0,
+        pool_head_dropout: float = 0.0,
+        pool_head_activation: str = "SiLU",
+        output_head_hidden_layers: int | list[int] | None = 0,
+        output_head_dropout: float = 0.0,
+        output_head_activation: str = "SiLU",
+        output_head_init_scale: float = 1.0,
+        # Router sizing
+        router_hidden_layers: int | list[int] | None = None,
+        router_dropout: float = 0.0,
+        # Data / preprocessing
+        input_fields: list[str] | None = None,
+        sort_field: str = "s",
+        fourier_scales: list[int] | None = None,
+        fourier_base: int = 3,
+        norm_min: list[float] | None = None,
+        norm_max: list[float] | None = None,
+        encoder_autocast_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16",
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.dim = dim
+        self.input_fields = input_fields or []
+        self.encoder_autocast_dtype = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }[encoder_autocast_dtype]
+
+        self.fourier_scales = fourier_scales if fourier_scales is not None else [-3, -2, -1, 0, 1, 2, 3]
+        self.fourier_base = fourier_base
+        fourier_dim = input_dim * 2 * len(self.fourier_scales)
+
+        if norm_min is not None and norm_max is not None:
+            self.register_buffer("norm_min", torch.tensor(norm_min, dtype=torch.float32))
+            self.register_buffer("norm_max", torch.tensor(norm_max, dtype=torch.float32))
+            self.use_norm = True
+        else:
+            self.use_norm = False
+
+        # Shared input embedding.  Both encoders see the same per-hit
+        # representation — they differentiate via their own weights.
+        self.input_net = Dense(
+            input_size=fourier_dim,
+            output_size=dim,
+            hidden_layers=input_net_hidden_layers,
+            dropout=input_net_dropout,
+            activation=self._resolve_activation(input_net_activation),
+        )
+
+        self.encoder_inner = encoder_inner
+        self.encoder_outer = encoder_outer
+        self.loss_module = loss_module
+
+        # Validate the loss is the range-split classifier and extract K_inner / K_outer
+        from hepattn.experiments.colliderml_regr.losses import RangeSplitClassificationLoss
+        if loss_module.parameter_order != ["d0"]:
+            raise ValueError(
+                f"TwinEncoderD0Classifier requires parameter_order=['d0']; "
+                f"got {loss_module.parameter_order}"
+            )
+        d0_loss = loss_module.losses["d0"]
+        if not isinstance(d0_loss, RangeSplitClassificationLoss):
+            raise TypeError(
+                "TwinEncoderD0Classifier requires the d0 loss to be "
+                f"RangeSplitClassificationLoss; got {type(d0_loss).__name__}"
+            )
+        self.k_inner = d0_loss.k_inner
+        self.k_outer = d0_loss.k_outer
+
+        # Per-encoder pool heads (reduce 2·dim → pool_head_output_dim).
+        self.pool_head_inner = Dense(
+            input_size=2 * dim,
+            output_size=pool_head_output_dim,
+            hidden_layers=pool_head_hidden_layers,
+            dropout=pool_head_dropout,
+            activation=self._resolve_activation(pool_head_activation),
+        )
+        self.pool_head_outer = Dense(
+            input_size=2 * dim,
+            output_size=pool_head_output_dim,
+            hidden_layers=pool_head_hidden_layers,
+            dropout=pool_head_dropout,
+            activation=self._resolve_activation(pool_head_activation),
+        )
+
+        # Final classification heads per encoder.
+        self.output_head_inner = Dense(
+            input_size=pool_head_output_dim,
+            output_size=self.k_inner,
+            hidden_layers=output_head_hidden_layers,
+            dropout=output_head_dropout,
+            activation=self._resolve_activation(output_head_activation),
+        )
+        self.output_head_outer = Dense(
+            input_size=pool_head_output_dim,
+            output_size=self.k_outer,
+            hidden_layers=output_head_hidden_layers,
+            dropout=output_head_dropout,
+            activation=self._resolve_activation(output_head_activation),
+        )
+
+        # Router head — reads concat of the TWO encoders' pooled outputs with
+        # stop-grad applied (see forward), so gradients don't propagate back.
+        router_hidden = router_hidden_layers if router_hidden_layers is not None else [128]
+        self.router_head = Dense(
+            input_size=4 * dim,  # cat of pooled_inner (2·dim) + pooled_outer (2·dim)
+            output_size=2,
+            hidden_layers=router_hidden,
+            dropout=router_dropout,
+            activation=self._resolve_activation(output_head_activation),
+        )
+
+        # Scale down final classification weights for near-zero initial logits.
+        if output_head_init_scale != 1.0:
+            for head in (self.output_head_inner, self.output_head_outer, self.router_head):
+                last = head.net[-1]
+                assert isinstance(last, nn.Linear)
+                with torch.no_grad():
+                    last.weight.mul_(output_head_init_scale)
+                    if last.bias is not None:
+                        last.bias.zero_()
+
+    # Reuse the class activation resolver from TrackParameterRegressor so
+    # the activation map (silu/gelu/swiglu/...) is single-source-of-truth.
+    _resolve_activation = staticmethod(TrackParameterRegressor._resolve_activation)
+
+    def _normalise(self, x: Tensor) -> Tensor:
+        if not self.use_norm:
+            return x
+        span = (self.norm_max - self.norm_min).clamp(min=1e-8)
+        return (x - self.norm_min) / span
+
+    def forward(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        x = inputs["hit_features"]
+        s = inputs["hit_s"]
+        seq_idx = inputs.get("seq_idx")
+
+        x = self._normalise(x)
+        x = fourier_encode(x, self.fourier_scales, self.fourier_base)
+        x = self.input_net(x)
+
+        use_autocast = self.encoder_autocast_dtype != torch.float32
+        with torch.amp.autocast(
+            device_type="cuda",
+            dtype=self.encoder_autocast_dtype,
+            enabled=use_autocast,
+        ):
+            _, pooled_inner = self.encoder_inner(x, x_sort_value=s, seq_idx=seq_idx)
+            _, pooled_outer = self.encoder_outer(x, x_sort_value=s, seq_idx=seq_idx)
+
+        # Cast pooled summaries back to fp32 for the heads.
+        pooled_inner = pooled_inner.to(torch.float32)
+        pooled_outer = pooled_outer.to(torch.float32)
+
+        # Inner head (core, K_inner bins) — only the inner encoder feeds it.
+        z_inner = self.pool_head_inner(pooled_inner)
+        inner_logits = self.output_head_inner(z_inner)
+
+        # Outer head (tail, K_outer bins) — only the outer encoder feeds it.
+        z_outer = self.pool_head_outer(pooled_outer)
+        outer_logits = self.output_head_outer(z_outer)
+
+        # Router — sees both pooled summaries but with stop-grad so its
+        # gradient does not flow into either encoder.
+        router_in = torch.cat([pooled_inner.detach(), pooled_outer.detach()], dim=-1)
+        router_logits = self.router_head(router_in)
+
+        pred = torch.cat([inner_logits, outer_logits, router_logits], dim=-1)
+        return {"pred": pred, "hidden_state": (pooled_inner, pooled_outer)}
+
+    def predict(self, outputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        return self.loss_module.predict(outputs["pred"])
+
+    def compute_loss(
+        self,
+        outputs: dict[str, Tensor],
+        targets: dict[str, Tensor],
+        valid_mask: Tensor | None = None,
+        trim_mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        return self.loss_module(
+            outputs["pred"], targets, valid_mask=valid_mask, trim_mask=trim_mask
+        )
+
+
+# ============================================================================
 # LightningModule wrapper
 # ============================================================================
 
@@ -575,7 +875,7 @@ class TrackRegressionWrapper(LightningModule):
 
     def __init__(
         self,
-        model: TrackParameterRegressor,
+        model: nn.Module,  # TrackParameterRegressor or TwinEncoderD0Classifier (any module exposing forward / predict / compute_loss / loss_module)
         lrs_config: dict[str, Any],
         optimizer: Literal["AdamW", "Lion", "MuonHybrid"] = "AdamW",
         name: str = "TrackRegression",

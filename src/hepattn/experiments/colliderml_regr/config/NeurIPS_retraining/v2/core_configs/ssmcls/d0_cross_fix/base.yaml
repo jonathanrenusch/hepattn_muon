@@ -89,6 +89,7 @@ model:
       #   SSM         (BidirectionalMambaEncoder)       → ssm_state
       #   SSM-CLS     (BidirectionalMambaCLSEncoder)    → ssm_cls
       #   Transformer (EncoderWithCLS)                  → register_token
+      pool: ssm_state
       encoder_autocast_dtype: bfloat16
       # Per-direction state projection heads (only consumed when pool == ssm_state)
       state_head_output_dim: 128
