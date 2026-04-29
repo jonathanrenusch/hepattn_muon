@@ -359,6 +359,58 @@ The legacy short-form names (`ssmcls_q7_p0pretrain_zeroshot_7972d00d_ep49`)
 remain valid — both coexist under the same root. Use the new convention
 for any new bundle going forward.
 
+**One pipeline per GPU — do not co-locate (UPDATED 2026-04-29).** When
+launching multiple paper_plots pipelines in parallel, give each one its
+own `CUDA_VISIBLE_DEVICES=<gpu>` and `--gpu <gpu>`. Co-locating two
+inference jobs on a single GPU (e.g. running 57dabaab and ac72e5c9 both
+on `CUDA_VISIBLE_DEVICES=1` while a training job already sits there)
+serializes the work via the CUDA scheduler — both pipelines finish later
+than if each had its own card. A 4× H100 box can run 4 cli.py jobs in
+true parallel without contention; only fall back to sharing a GPU if you
+genuinely have more bundles than free cards. The `launch_parallel*.sh`
+scripts already follow this rule (one row per GPU); preserve it when
+editing the `RUNS=(...)` array.
+
+**One pipeline per bundle dir — kill duplicates.** Spawning two cli.py
+processes for the same `<nicename>` causes them to race on the same
+output files (`bundle.metadata.yaml`, `stats.json`, plot PDFs/PNGs). The
+runs technically finish but the resulting bundle is non-deterministic and
+plot dirs can end up half-written. Always `pgrep -af paper_plots.cli`
+before launching, and `kill` your own newer launches if a parallel script
+already has one running for the same bundle.
+
+**fp32 backbone inference: SSM vs Transformer asymmetry (2026-04-29).**
+For fair "fp32 backbone" eval against the SSM-CLS rows, the model
+architectures need different overrides:
+
+- **SSM-CLS / SSM-state**: just flip `encoder_autocast_dtype: bfloat16
+  → float32`. The Mamba-2 selective-scan kernel handles fp32 natively.
+- **Transformer (`TXF-*`)**: `encoder_autocast_dtype: float32` alone
+  raises `RuntimeError: FlashAttention only support fp16 and bf16
+  data type`. You must ALSO change `attn_type: flash-varlen → torch`
+  to fall back to the PyTorch SDPA backend, which supports fp32.
+  Result: noticeably slower than the bf16 flash-varlen baseline, but
+  it actually runs and produces a valid 5-param h5.
+
+Workflow when re-running an existing run with fp32 override:
+1. `mv <run-dir>/<best>__test_predictions.h5 <...>__test_predictions__bf16.h5`
+   to preserve the historical bf16 result.
+2. `cp <run-dir>/config.yaml /tmp/<runhash8>_fp32.yaml` and `sed` both
+   the dtype and (for transformers) the `attn_type`.
+3. `pixi run python train.py test --config /tmp/<runhash8>_fp32.yaml ...`
+   (cli.py's inference helper hardcodes the run-dir config; bypassing it
+   with a manual `train.py test` is required).
+4. Then `cli.py --skip-inference` to build the bundle on top of the new
+   h5. Use a `__fp32backbone` suffix in the nicename to mark it.
+
+**Foot-gun.** When killing a bf16 inference to swap in fp32, do NOT
+`kill <pid>` the orphan python child by guessing PIDs — use the exact
+PID from the pixi `train.py test` parent's process tree, or you may
+sigterm a freshly-spawned fp32 python process by accident (this happened
+once; the surviving processes wrote empty h5s with `preds: {}` because
+the test loop never ran). `pgrep -af "train.py.*test.*<run-dir>"`
+gives an unambiguous list scoped to the run id.
+
 ## Paper-plot pipeline (NeurIPS submission)
 
 **One unified entry-point for every paper figure + a self-contained

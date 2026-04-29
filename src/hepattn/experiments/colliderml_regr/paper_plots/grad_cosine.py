@@ -15,7 +15,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
-from . import PAPER_PLOTS_ROOT
+from . import DATA_DIR, PAPER_PLOTS_ROOT
 
 
 SCRIPT = Path(
@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--nicename", required=True)
     p.add_argument("--output-root", default=str(PAPER_PLOTS_ROOT))
+    p.add_argument("--data-dir", default=str(DATA_DIR))
     p.add_argument("--n-batches", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--gpu", type=int, default=0)
@@ -39,17 +40,19 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = bundle / "config.yaml"
     ckpt = bundle / "best.ckpt"
-    out_dir = bundle / "plots"
     summary_dir = bundle  # grad_cosine_summary.txt at top level of bundle
 
     if not SCRIPT.exists():
         raise SystemExit(f"reference script not found: {SCRIPT}")
 
+    grad_dir = bundle / "grad_cos"
+    grad_dir.mkdir(exist_ok=True)
     cmd = [
         "pixi", "run", "python", str(SCRIPT),
         "--config", str(cfg),
         "--ckpt", str(ckpt),
-        "--output-dir", str(out_dir),
+        "--data-dir", str(args.data_dir),
+        "--output-dir", str(grad_dir),
         "--n-batches", str(args.n_batches),
         "--batch-size", str(args.batch_size),
     ]
@@ -59,11 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     if rc != 0:
         raise SystemExit(f"gradient_cosine_analysis.py failed rc={rc}")
 
-    # If the upstream script wrote a summary.txt next to the plots, mirror it
-    src_summary = out_dir / "summary.txt"
+    # Mirror the summary.txt to bundle root for visibility
+    src_summary = grad_dir / "summary.txt"
     if src_summary.exists():
         (summary_dir / "grad_cosine_summary.txt").write_text(src_summary.read_text())
-    print(f"[grad_cosine] wrote into {bundle}")
+    print(f"[grad_cosine] wrote into {grad_dir}")
     return 0
 
 

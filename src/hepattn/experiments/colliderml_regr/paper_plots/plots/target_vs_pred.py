@@ -19,12 +19,13 @@ from hepattn.experiments.colliderml_regr.eval_utils import (
 from .. import save_fig
 from ._panels import fill_eta_stephist, make_grid
 
+# Same selection-cut bounds as the heatmaps (loss norm_min/max).
 RANGES = {
-    "d0": (-2.5, 2.5),
-    "z0": (-200.0, 200.0),
-    "phi": (-np.pi, np.pi),
+    "d0":    (-2.5, 2.5),
+    "z0":    (-200.0, 200.0),
+    "phi":   (-np.pi, np.pi),
     "theta": (0.0, np.pi),
-    "qop": (-0.7, 0.7),
+    "qop":   (-2.0, 2.0),
 }
 
 
@@ -32,12 +33,13 @@ def _draw_one(ax, truth, pred, p):
     lo, hi = RANGES[p]
     bins = np.linspace(lo, hi, 121)
     ax.hist(truth, bins=bins, histtype="stepfilled", alpha=0.35, color="0.4",
-            label="Truth", density=True)
+            label="Truth")
     ax.hist(pred, bins=bins, histtype="step", linewidth=1.6, color="C0",
-            label="SSM prediction", density=True)
+            label="SSM prediction")
     ax.set_xlabel(PARAM_VALUE_LABELS[p])
-    ax.set_ylabel("density")
-    ax.set_yscale("log")
+    ax.set_ylabel("tracks / bin")
+    if p == "d0":
+        ax.set_yscale("log")
     ax.set_title(p)
 
 

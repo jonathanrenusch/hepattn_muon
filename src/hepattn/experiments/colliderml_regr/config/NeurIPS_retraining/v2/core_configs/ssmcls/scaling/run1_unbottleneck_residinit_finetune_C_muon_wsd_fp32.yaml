@@ -1,14 +1,11 @@
 # =============================================================================
-# Run A (ssmcls) — AdamW + WSD fine-tune on p200_core, fp32 encoder.
+# Run C finetune on the run1_unbottleneck_residinit pretrain.
+# Muon (2-D weights) + AdamW (1-D weights) hybrid + WSD on p200_core_kf_matched,
+# fp32 encoder.
 # =============================================================================
-# Pair to ssmcls_q7_finetune_muon_wsd_fp32.yaml (Run C) and
-# ssmcls_q7_finetune_B_lion_wsd_fp32.yaml (Run B): same architecture,
-# checkpoint, schedule shape, dataset, batch size, epoch budget — only the
-# optimizer family / LR / WD differs.
-# Mirrors ssm/ssm_q7_finetune_A_adamw_wsd.yaml on the CLS backbone.
-# Tests whether an optimizer-family switch (Lion → AdamW) under WSD with
-# 2× pretrain peak LR + Lion-compatible WD beats Lion continuation and
-# Muon hybrid on the CLS-pool variant.
+# See run1_unbottleneck_residinit_finetune_A_adamw_wsd_fp32.yaml for the four
+# pretrain quirks reproduced here. Same architecture/checkpoint/dataset/BS as
+# Runs A/B — only the optimizer family / LR / WD differs.
 # =============================================================================
 
 trainer:
@@ -21,7 +18,7 @@ trainer:
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
     init_args:
-      name: TRK-v2-SSMCLS-Q7-A-AdamW-WSD-FP32-finetune
+      name: TRK-v2-SSMCLS-Q7-unbottleneck-residinit-C-MuonHybrid-WSD-FP32-finetune
       project_name: colliderml-track-regression
       offline_directory: logs/comet_offline
   callbacks:
@@ -30,6 +27,14 @@ trainer:
       init_args:
         log_every_n_steps: 50
         log_parameter_stats: false
+        log_layer_stats: true
+        log_output_head_per_dim: true
+        output_head_param_groups:
+          d0: [0, 7]
+          z0: [7, 14]
+          phi: [14, 16]
+          theta: [16, 23]
+          qop: [23, 30]
     - class_path: hepattn.experiments.colliderml_regr.callbacks.MinimalGpuMonitor
       init_args:
         log_every_n_steps: 50
@@ -54,29 +59,30 @@ trainer:
         check_on_train_epoch_end: false
 
 model:
-  pretrained_ckpt_path: /shared/tracking/hepattn_muon/src/logs/comet_offline/ea2d9fba5fab4dd0bbc095e3246bba0d/ckpts/epoch=048-val_total=0.00685.ckpt
-  optimizer: AdamW
+  # TODO: replace with the converged run1_unbottleneck_residinit pretrain
+  # checkpoint once it lands (training is running overnight 2026-04-29).
+  pretrained_ckpt_path: TODO_FILL_IN_AFTER_PRETRAIN_CONVERGES
+  optimizer: MuonHybrid
   lrs_config:
     schedule: wsd
-    initial: 5.0e-06       # start of warmup (halved from 1e-5)
-    max: 5.0e-05           # halved from 1e-4 — plateau-stuck val/total in earlier
-                           # run cliff-dropped only in cooldown, peak was too high
+    initial: 5.0e-06       # halved from 1e-5
+    max: 5.0e-05           # halved from 1e-4 (AdamW group)
     end: 2.5e-06           # halved from 5e-6
-    pct_start: 0.02        # 2% warmup
-    decay_pct: 0.5         # 50% cosine cooldown — give the productive decay
-                           # phase real budget instead of an 8-epoch tail
-    weight_decay: 0.02     # Lion-checkpoint-compatible (default AdamW WD would disturb)
+    weight_decay: 0.02
     betas: [0.9, 0.95]
+    muon_max: 1.5e-04      # halved from 3e-4 (Muon group)
+    muon_weight_decay: 0.0
+    muon_momentum: 0.95
+    muon_ns_steps: 5
+    pct_start: 0.02
+    decay_pct: 0.5         # 50% cosine cooldown
     skip_scheduler: false
 
   model:
     init_args:
-      pool: ssm_cls
-      dim: 192
-      input_net_hidden_layers: [192]
-      output_head_hidden_layers: [256]
-      output_head_init_scale: 0.01
-      encoder_autocast_dtype: float32
+      state_head_output_dim: 384
+      state_head_hidden_layers: 0
+      state_head_dropout: 0.0
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
@@ -90,6 +96,7 @@ model:
           chunk_size: 16
           norm: RMSNorm
           dropout: 0.0
+          residual_depth_init: true
       loss_module:
         class_path: hepattn.experiments.colliderml_regr.losses.TrackParameterLoss
         init_args:

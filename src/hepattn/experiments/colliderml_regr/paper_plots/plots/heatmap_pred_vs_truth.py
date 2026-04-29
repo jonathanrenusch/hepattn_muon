@@ -8,6 +8,8 @@ import numpy as np
 from matplotlib.colors import LogNorm
 
 from hepattn.experiments.colliderml_regr.eval_utils import (
+    FULL_RANGE_PARAMS,
+    HEATMAP_RANGE as EVAL_HEATMAP_RANGE,
     PARAMS,
     PARAM_VALUE_LABELS,
 )
@@ -15,17 +17,35 @@ from hepattn.experiments.colliderml_regr.eval_utils import (
 from .. import save_fig
 from ._panels import fill_eta_stephist, make_grid
 
-HEATMAP_RANGE = {
-    "d0": (-1.0, 1.0),
-    "z0": (-100.0, 100.0),
-    "phi": (-np.pi, np.pi),
-    "theta": (0.2, np.pi - 0.2),
-    "qop": (-0.5, 0.5),
-}
+# Limits follow the original `evaluate_tail_diagnostics.py` convention:
+#   * d0 → hard ±2.5 mm (FULL_RANGE_PARAMS / HEATMAP_RANGE in eval_utils.py)
+#   * everything else → 0.5–99.5 percentile of pooled (truth, pred), so
+#     ~99 % of the joint distribution sets the axis and the figure
+#     "comfortably fills the full range" (matches the original eval plots).
+
+
+def _resolve_range(truth: np.ndarray, pred: np.ndarray, p: str) -> tuple[float, float]:
+    """Limits:
+
+      * d0 in EVAL_HEATMAP_RANGE → hard ±2.5 mm (matches eval_utils convention).
+      * other params → 0.5–99 percentile of **TRUTH only** so the data fills
+        the plot.  Earlier attempts that pooled (truth, pred) get pulled wide
+        by sparse model outliers (e.g. qop pred reaches ±2.3 with O(100) tracks)
+        leaving the dense ridge looking shrunken.  Truth-only honours the
+        physical envelope.
+    """
+    if p in EVAL_HEATMAP_RANGE:
+        return EVAL_HEATMAP_RANGE[p]
+    if p in FULL_RANGE_PARAMS:
+        return (float(min(truth.min(), pred.min())),
+                float(max(truth.max(), pred.max())))
+    lo = float(np.percentile(truth, 0.5))
+    hi = float(np.percentile(truth, 99.5))
+    return lo, hi
 
 
 def _draw_one(ax, truth, pred, p, *, with_colorbar=True, fig=None):
-    lo, hi = HEATMAP_RANGE[p]
+    lo, hi = _resolve_range(truth, pred, p)
     bins = np.linspace(lo, hi, 121)
     H, xe, ye = np.histogram2d(truth, pred, bins=[bins, bins])
     pc = ax.pcolormesh(xe, ye, H.T,

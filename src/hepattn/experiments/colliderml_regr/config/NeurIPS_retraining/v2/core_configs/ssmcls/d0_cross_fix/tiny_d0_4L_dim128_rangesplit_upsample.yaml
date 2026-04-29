@@ -21,8 +21,8 @@
 # =============================================================================
 
 trainer:
-  devices: [2]
-  max_epochs: 25
+  devices: [0]
+  max_epochs: 50
   precision: bf16-mixed
   logger:
     class_path: hepattn.utils.loggers.MyCometLogger
@@ -74,7 +74,7 @@ model:
       encoder:
         class_path: hepattn.experiments.colliderml_regr.mamba_cls.BidirectionalMambaCLSEncoder
         init_args:
-          num_layers: 4
+          num_layers: 8
           dim: 128
           d_state: 16
           d_conv: 4

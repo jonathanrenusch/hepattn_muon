@@ -58,11 +58,15 @@ model:
   optimizer: Lion
   lrs_config:
     schedule: wsd
-    initial: 3.0e-06       # 10% of peak
-    max: 3.0e-05           # 0.6× pretrain peak (5e-5); BS 22k well past Lion's critical batch
-    end: 1.0e-06
+    initial: 1.5e-06       # 10% of peak (halved from 3e-6)
+    max: 1.5e-05           # halved from 3e-5 — plateau-stuck val/total in earlier
+                           # run cliff-dropped only in cooldown; this also moves
+                           # below pretrain Lion peak (5e-5), appropriate for
+                           # continuing in-basin under 4× DDP
+    end: 5.0e-07           # halved from 1e-6
     pct_start: 0.02        # 2% warmup
-    decay_pct: 0.15        # 15% cosine cooldown
+    decay_pct: 0.5         # 50% cosine cooldown — give the productive decay
+                           # phase real budget instead of an 8-epoch tail
     weight_decay: 1.0e-03  # matches pretrain Lion WD
     skip_scheduler: false
     # betas omitted → Lion default (0.9, 0.99)
