@@ -330,6 +330,150 @@ Comet-adjacent `src/logs/comet_offline/` for plots.
 pretrain-or-finetune, dataset, run-hash-prefix, epoch, and any caveat. E.g.
 `ssm_q7_pretrain_p200_zeroshot_ac72e5c9_epoch49_replot`.
 
+## Paper-plot bundle nicename convention (UPDATED 2026-04-29)
+
+**New convention** for `<nicename>` in `paper_plots/<nicename>/`:
+
+```
+<full-comet-experiment-name>__<runhash8>__ep<NN>
+```
+
+- `<full-comet-experiment-name>`: read verbatim from
+  `config.yaml -> trainer.logger.name` (the Comet `experiment_name`, e.g.
+  `TRK-v2-SSMCLS-Q7-A-AdamW-WSD-FP32-finetune`). Preserving this verbatim
+  is the whole point — it lets you keep ablations apart at a glance
+  without cross-referencing run hashes.
+- `<runhash8>`: first 8 hex chars of the Comet run id, disambiguates two
+  runs that share a Comet experiment name (e.g. re-launches).
+- `<NN>`: best ckpt epoch (zero-padded if you like).
+
+Example: `TRK-v2-SSMCLS-Q7-A-AdamW-WSD-FP32-finetune__5c455699__ep49`.
+
+The aggregator handles long names with hyphens/underscores fine: it sorts
+by `run_dir.name`, escapes `_` → `\_` for LaTeX (`aggregate.py:107`), and
+emits CSV/TeX rows keyed by the full nicename. Plot filenames are
+parameter-keyed (`heatmap_pred_vs_truth_d0_ssm.pdf` etc.) so they don't
+inherit the nicename and stay short.
+
+The legacy short-form names (`ssmcls_q7_p0pretrain_zeroshot_7972d00d_ep49`)
+remain valid — both coexist under the same root. Use the new convention
+for any new bundle going forward.
+
+## Paper-plot pipeline (NeurIPS submission)
+
+**One unified entry-point for every paper figure + a self-contained
+reproducibility bundle per run.** Lives at
+[paper_plots/](paper_plots/). All plots emit dual PDF (vector for LaTeX
+inclusion) + PNG. All summary metrics ship with bootstrap σ (NeurIPS
+checklist item: results reported with error bars).
+
+**Bundle layout** (`/shared/tracking/logs_Neurips/paper_plots/<nicename>/`):
+
+```
+<nicename>/
+  config.yaml                        # copied from comet log
+  source_metadata.yaml               # copied from comet log
+  metadata.yaml                      # bundle-level: run_id, ckpt path, d0_source_run_id, ablation_axes
+  best.ckpt                          # symlink to ckpts/<best>.ckpt
+  test_predictions.h5                # symlink to <best>__test_predictions.h5
+  d0_override.h5                     # symlink, only present if --d0-run-id was used
+  stats.txt                          # human-readable: pre-clip RMS / IQR / iter-3σ RMS / ratio table
+  stats.json                         # machine-readable, consumed by aggregate.py
+  plots/                                       # only paper-ready 2×3 summaries
+    target_vs_pred_summary.{pdf,png}                            # 5 params + |η| step hist
+    rms_vs_eta_summary.{pdf,png}                                # SSM vs CKF, pre+post-clip, bootstrap ±2σ band
+    heatmap_pred_vs_truth_summary_{ssm,ckf}.{pdf,png}
+    residual_vs_pt_summary_{ssm,ckf}.{pdf,png}                  # post iter-3σ
+    residual_hist_summary_{linear,logy}_{preclip,postclip}.{pdf,png}
+    individuals/                              # per-param singles, kept for appendix/debug
+      target_vs_pred_<param>.{pdf,png}
+      rms_vs_eta_<param>.{pdf,png}
+      heatmap_pred_vs_truth_<param>_{ssm,ckf}.{pdf,png}
+      residual_vs_pt_<param>_{ssm,ckf}.{pdf,png}
+      residual_hist_{linear,logy}_{preclip,postclip}_<param>.{pdf,png}
+```
+
+**Every 2×3 summary panel uses the same template:** 5 cells = the 5 perigee
+parameters; the 6th cell is the η step histogram of the DM track count for
+that bundle (so the panel doubles as a sanity check on the regime sample size
+and as a population reference for any kinematic interpretation downstream).
+
+**Run a single ablation:**
+```bash
+cd /shared/tracking/hepattn_muon
+pixi run python -m hepattn.experiments.colliderml_regr.paper_plots.cli \
+    --run-id   <comet-run-id> \
+    --nicename <arch>_<loss>_<dataset>_<runhash>_<epoch> \
+    [--d0-run-id da4a769796454b0f961eb9d3839094a1] \
+    [--ablation-axes pooling scaling] \
+    [--gpu 0] [--bootstrap-n 200] \
+    [--skip-inference]   # set when h5 already exists
+```
+The pipeline (a) ensures the `*__test_predictions.h5` exists (polls/spawns
+`train.py test`), (b) creates the bundle dir with config + ckpt + h5
+symlinks, (c) builds DM-regime SSM and CKF residuals via
+`eval_utils.load_acts_augmentation`, (d) computes **bootstrap 2σ (95% CI)**
+on raw std / IQR / iter-3σ RMS for each param + paired SSM/CKF ratios,
+(e) writes all default plots (paper summaries in `plots/`, per-param singles
+in `plots/individuals/`), (f) regenerates the cross-run summary tables.
+
+Every uncertainty in `stats.txt`, `stats.json`, `_summary/*.csv`, and the
+fill_between bands on η-binned plots is **2σ** (the bootstrap σ from the
+sampling distribution, multiplied by 2). NeurIPS checklist alignment.
+
+**4-GPU parallel launch:**
+```bash
+/shared/tracking/hepattn_muon/src/hepattn/experiments/colliderml_regr/paper_plots/launch_parallel.sh
+```
+Edit the `RUNS=(...)` array in that script for each new batch — one row per
+`(gpu, run_id, nicename, optional_d0_run_id, axis...)`. Aggregator runs
+once at the end across the whole tree.
+
+**Cross-run aggregator** (auto-runs at end of every `cli.py` invocation;
+also callable standalone):
+```bash
+pixi run python -m hepattn.experiments.colliderml_regr.paper_plots.aggregate
+```
+Walks `paper_plots/*/{stats.json, metadata.yaml}` and emits, into
+`paper_plots/_summary/`:
+- `all_runs.{tex,csv}` — every run, all 5 params, IQR + iter-3σ RMS + SSM/CKF ratio.
+- `ablation_<axis>.{tex,csv}` for each axis in
+  {pooling, transformer, finetune, scaling, d0_head, loss_design} —
+  populated by the `ablation_axes` list inside each run's
+  `metadata.yaml`. Empty axes still emit empty tables (LaTeX-include safe).
+A run can belong to multiple axes; tag at launch time with
+`--ablation-axes pooling scaling` or post-hoc by editing
+`<nicename>/metadata.yaml`.
+
+**d0 separate-model override:** pass `--d0-run-id <d0-only-run>` to
+overwrite `preds["d0"]` from a second h5 (other 4 params unchanged). The
+loader asserts identical `targets["d0"]` between the two h5s — guards
+against split mismatch. The bundle symlinks the d0 h5 as
+`d0_override.h5` so the override is auditable from the dir alone.
+
+**Gradient cosine-similarity** (separate command, optional, writes into
+the same nicename dir):
+```bash
+pixi run python -m hepattn.experiments.colliderml_regr.paper_plots.grad_cosine \
+    --nicename <same-nicename> [--n-batches 20] [--batch-size 2048]
+```
+Resolves `best.ckpt` + `config.yaml` from the bundle, runs the existing
+[scripts/gradient_cosine_analysis.py](scripts/gradient_cosine_analysis.py),
+writes `plots/grad_cosine_scores.{pdf,png}` + `grad_cosine_summary.txt`
+into the bundle.
+
+**Foot-guns:**
+- Inference still requires `num_workers=0` (per the inference foot-gun
+  above). The pipeline's spawned `train.py test` already passes this.
+- Bootstrap is the dominant cost: ~3 min/run at `--bootstrap-n 200` on
+  6.6 M tracks. Use `--bootstrap-n 50` during plot iteration; bump to
+  500 for final submission figures.
+- The aggregator regenerates *all* tables on every call — fine, since
+  reading 10 stats.json files is sub-second. No incremental logic.
+- Smoke-test pattern: `--skip-plots --bootstrap-n 30` finishes in ~70 s
+  and validates that h5 / DM mask / stats are correctly wired before
+  burning ~5 min on plots.
+
 ## Current results — SSM vs ACTS CKF
 
 Zero-shot inference on p200 (200-pileup). Core-selection + DM subset,
