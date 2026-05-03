@@ -82,7 +82,7 @@ trainer:
 model:
   # TODO: replace with the converged run1_unbottleneck_residinit pretrain
   # checkpoint once it lands (training is running overnight 2026-04-29).
-  pretrained_ckpt_path: TODO_FILL_IN_AFTER_PRETRAIN_CONVERGES
+  pretrained_ckpt_path: logs/comet_offline/f2f438ea8eec43f196d75638ebc248ff/ckpts/epoch=048-val_total=0.00112.ckpt
   optimizer: AdamW
   lrs_config:
     schedule: wsd

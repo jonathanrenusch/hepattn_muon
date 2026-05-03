@@ -29,10 +29,18 @@ def _resid_label(p: str) -> str:
     return rf"$\Delta {p}$ [{DISPLAY_UNIT[p]}]"
 
 
-def _draw_one(ax, pt, r, p, *, pt_edges, log_pt, fig=None):
+def _draw_one(ax, pt, r, p, *, pt_edges, log_pt, fig=None, ylim=None):
+    """If ``ylim`` is None, the y-window is the inner 95 % of the supplied
+    residual (per-panel auto-fit).  Pass an explicit ``(lo, hi)`` to
+    enforce a shared window — required for paired SSM/CKF singles that
+    will be placed side-by-side in the paper, so both panels share scale.
+    """
     scale = DISPLAY_SCALE[p]
     r_scaled = r * scale
-    lo, hi = np.percentile(r_scaled, [2.5, 97.5])
+    if ylim is None:
+        lo, hi = np.percentile(r_scaled, [2.5, 97.5])
+    else:
+        lo, hi = ylim
     res_edges = np.linspace(lo, hi, 121)
     H, xe, ye = np.histogram2d(pt, r_scaled, bins=[pt_edges, res_edges])
     pc = ax.pcolormesh(xe, ye, H.T,
@@ -73,12 +81,19 @@ def make(res: dict, plots_dir: Path) -> None:
         suffix = "logpt" if log_pt else "linpt"
         edges = PT_LOG_EDGES if log_pt else PT_LIN_EDGES
 
-        # Per-param singles for SSM and CKF
+        # Per-param singles for SSM and CKF.  Y-window is locked to the
+        # SSM inner-95 % so the two files share scale and can be placed
+        # side-by-side in the paper — CKF tails that exceed the SSM
+        # window fall off the figure (that's the intended visual: SSM's
+        # tail suppression is what drives the headline claim).
         for p in PARAMS:
+            ssm_scaled = res[f"ssm_{p}"] * DISPLAY_SCALE[p]
+            shared_ylim = tuple(np.percentile(ssm_scaled, [2.5, 97.5]))
             for who in ("ssm", "ckf"):
                 fig, ax = plt.subplots(figsize=(6.4, 4.6))
                 _draw_one(ax, pt, res[f"{who}_{p}"], p,
-                          pt_edges=edges, log_pt=log_pt, fig=fig)
+                          pt_edges=edges, log_pt=log_pt, fig=fig,
+                          ylim=shared_ylim)
                 ax.set_title(f"{who.upper()}: {p}")
                 save_fig(fig, individuals,
                          f"residual_vs_pt_{suffix}_{p}_{who}")
